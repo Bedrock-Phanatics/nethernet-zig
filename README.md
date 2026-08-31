@@ -12,8 +12,6 @@ The library includes:
 - ES384 identity tokens and detached DTLS fingerprint assertions.
 - Trickle ICE and complete-SDP (non-trickle) negotiation.
 
-> The upstream protocol is still under development. This package follows the behavior at upstream commit `90aaa31540eaa59bd759b8b00060c3a2f040ac57`.
-
 ## Build
 
 ```powershell
@@ -119,8 +117,6 @@ Exceeding an admission or packet-queue limit rejects the offer or closes the off
 ## Authentication
 
 Servers generate a short-lived self-signed P-384 identity by default. Client identity tokens can be supplied through `DialerOptions.Identity`. For authenticated servers, keep `AllowAnonymous` disabled and provide `ListenerOptions.VerifyClientToken`; the library separately verifies that the token's `cpk` key signed the negotiated DTLS fingerprint assertion.
-
-## Dependency note
 
 WebRTC transport is provided by SIPSorcery. Its current DCEP decoder does not expose incoming reliability fields, so incoming channels are classified using Minecraft's fixed `ReliableDataChannel` and `UnreliableDataChannel` labels. Outgoing channel parameters still match NetherNet.
 
