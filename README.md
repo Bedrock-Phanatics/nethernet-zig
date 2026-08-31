@@ -19,18 +19,6 @@ dotnet build NetherNet.slnx
 dotnet test NetherNet.slnx
 ```
 
-## Project layout
-
-- `src/NetherNet/` contains the public transport, signaling, identity, and option types.
-- `src/NetherNet/Discovery/` contains UDP discovery packets and server advertisements.
-- `src/NetherNet/Endpoint/` contains HTTP client/server signaling.
-- `src/NetherNet/Internal/` contains shared implementation details that are not public API.
-- `tests/NetherNet.Tests/` contains protocol, integration, endpoint, identity, and safety tests.
-
-Namespaces follow this directory structure. Public configuration records remain
-`init`-settable intentionally so callers can use object initializers without exposing
-mutable runtime state.
-
 ## LAN server
 
 ```csharp
