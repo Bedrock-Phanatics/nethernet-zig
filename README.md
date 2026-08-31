@@ -106,6 +106,8 @@ Exceeding an admission or packet-queue limit rejects the offer or closes the off
 
 Servers generate a short-lived self-signed P-384 identity by default. Client identity tokens can be supplied through `DialerOptions.Identity`. For authenticated servers, keep `AllowAnonymous` disabled and provide `ListenerOptions.VerifyClientToken`; the library separately verifies that the token's `cpk` key signed the negotiated DTLS fingerprint assertion.
 
+## TODO
+vulnerability checking
 WebRTC transport is provided by SIPSorcery. Its current DCEP decoder does not expose incoming reliability fields, so incoming channels are classified using Minecraft's fixed `ReliableDataChannel` and `UnreliableDataChannel` labels. Outgoing channel parameters still match NetherNet.
 
 Compact JWT and detached JWS signing and verification are provided by `jose-jwt`. Discovery encryption, UDP transport, HTTP signaling, JSON, and PKIX/JWK key handling use the .NET runtime libraries.
