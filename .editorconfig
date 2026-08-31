@@ -1,0 +1,72 @@
+root = true
+
+[*.cs]
+charset = utf-8
+end_of_line = crlf
+insert_final_newline = true
+indent_style = space
+indent_size = 4
+
+csharp_prefer_braces = true:warning
+csharp_style_namespace_declarations = file_scoped:warning
+dotnet_style_readonly_field = true:suggestion
+
+# Keep Rider's structural inspections aligned with the repository layout.
+resharper_check_namespace_highlighting = error
+resharper_statement_may_be_ambiguous_highlighting = warning
+resharper_empty_general_catch_clause_highlighting = warning
+
+# Protocol/API exceptions to optional "all rules" analysis:
+# - Wire DTO arrays and byte-backed enum values mirror NetherNet.
+# - AES-ECB is the protocol-defined discovery primitive, authenticated by HMAC.
+# - Public type names intentionally match the upstream NetherNet API.
+[src/NetherNet/Discovery/Packets.cs]
+dotnet_diagnostic.CA1819.severity = none
+dotnet_diagnostic.CA1308.severity = none
+dotnet_diagnostic.CA5358.severity = none
+
+[src/NetherNet/Discovery/ServerData.cs]
+dotnet_diagnostic.CA1027.severity = none
+
+[src/NetherNet/Discovery/DiscoveryListener.cs]
+dotnet_diagnostic.CA1308.severity = none
+
+[src/NetherNet/MessageReliability.cs]
+dotnet_diagnostic.CA1028.severity = none
+
+[src/NetherNet/IceServer.cs]
+resharper_class_never_instantiated_global_highlighting = none
+resharper_auto_property_can_be_made_get_only_global_highlighting = none
+
+[src/NetherNet/NetherNetConnection.cs]
+dotnet_diagnostic.CA1710.severity = none
+dotnet_diagnostic.CA2213.severity = none
+dotnet_diagnostic.CA1001.severity = none
+
+[src/NetherNet/Identity.cs]
+dotnet_diagnostic.CA1724.severity = none
+dotnet_diagnostic.CA2000.severity = none
+
+[src/NetherNet/Internal/WebRtcHelpers.cs]
+dotnet_diagnostic.CA2000.severity = none
+
+[src/NetherNet/Endpoint/EndpointHandler.cs]
+dotnet_diagnostic.CA2213.severity = none
+
+# These are intentional async/event exception boundaries. Exceptions are
+# translated into connection failure, protocol errors, or diagnostic traces.
+[src/NetherNet/Dialer.cs]
+dotnet_diagnostic.CA1031.severity = none
+dotnet_diagnostic.CA2025.severity = none
+
+[src/NetherNet/NetherNetListener.cs]
+dotnet_diagnostic.CA1031.severity = none
+dotnet_diagnostic.CA2000.severity = none
+dotnet_diagnostic.CA2025.severity = none
+
+# Test fixtures intentionally transfer ownership to the object under test and
+# exercise synchronous disposal. xUnit tests do not need ConfigureAwait(false).
+[tests/**/*.cs]
+dotnet_diagnostic.CA2000.severity = none
+dotnet_diagnostic.CA2007.severity = none
+dotnet_diagnostic.CA1849.severity = none
