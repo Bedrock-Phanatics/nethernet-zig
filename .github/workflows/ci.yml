@@ -1,0 +1,22 @@
+name: ci
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.16.0
+      - run: zig version
+      - run: zig fmt --check build.zig src tests bench
+      - run: zig build test
+      - run: zig build fuzz -Dfuzz-iterations=100000
+      - run: zig build -Doptimize=ReleaseSafe test
+      - run: zig build bench
