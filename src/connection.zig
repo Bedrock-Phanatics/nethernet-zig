@@ -138,7 +138,8 @@ pub const Connection = struct {
         defer self.allocator.free(terminated);
         if (!is_offer and !is_answer) return self.peer.remoteCandidate(terminated);
         if ((is_offer and self.role != .server) or (is_answer and self.role != .client)) return error.UnexpectedSignal;
-        const key = try auth.verify(self.allocator, signal.data, std.Io.Clock.real.now(self.io).toSeconds(), self.role == .client, self.options.verify_client);
+        const identity_kind: auth.IdentityKind = if (self.role == .client) .server else .client;
+        const key = try auth.verify(self.allocator, signal.data, std.Io.Clock.real.now(self.io).toSeconds(), identity_kind, self.options.verify_client);
         if (self.role == .server and key == null and !self.options.allow_anonymous) return error.IdentityNotAllowed;
         try self.peer.remoteDescription(terminated, if (is_offer) .offer else .answer);
         self.public_key = key;

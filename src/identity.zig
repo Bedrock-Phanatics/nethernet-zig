@@ -2,6 +2,8 @@ const std = @import("std");
 pub const Scheme = std.crypto.sign.ecdsa.EcdsaP384Sha384;
 const b64 = std.base64.url_safe_no_pad;
 pub const maximum_size = 1024 * 1024;
+pub const IdentityKind = enum { client, server };
+pub const server_iat_clock_skew_seconds: i64 = 60;
 const prefix = [_]u8{ 0x30, 0x76, 0x30, 0x10, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22, 0x03, 0x62, 0x00 };
 
 pub fn encode64(a: std.mem.Allocator, data: []const u8) ![]u8 {
@@ -92,25 +94,37 @@ pub fn serverToken(a: std.mem.Allocator, key: Scheme.KeyPair, now: i64) ![]u8 {
     return sign(a, key, header, claims, false);
 }
 
-/// Validates time claims and cpk. For issuer-signed client tokens, callers must
-/// verify the issuer separately; self_signed=false does not authenticate issuers.
-pub fn claimPublicKey(a: std.mem.Allocator, token: []const u8, now: i64, self_signed: bool) !Scheme.PublicKey {
+/// Validates a token and extracts its cpk. Client identities retain normal JWT
+/// temporal validation. Server identities intentionally bypass exp/nbf to match
+/// Bedrock, but require a bounded iat and a valid ES384 self-signature.
+pub fn claimPublicKey(a: std.mem.Allocator, token: []const u8, now: i64, kind: IdentityKind) !Scheme.PublicKey {
     const parts = try split(token);
     const h = try decode64(a, parts[0]);
     defer a.free(h);
     const header = try parse(a, h);
     defer header.deinit();
     const algorithm = try string(try field(header.value, "alg"));
-    if (!std.mem.eql(u8, algorithm, "ES384") and !std.mem.eql(u8, algorithm, "RS256")) return error.UnsupportedAlgorithm;
+    if (kind == .server) {
+        if (!std.mem.eql(u8, algorithm, "ES384")) return error.UnsupportedAlgorithm;
+    } else if (!std.mem.eql(u8, algorithm, "ES384") and !std.mem.eql(u8, algorithm, "RS256")) return error.UnsupportedAlgorithm;
     const p = try decode64(a, parts[1]);
     defer a.free(p);
     const claims = try parse(a, p);
     defer claims.deinit();
-    const expiration = try integer(try field(claims.value, "exp"));
-    if (@as(i128, expiration) < @as(i128, now) - 60) return error.ExpiredIdentity;
-    for ([_][]const u8{ "nbf", "iat" }) |name| if (claims.value.object.get(name)) |value| {
-        if (@as(i128, try integer(value)) > @as(i128, now) + 60) return error.InvalidIdentity;
-    };
+    switch (kind) {
+        .client => {
+            const expiration = try integer(try field(claims.value, "exp"));
+            if (@as(i128, expiration) < @as(i128, now) - 60) return error.ExpiredIdentity;
+            for ([_][]const u8{ "nbf", "iat" }) |name| if (claims.value.object.get(name)) |value| {
+                if (@as(i128, try integer(value)) > @as(i128, now) + 60) return error.InvalidIdentity;
+            };
+        },
+        .server => {
+            const issued_at = try integer(try field(claims.value, "iat"));
+            const delta = @as(i128, issued_at) - @as(i128, now);
+            if (delta < -server_iat_clock_skew_seconds or delta > server_iat_clock_skew_seconds) return error.InvalidIdentity;
+        },
+    }
     const claim = try field(claims.value, "cpk");
     const key = if (claim == .string) blk: {
         const der = try decode64(a, claim.string);
@@ -130,7 +144,7 @@ pub fn claimPublicKey(a: std.mem.Allocator, token: []const u8, now: i64, self_si
         @memcpy(sec1[49..], y);
         break :blk try Scheme.PublicKey.fromSec1(&sec1);
     };
-    if (self_signed) try verify(a, token, key, null);
+    if (kind == .server) try verify(a, token, key, null);
     return key;
 }
 
@@ -139,19 +153,76 @@ test "server identity, expiry, detached signatures, and tampering" {
     const key = try Scheme.KeyPair.generateDeterministic(.{1} ** 48);
     const token = try serverToken(a, key, 1000);
     defer a.free(token);
-    const pk = try claimPublicKey(a, token, 1000, true);
-    try std.testing.expectError(error.ExpiredIdentity, claimPublicKey(a, token, 1121, true));
+    const pk = try claimPublicKey(a, token, 1000, .server);
+    try std.testing.expectError(error.InvalidIdentity, claimPublicKey(a, token, 1121, .server));
     const sig = try sign(a, key, "{\"alg\":\"ES384\"}", "fingerprints", true);
     defer a.free(sig);
     try verify(a, sig, pk, "fingerprints");
     if (verify(a, sig, pk, "tampered")) |_| return error.TamperingAccepted else |_| {}
 }
 
+fn testPublicKey(key: Scheme.KeyPair, out: *[160]u8) []const u8 {
+    var der: [120]u8 = undefined;
+    @memcpy(der[0..prefix.len], &prefix);
+    @memcpy(der[prefix.len..], &key.public_key.toUncompressedSec1());
+    return std.base64.standard.Encoder.encode(out, &der);
+}
+
+fn testToken(a: std.mem.Allocator, key: Scheme.KeyPair, algorithm: []const u8, claims: []const u8) ![]u8 {
+    const header = try std.json.Stringify.valueAlloc(a, .{ .alg = algorithm }, .{});
+    defer a.free(header);
+    return sign(a, key, header, claims, false);
+}
+
+test "client and server identity validation policies" {
+    const a = std.testing.allocator;
+    const key = try Scheme.KeyPair.generateDeterministic(.{4} ** 48);
+    var encoded_key_buffer: [160]u8 = undefined;
+    const encoded_key = testPublicKey(key, &encoded_key_buffer);
+
+    const valid_client_claims = try std.fmt.allocPrint(a, "{{\"exp\":1060,\"nbf\":940,\"iat\":1000,\"cpk\":\"{s}\"}}", .{encoded_key});
+    defer a.free(valid_client_claims);
+    const valid_client = try testToken(a, key, "ES384", valid_client_claims);
+    defer a.free(valid_client);
+    _ = try claimPublicKey(a, valid_client, 1000, .client);
+    try std.testing.expectError(error.ExpiredIdentity, claimPublicKey(a, valid_client, 1121, .client));
+
+    const future_client_claims = try std.fmt.allocPrint(a, "{{\"exp\":1200,\"nbf\":1061,\"iat\":1061,\"cpk\":\"{s}\"}}", .{encoded_key});
+    defer a.free(future_client_claims);
+    const future_client = try testToken(a, key, "ES384", future_client_claims);
+    defer a.free(future_client);
+    try std.testing.expectError(error.InvalidIdentity, claimPublicKey(a, future_client, 1000, .client));
+
+    // Bedrock accepts server identity tokens without applying their ordinary JWT
+    // expiry, provided their issuance time and self-signature are trustworthy.
+    const expired_server_claims = try std.fmt.allocPrint(a, "{{\"exp\":0,\"nbf\":2000,\"iat\":1000,\"cpk\":\"{s}\"}}", .{encoded_key});
+    defer a.free(expired_server_claims);
+    const expired_server = try testToken(a, key, "ES384", expired_server_claims);
+    defer a.free(expired_server);
+    _ = try claimPublicKey(a, expired_server, 1060, .server);
+    try std.testing.expectError(error.InvalidIdentity, claimPublicKey(a, expired_server, 1061, .server));
+
+    const other_key = try Scheme.KeyPair.generateDeterministic(.{5} ** 48);
+    const wrongly_signed = try testToken(a, other_key, "ES384", expired_server_claims);
+    defer a.free(wrongly_signed);
+    if (claimPublicKey(a, wrongly_signed, 1000, .server)) |_| return error.InvalidSignatureAccepted else |_| {}
+
+    const wrong_algorithm = try testToken(a, key, "RS256", expired_server_claims);
+    defer a.free(wrong_algorithm);
+    try std.testing.expectError(error.UnsupportedAlgorithm, claimPublicKey(a, wrong_algorithm, 1000, .server));
+
+    const missing_cpk = try testToken(a, key, "ES384", "{\"exp\":0,\"iat\":1000}");
+    defer a.free(missing_cpk);
+    try std.testing.expectError(error.InvalidIdentity, claimPublicKey(a, missing_cpk, 1000, .server));
+    const malformed_cpk = try testToken(a, key, "ES384", "{\"exp\":0,\"iat\":1000,\"cpk\":\"not-a-key\"}");
+    defer a.free(malformed_cpk);
+    if (claimPublicKey(a, malformed_cpk, 1000, .server)) |_| return error.MalformedKeyAccepted else |_| {}
+}
 fn allocationScenario(a: std.mem.Allocator) !void {
     const key = try Scheme.KeyPair.generateDeterministic(.{3} ** 48);
     const token = try serverToken(a, key, 1000);
     defer a.free(token);
-    _ = try claimPublicKey(a, token, 1000, true);
+    _ = try claimPublicKey(a, token, 1000, .server);
 }
 test "every identity allocation failure releases partial state" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationScenario, .{});

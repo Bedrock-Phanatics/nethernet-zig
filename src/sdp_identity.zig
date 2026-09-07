@@ -1,6 +1,7 @@
 const std = @import("std");
 const jwt = @import("identity.zig");
 pub const Key = jwt.Scheme.PublicKey;
+pub const IdentityKind = jwt.IdentityKind;
 pub const Fingerprint = struct { algorithm: []const u8, digest: []const u8 };
 pub const Verifier = struct {
     context: ?*anyopaque = null,
@@ -58,7 +59,7 @@ pub fn add(a: std.mem.Allocator, sdp: []const u8, identity: Identity) ![:0]u8 {
 
 /// Null denotes no identity attribute. Verifies the detached fingerprint proof
 /// even when an external issuer verifier supplies a replacement cpk.
-pub fn verify(a: std.mem.Allocator, sdp: []const u8, now: i64, self_signed: bool, verifier: ?Verifier) !?Key {
+pub fn verify(a: std.mem.Allocator, sdp: []const u8, now: i64, kind: IdentityKind, verifier: ?Verifier) !?Key {
     if (sdp.len > jwt.maximum_size) return error.IdentityTooLarge;
     var lines = std.mem.tokenizeAny(u8, sdp, "\r\n");
     const encoded = while (lines.next()) |line| {
@@ -74,7 +75,7 @@ pub fn verify(a: std.mem.Allocator, sdp: []const u8, now: i64, self_signed: bool
     defer inner.deinit();
     const token = try jwt.string(try jwt.field(inner.value, "token"));
     const signature = try jwt.string(try jwt.field(inner.value, "fingerprints"));
-    var key = try jwt.claimPublicKey(a, token, now, self_signed);
+    var key = try jwt.claimPublicKey(a, token, now, kind);
     const payload = try fingerprintPayload(a, sdp);
     defer a.free(payload);
     // Verify key possession before asking the application to trust the identity.
@@ -97,8 +98,8 @@ test "SDP identity nesting, fingerprint deduplication and proof binding" {
     try std.testing.expectEqualStrings("{\"fingerprint\":[{\"algorithm\":\"sha-256\",\"digest\":\"00:11\"}]}", payload);
     const signed = try add(a, source, .{ .key = key, .token = token });
     defer a.free(signed);
-    try std.testing.expect((try verify(a, signed, 1000, true, null)) != null);
+    try std.testing.expect((try verify(a, signed, 1000, .server, null)) != null);
     const offset = std.mem.indexOf(u8, signed, "00:11").?;
     signed[offset] = 'f';
-    if (verify(a, signed, 1000, true, null)) |_| return error.TamperingAccepted else |_| {}
+    if (verify(a, signed, 1000, .server, null)) |_| return error.TamperingAccepted else |_| {}
 }

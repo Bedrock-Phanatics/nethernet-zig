@@ -39,7 +39,7 @@ The HTTP listener uses a fixed number of negotiation workers, not one worker per
 
 Server connections generate a fresh one-minute ES384 identity unless `ConnectionOptions.identity` supplies one. The application owns supplied token/domain strings and must keep them alive through negotiation. `identity.serverToken` returns allocated token memory; free it with the same allocator. Key pairs are value types.
 
-Clients verify the server token's self-signature and detached DTLS fingerprint assertion. Servers verify cpk time claims and proof of fingerprint possession. `allow_anonymous` defaults to false. Possession of a cpk alone is not issuer authentication: configure `verify_client` to validate your trusted issuer/account policy. The callback may supply an alternative public key, whose fingerprint proof is checked again.
+Clients verify the server token's self-signature and detached DTLS fingerprint assertion. To match Bedrock, server identity `exp`/`nbf` claims are not enforced; `iat` must remain within a bounded 60-second clock-skew window. Servers apply normal temporal validation to client identity tokens and verify proof of fingerprint possession. `allow_anonymous` defaults to false. Possession of a cpk alone is not issuer authentication: configure `verify_client` to validate your trusted issuer/account policy. The callback may supply an alternative public key, whose fingerprint proof is checked again.
 
 The interoperable ES384 key is P-384. PKIX/SPKI base64 and P-384 EC JWK cpk forms are supported. RS256 client-token headers may be inspected for cpk, with issuer verification delegated to the application; this is not an RS256 verifier.
 
