@@ -92,3 +92,29 @@ Native tests include a strictly loopback UDP fault relay with loss, duplication,
 `zig build test --fuzz=10000` enables coverage-guided fuzzing on supported hosts. Zig 0.16 refuses this command on Windows. Ordinary tests still execute the fuzz corpus and a deterministic 20,000-input campaign plus decoder-specific random tests. Testing-allocator suites inject every allocation failure into identity creation/verification, credentials, discovery creation, connection creation, and reassembly growth.
 
 Local validation does not establish public TURN/TLS deployment compatibility, long-running load stability, native heap leak freedom, or Linux/macOS runtime correctness. Native allocations are outside Zig's testing allocator. The project includes native bounds hardening and exercised shutdown paths, but has not had an independent security audit.
+
+## Waiting for connection progress
+
+`Connection.receive()`, HTTP negotiation, and LAN negotiation block on callback
+notifications. They retain absolute negotiation, connection, and reassembly
+deadlines. Packet/state callbacks publish to the existing bounded native queue
+and signal a coalescing event without allocating. Shutdown signals before native
+callback teardown and never waits for native teardown while holding its mutex.
+
+Custom signaling loops can call `connection.prepareWait()` before polling, drain
+available events, then call `connection.wait(true)` for negotiation or
+`connection.wait(false)` for normal traffic. Always re-check state after waking;
+a wake can mean progress, an error, cancellation, or a deadline/spurious wake.
+`pollNegotiation()` continues leaving early application packets queued.
+
+LAN discovery uses one blocking receive task and one preallocated datagram slot.
+The owner acknowledges the slot after decoding; the reader cannot overwrite it
+before acknowledgement. A LAN listener shares one notification across discovery
+and pending peers. Accepted peers detach from that notification. Discovery's
+existing two-second advertisement/expiry deadline is a protocol timer, not a
+polling interval. `pollAccept()` is now nonblocking; use `accept()` to wait.
+
+The existing single-owner rule still applies. Cancel and join an outstanding
+owner task before destroying its connection/listener/discovery. Discovery must
+outlive its LAN listener; its receive task is canceled and joined before its
+socket and buffers are freed. Discovery setup requires a concurrent I/O task.

@@ -1,5 +1,6 @@
 const std = @import("std");
 const Peer = @import("../src/peer.zig").Peer;
+const wake = @import("../src/wakeup.zig");
 const framing = @import("../src/framing.zig");
 
 test "native peers negotiate and exchange both channel types" {
@@ -14,9 +15,15 @@ test "native peers negotiate and exchange both channel types" {
     const buffer = try allocator.alloc(u8, 1024 * 1024);
     defer allocator.free(buffer);
 
+    var wakeup: wake.Wakeup = .{};
+    a.subscribe(&wakeup);
+    b.subscribe(&wakeup);
+    defer a.subscribe(null);
+    defer b.subscribe(null);
     try a.offer();
     const start = std.Io.Clock.awake.now(io);
     while (!a.ready() or !b.ready()) {
+        wakeup.prepare();
         if (start.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds() > 15000) return error.Timeout;
         for ([_]*Peer{ a, b }, [_]*Peer{ b, a }) |source, dest| {
             if (try source.poll(buffer)) |event| switch (event) {
@@ -29,12 +36,14 @@ test "native peers negotiate and exchange both channel types" {
                 else => return error.UnexpectedEvent,
             };
         }
-        try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+        if ((!a.ready() or !b.ready()) and !a.hasPending(false) and !b.hasPending(false))
+            try wakeup.wait(io, wake.deadline(start, 15000));
     }
     for ([_]framing.Reliability{ .reliable, .unreliable }) |reliability| {
         try a.send("hello", reliability, buffer);
         var got = false;
         while (!got) {
+            b.wakeup.prepare();
             if (start.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds() > 20000) return error.Timeout;
             if (try b.poll(buffer)) |event| switch (event) {
                 .reliable_fragment, .unreliable_fragment => |fragment| {
@@ -44,7 +53,7 @@ test "native peers negotiate and exchange both channel types" {
                 },
                 else => return error.UnexpectedEvent,
             };
-            try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+            if (!got and !b.hasPending(false)) try b.wakeup.wait(io, wake.deadline(start, 20000));
         }
     }
     a.close();
@@ -66,9 +75,15 @@ test "connections verify identities, reassemble large messages, and reconnect" {
         const server = try Connection.create(a, io, .server, 7, "client", .{ .native = .{ .disable_trickle = true }, .allow_anonymous = true });
         defer server.destroy();
 
+        var wakeup: wake.Wakeup = .{};
+        client.peer.subscribe(&wakeup);
+        server.peer.subscribe(&wakeup);
+        defer client.peer.subscribe(null);
+        defer server.peer.subscribe(null);
         try client.start();
         const started = std.Io.Clock.awake.now(io);
         while (!client.ready() or !server.ready()) {
+            wakeup.prepare();
             if (started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds() > 20000) return error.Timeout;
             for ([_]*Connection{ client, server }, [_]*Connection{ server, client }, [_][]const u8{ "client", "server" }) |source, dest, name| {
                 if (try source.poll()) |event| switch (event) {
@@ -80,22 +95,13 @@ test "connections verify identities, reassemble large messages, and reconnect" {
                     else => return error.UnexpectedEvent,
                 };
             }
-            try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+            if ((!client.ready() or !server.ready()) and !client.peer.hasPending(true) and !server.peer.hasPending(true))
+                try wakeup.wait(io, wake.deadline(started, 20000));
         }
         try std.testing.expect(client.public_key != null);
         try client.send(payload, .reliable);
-        var got = false;
-        while (!got) {
-            if (try server.poll()) |event| switch (event) {
-                .message => |message| {
-                    try std.testing.expectEqualSlices(u8, payload, message.data);
-                    got = true;
-                },
-                else => return error.UnexpectedEvent,
-            };
-            if (started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds() > 20000) return error.Timeout;
-            try std.Io.sleep(io, .fromMilliseconds(1), .awake);
-        }
+        const message = try server.receive();
+        try std.testing.expectEqualSlices(u8, payload, message.data);
         try std.testing.expectEqual(@as(u64, payload.len), server.received_bytes);
     }
 }
@@ -124,18 +130,8 @@ test "HTTP endpoint listener and dialer transfer ownership and shut down" {
     listener.close();
     listener.close();
     try client.send("survives listener close", .reliable);
-    const start = std.Io.Clock.awake.now(io);
-    while (true) {
-        if (try server.poll()) |event| switch (event) {
-            .message => |message| {
-                try std.testing.expectEqualStrings("survives listener close", message.data);
-                break;
-            },
-            else => return error.UnexpectedEvent,
-        };
-        if (start.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds() > 10000) return error.Timeout;
-        try std.Io.sleep(io, .fromMilliseconds(1), .awake);
-    }
+    const message = try server.receive();
+    try std.testing.expectEqualStrings("survives listener close", message.data);
 }
 
 test "LAN discovery signaling negotiates WebRTC with trickle ICE" {
@@ -203,4 +199,19 @@ test "HTTP rejects invalid routes, network IDs, empty SDP and oversized bodies" 
         const prefix = try reader.interface.take(12);
         try std.testing.expectEqualStrings(case.status, prefix[9..12]);
     }
+}
+
+test "LAN accept cancels and close detaches the wakeup" {
+    const Discovery = @import("../src/discovery.zig").Discovery;
+    const Listener = @import("../src/lan.zig").Listener;
+    const io = std.testing.io;
+    const discovery = try Discovery.listen(std.testing.allocator, io, try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0"), .{});
+    defer discovery.destroy();
+    const listener = try Listener.listen(std.testing.allocator, discovery, .{});
+    defer listener.destroy();
+    var pending = try io.concurrent(Listener.accept, .{listener});
+    try std.testing.expectError(error.Canceled, pending.cancel(io));
+    listener.close();
+    try std.testing.expect(discovery.subscriber == null);
+    try std.testing.expectError(error.ConnectionClosed, listener.accept());
 }

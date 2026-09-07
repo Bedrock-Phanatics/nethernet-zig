@@ -1,4 +1,5 @@
 test {
+    _ = @import("../src/wakeup.zig");
     _ = @import("../src/credentials.zig");
     _ = @import("../src/discovery.zig");
     _ = @import("../src/discovery_codec.zig");

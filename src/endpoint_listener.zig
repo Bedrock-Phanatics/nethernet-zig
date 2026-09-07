@@ -263,6 +263,7 @@ pub const Listener = struct {
         var answered = false;
 
         while (!answered or !connection.ready()) {
+            connection.prepareWait();
             if (try connection.pollNegotiation()) |event| {
                 switch (event) {
                     .signal => |signal| {
@@ -287,7 +288,7 @@ pub const Listener = struct {
                 }
             }
 
-            try std.Io.sleep(self.io, .fromMilliseconds(1), .awake);
+            try connection.wait(true);
         }
 
         if (try self.accepted.put(self.io, &.{connection}, 0) == 0) {

@@ -81,6 +81,12 @@ pub fn build(b: *std.Build) void {
         b.getInstallStep().dependOn(&dll.step);
     }
 
+    const wake_bench_module = module(b, "bench/wakeup.zig", target, .ReleaseFast);
+    wake_bench_module.addImport("wakeup", module(b, "src/wakeup.zig", target, .ReleaseFast));
+    wake_bench_module.addImport("queue", module(b, "src/queue.zig", target, .ReleaseFast));
+    const wake_bench = b.addExecutable(.{ .name = "wakeup-benchmark", .root_module = wake_bench_module });
+    b.step("bench-wakeup", "Compare event wakeup latency and idle CPU with 1 ms polling").dependOn(&b.addRunArtifact(wake_bench).step);
+
     const benchmark_module = module(b, "bench/main.zig", target, .ReleaseFast);
     benchmark_module.addImport("discovery_codec", module(b, "src/discovery_codec.zig", target, .ReleaseFast));
     benchmark_module.addImport("framing", module(b, "src/framing.zig", target, .ReleaseFast));

@@ -26,3 +26,28 @@ zig build bench
 ~~~
 
 These measurements exclude native SCTP, sockets, contention, and connection allocation. Full-network latency percentiles, concurrent-connection scaling, sustained throughput, native allocation profiling, and long-duration load testing remain unmeasured.
+
+## Event wakeups versus polling
+
+Run `zig build bench-wakeup` for a 500-packet bounded-queue comparison and a
+one-second idle measurement for each strategy. Both use the same producer,
+queue, mutex, and buffers. The old `sleep(1ms)` loop exists only as the benchmark
+baseline. Arrival phase varies; latency runs from queue publication to receipt.
+Reported columns are p50/p95/p99 nanoseconds, idle wait count, and process CPU
+nanoseconds. Neither callback publication nor the queue allocates per packet.
+
+Windows x64, Zig 0.16.0 ReleaseFast, single run:
+
+| Strategy | p50 | p95 | p99 | Idle waits / second | Measured idle CPU |
+|---|---:|---:|---:|---:|---:|
+| 1 ms polling | 14.964 ms | 16.010 ms | 16.106 ms | 64 | 0 ns |
+| Event-driven | 12.7 us | 24.3 us | 88.0 us | 1 | 0 ns |
+
+The Windows scheduler rounded short sleeps substantially above 1 ms in this
+run. Both idle CPU readings were below measurement resolution; zero does not
+prove zero CPU cost. Wait counts demonstrate the reduction in idle wakeups.
+These are local handoff measurements, not end-to-end WebRTC latency. Run on the
+target OS and compare multiple runs before drawing performance conclusions.
+Timing percentiles are reported rather than asserted in CI to avoid scheduler
+noise causing failures. Functional tests cover notification races, cancellation,
+queue exhaustion, deadline expiry, and real native/LAN/HTTP traffic.

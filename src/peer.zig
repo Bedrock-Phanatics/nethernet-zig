@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const framing = @import("framing.zig");
+const Wakeup = @import("wakeup.zig").Wakeup;
 const Queue = @import("queue.zig").Queue;
 
 const c = @cImport({
@@ -44,6 +45,9 @@ pub const Peer = struct {
     id: c_int = -1,
     channels: [2]c_int = .{ -1, -1 },
     mutex: std.Io.Mutex = .init,
+
+    wakeup: Wakeup = .{},
+    subscriber: ?*Wakeup = null,
 
     state: State = .new,
     stopping: bool = false,
@@ -113,6 +117,7 @@ pub const Peer = struct {
 
         self.stopping = true;
         self.state = .closed;
+        self.notify();
         self.mutex.unlock(self.io);
 
         // Never wait for native callbacks while holding their mutex.
@@ -135,6 +140,27 @@ pub const Peer = struct {
         allocator.free(self.queue.bytes);
         allocator.free(self.queue.entries);
         allocator.destroy(self);
+    }
+
+    /// Owner only. Detach before freeing the wakeup.
+    pub fn subscribe(self: *Peer, wakeup: ?*Wakeup) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        self.subscriber = wakeup;
+        self.notify();
+    }
+
+    // Caller holds the mutex.
+    fn notify(self: *Peer) void {
+        self.wakeup.signal(self.io);
+        if (self.subscriber) |wakeup| wakeup.signal(self.io);
+    }
+
+    pub fn hasPending(self: *Peer, signals_only: bool) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.queue.count != 0 and
+            (!signals_only or self.queue.entries[self.queue.head].tag < 3);
     }
 
     pub fn getState(self: *Peer) State {
@@ -188,6 +214,7 @@ pub const Peer = struct {
 
         self.mutex.lockUncancelable(self.io);
         self.state = .connecting;
+        self.notify();
         self.mutex.unlock(self.io);
 
         try check(c.rtcSetLocalDescription(self.id, "offer"));
@@ -225,6 +252,7 @@ pub const Peer = struct {
 
             self.mutex.lockUncancelable(self.io);
             self.state = .connecting;
+            self.notify();
             self.mutex.unlock(self.io);
 
             try check(c.rtcSetLocalDescription(self.id, "answer"));
@@ -410,9 +438,14 @@ pub const Peer = struct {
         // The peer owns this channel from this point on.
         c.rtcSetUserPointer(channel, self);
 
+        try check(c.rtcSetOpenCallback(channel, onOpen));
         try check(c.rtcSetMessageCallback(channel, onMessage));
         try check(c.rtcSetClosedCallback(channel, onClosed));
         try check(c.rtcSetErrorCallback(channel, onError));
+        // onOpen is not called for channels that are already open.
+        self.mutex.lockUncancelable(self.io);
+        self.notify();
+        self.mutex.unlock(self.io);
     }
 
     fn from(ptr: ?*anyopaque) *Peer {
@@ -428,6 +461,7 @@ pub const Peer = struct {
         self.queue.push(tag, data) catch {
             self.state = .failed;
         };
+        self.notify();
     }
 
     fn onDescription(
@@ -478,6 +512,7 @@ pub const Peer = struct {
                 c.RTC_FAILED => .failed,
                 else => .closed,
             };
+            self.notify();
         }
     }
 
@@ -492,6 +527,7 @@ pub const Peer = struct {
         defer self.mutex.unlock(self.io);
 
         self.gathered = state == c.RTC_GATHERING_COMPLETE;
+        self.notify();
     }
 
     fn onChannel(
@@ -526,6 +562,13 @@ pub const Peer = struct {
         );
     }
 
+    fn onOpen(_: c_int, ptr: ?*anyopaque) callconv(.c) void {
+        const self = from(ptr);
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        self.notify();
+    }
+
     fn onClosed(_: c_int, ptr: ?*anyopaque) callconv(.c) void {
         const self = from(ptr);
 
@@ -534,6 +577,7 @@ pub const Peer = struct {
 
         if (!self.stopping) {
             self.state = .failed;
+            self.notify();
         }
     }
 
@@ -563,11 +607,38 @@ test "native callback queue exhaustion fails closed with bounded storage" {
 
     peer.enqueue(3, "a");
     peer.enqueue(3, "b");
+    peer.wakeup.prepare();
     peer.enqueue(3, "c");
+    try std.testing.expect(peer.wakeup.event.isSet());
 
     try std.testing.expectEqual(State.failed, peer.getState());
     try std.testing.expectEqual(@as(usize, 2), peer.queue.count);
 
     var output: [16]u8 = undefined;
     try std.testing.expectError(error.ConnectionClosed, peer.poll(&output));
+}
+
+test "state changes and errors wake subscribers" {
+    const io = std.testing.io;
+    const peer = try Peer.create(std.testing.allocator, io, .{});
+    defer peer.destroy();
+    var wakeup: Wakeup = .{};
+    peer.subscribe(&wakeup);
+    defer peer.subscribe(null);
+    wakeup.prepare();
+    Peer.onGathered(0, c.RTC_GATHERING_COMPLETE, peer);
+    try std.testing.expect(wakeup.event.isSet());
+    wakeup.prepare();
+    Peer.onState(0, c.RTC_CONNECTING, peer);
+    try std.testing.expect(wakeup.event.isSet());
+    wakeup.prepare();
+    Peer.onOpen(0, peer);
+    try std.testing.expect(wakeup.event.isSet());
+    wakeup.prepare();
+    Peer.onError(0, null, peer);
+    try std.testing.expect(wakeup.event.isSet());
+    try std.testing.expectEqual(State.failed, peer.getState());
+    wakeup.prepare();
+    peer.close();
+    try std.testing.expect(wakeup.event.isSet());
 }

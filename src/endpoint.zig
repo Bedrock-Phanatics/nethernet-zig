@@ -170,6 +170,7 @@ pub fn dial(
     defer allocator.free(answer);
 
     while (!peer.ready()) {
+        peer.prepareWait();
         if (try peer.pollNegotiation()) |event| {
             switch (event) {
                 .signal => |signal| {
@@ -199,7 +200,7 @@ pub fn dial(
             }
         }
 
-        try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+        try peer.wait(true);
     }
 
     return peer;

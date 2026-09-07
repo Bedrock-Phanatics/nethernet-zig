@@ -1,5 +1,6 @@
 const std = @import("std");
 
+const wake = @import("wakeup.zig");
 const native = @import("peer.zig");
 const framing = @import("framing.zig");
 const auth = @import("sdp_identity.zig");
@@ -385,9 +386,36 @@ pub const Connection = struct {
         };
     }
 
+    /// Wakeups do not extend the deadline.
+    pub fn waitDeadline(self: *Connection) std.Io.Timeout {
+        var result: std.Io.Timeout = .none;
+        if (!self.established) {
+            result = wake.deadline(self.answered orelse self.started, if (self.answered != null) self.options.connection_timeout_ms else self.options.negotiation_timeout_ms);
+        }
+        for (&self.assemblies) |*assembly| {
+            if (assembly.started) |started| {
+                result = wake.earliest(result, wake.deadline(started, self.options.reassembly_timeout_ms));
+            }
+        }
+        return result;
+    }
+
+    /// Call before polling to avoid missing a wakeup.
+    pub fn prepareWait(self: *Connection) void {
+        self.peer.wakeup.prepare();
+    }
+
+    pub fn wait(self: *Connection, negotiation: bool) !void {
+        try self.io.checkCancel();
+        if (self.peer.hasPending(negotiation)) return;
+        if (negotiation and self.ready()) return;
+        try self.peer.wakeup.wait(self.io, self.waitDeadline());
+    }
+
     /// Waits for either channel. Use poll when handling signaling yourself.
     pub fn receive(self: *Connection) !Message {
         while (true) {
+            self.prepareWait();
             if (try self.poll()) |event| {
                 switch (event) {
                     .message => |message| return message,
@@ -399,7 +427,7 @@ pub const Connection = struct {
                 }
             }
 
-            try std.Io.sleep(self.io, .fromMilliseconds(1), .awake);
+            try self.wait(false);
         }
     }
 
@@ -479,8 +507,7 @@ test "negotiation timeout and repeated close fail pending sends" {
     );
     defer connection.destroy();
 
-    try std.Io.sleep(std.testing.io, .fromMilliseconds(3), .awake);
-    try std.testing.expectError(error.Timeout, connection.poll());
+    try std.testing.expectError(error.Timeout, connection.receive());
 
     connection.close();
     connection.close();
@@ -510,6 +537,28 @@ test "incomplete reassembly expires and closes connection" {
         1024,
     );
 
-    try std.Io.sleep(std.testing.io, .fromMilliseconds(3), .awake);
-    try std.testing.expectError(error.ReassemblyTimeout, connection.poll());
+    try std.testing.expectError(error.ReassemblyTimeout, connection.receive());
+}
+
+test "cancel and close unblock receive" {
+    const io = std.testing.io;
+    const connection = try Connection.create(std.testing.allocator, io, .client, 1, "remote", .{});
+    defer connection.destroy();
+    connection.established = true;
+    var canceled = try io.concurrent(Connection.receive, .{connection});
+    try std.testing.expectError(error.Canceled, canceled.cancel(io));
+    var closed = try io.concurrent(Connection.receive, .{connection});
+    connection.close();
+    try std.testing.expectError(error.ConnectionClosed, closed.await(io));
+}
+
+test "receive drains partial messages without waiting" {
+    const io = std.testing.io;
+    const connection = try Connection.create(std.testing.allocator, io, .client, 1, "remote", .{});
+    defer connection.destroy();
+    connection.established = true;
+    try connection.peer.queue.push(3, &.{ 1, 'a' });
+    try connection.peer.queue.push(3, &.{ 0, 'b' });
+    const message = try connection.receive();
+    try std.testing.expectEqualStrings("ab", message.data);
 }

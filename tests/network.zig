@@ -1,4 +1,5 @@
 const std = @import("std");
+const wake = @import("../src/wakeup.zig");
 const Connection = @import("../src/connection.zig").Connection;
 
 // Adds packet loss and duplication below SCTP.
@@ -23,6 +24,7 @@ const Proxy = struct {
         var delayed: [64]Delayed = @splat(.{});
         var random = std.Random.DefaultPrng.init(0x123fed);
         var buffer: [2048]u8 = undefined;
+
         while (true) {
             const now = std.Io.Clock.awake.now(self.io).toMilliseconds();
             for (&delayed) |*packet| if (packet.len != 0 and packet.due <= now) {
@@ -35,7 +37,14 @@ const Proxy = struct {
             defer select.cancelDiscard();
 
             try select.concurrent(.packet, std.Io.net.Socket.receive, .{ &self.socket, self.io, &buffer });
-            try select.concurrent(.timeout, std.Io.sleep, .{ self.io, std.Io.Duration.fromMilliseconds(2), .awake });
+            var deadline: std.Io.Timeout = .none;
+            for (&delayed) |*packet| if (packet.len != 0) {
+                deadline = wake.earliest(deadline, .{ .deadline = .{
+                    .raw = .{ .nanoseconds = @as(i96, packet.due) * std.time.ns_per_ms },
+                    .clock = .awake,
+                } });
+            };
+            if (deadline != .none) try select.concurrent(.timeout, std.Io.Timeout.sleep, .{ deadline, self.io });
             const incoming = switch (try select.await()) {
                 .packet => |result| try result,
                 .timeout => |result| {
@@ -61,7 +70,7 @@ const Proxy = struct {
                 @memcpy(packet.data[0..incoming.data.len], incoming.data);
                 packet.len = incoming.data.len;
                 packet.dest = target;
-                packet.due = now + 2 + random.random().uintLessThan(u32, 8);
+                packet.due = std.Io.Clock.awake.now(self.io).toMilliseconds() + 2 + random.random().uintLessThan(u32, 8);
                 break;
             };
         }
@@ -117,9 +126,15 @@ test "real WebRTC survives loopback UDP loss duplication jitter and reordering" 
     const server = try Connection.create(a, io, .server, 7, "client", .{ .native = .{ .disable_trickle = true }, .allow_anonymous = true, .negotiation_timeout_ms = 30000, .connection_timeout_ms = 30000 });
     defer server.destroy();
 
+    var wakeup: wake.Wakeup = .{};
+    client.peer.subscribe(&wakeup);
+    server.peer.subscribe(&wakeup);
+    defer client.peer.subscribe(null);
+    defer server.peer.subscribe(null);
     try client.start();
     const started = std.Io.Clock.awake.now(io);
     while (!client.ready() or !server.ready()) {
+        wakeup.prepare();
         for ([_]*Connection{ client, server }, [_]*Connection{ server, client }, 0..) |source, dest, index| {
             if (try source.pollNegotiation()) |event| switch (event) {
                 .signal => |signal| {
@@ -135,7 +150,8 @@ test "real WebRTC survives loopback UDP loss duplication jitter and reordering" 
             };
         }
         if (started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds() > 30000 or proxy.failure.load(.acquire)) return error.ProxyFailed;
-        try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+        if ((!client.ready() or !server.ready()) and !client.peer.hasPending(true) and !server.peer.hasPending(true))
+            try wakeup.wait(io, wake.deadline(started, 30000));
     }
     const data = try a.alloc(u8, 262156);
     defer a.free(data);
@@ -145,6 +161,7 @@ test "real WebRTC survives loopback UDP loss duplication jitter and reordering" 
         try client.send(data[0..size], .reliable);
         const send_time = std.Io.Clock.awake.now(io);
         while (true) {
+            server.prepareWait();
             if (try server.poll()) |event| switch (event) {
                 .message => |message| {
                     try std.testing.expectEqualSlices(u8, data[0..size], message.data);
@@ -153,14 +170,16 @@ test "real WebRTC survives loopback UDP loss duplication jitter and reordering" 
                 else => return error.UnexpectedSignal,
             };
             if (send_time.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds() > 30000 or proxy.failure.load(.acquire)) return error.ProxyFailed;
-            try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+            if (!server.peer.hasPending(false))
+                try server.peer.wakeup.wait(io, wake.deadline(send_time, 30000));
         }
     }
     try std.testing.expect(proxy.dropped.load(.acquire) > 0);
     try std.testing.expect(proxy.duplicated.load(.acquire) > 0);
     const end = std.Io.Clock.awake.now(io);
     while (end.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds() < 200) {
+        server.prepareWait();
         try std.testing.expect((try server.poll()) == null);
-        try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+        if (!server.peer.hasPending(false)) try server.peer.wakeup.wait(io, wake.deadline(end, 200));
     }
 }

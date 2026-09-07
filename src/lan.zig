@@ -1,5 +1,6 @@
 const std = @import("std");
 
+const wake = @import("wakeup.zig");
 const Discovery = @import("discovery.zig").Discovery;
 const conn = @import("connection.zig");
 const Signal = @import("signal.zig").Signal;
@@ -16,6 +17,7 @@ pub const Listener = struct {
     options: Options,
     pending: []?*conn.Connection,
     closed: bool = false,
+    wakeup: wake.Wakeup = .{},
 
     pub fn listen(
         allocator: std.mem.Allocator,
@@ -42,12 +44,15 @@ pub const Listener = struct {
             .pending = pending,
         };
 
+        discovery.subscribe(&self.wakeup);
         return self;
     }
 
     pub fn close(self: *Listener) void {
         if (self.closed) return;
         self.closed = true;
+        self.wakeup.signal(self.discovery.io);
+        self.discovery.subscribe(null);
 
         for (self.pending) |*slot| {
             if (slot.*) |connection| {
@@ -65,14 +70,25 @@ pub const Listener = struct {
 
     pub fn accept(self: *Listener) !*conn.Connection {
         while (true) {
+            self.wakeup.prepare();
             if (try self.pollAccept()) |connection| return connection;
+            var deadline = self.discovery.tickDeadline();
+            var pending_work = false;
+            for (self.pending) |slot| {
+                if (slot) |connection| {
+                    deadline = wake.earliest(deadline, connection.waitDeadline());
+                    pending_work = pending_work or connection.peer.hasPending(true) or connection.ready();
+                }
+            }
+            try self.discovery.io.checkCancel();
+            if (!pending_work) try self.wakeup.wait(self.discovery.io, deadline);
         }
     }
 
     pub fn pollAccept(self: *Listener) !?*conn.Connection {
         if (self.closed) return error.ConnectionClosed;
 
-        if (try self.discovery.poll(1)) |signal| {
+        if (try self.discovery.poll(0)) |signal| {
             try self.handle(signal);
         }
 
@@ -81,6 +97,7 @@ pub const Listener = struct {
 
             if (connection.ready()) {
                 slot.* = null;
+                connection.peer.subscribe(null);
                 return connection;
             }
 
@@ -169,6 +186,7 @@ pub const Listener = struct {
             return;
         };
 
+        connection.peer.subscribe(&self.wakeup);
         slot.* = connection;
     }
 
@@ -235,10 +253,16 @@ pub fn dial(
     );
     errdefer connection.destroy();
 
+    var wakeup: wake.Wakeup = .{};
+    discovery.subscribe(&wakeup);
+    defer discovery.subscribe(null);
+    connection.peer.subscribe(&wakeup);
+    defer connection.peer.subscribe(null);
     try connection.start();
 
     while (!connection.ready()) {
-        if (try discovery.poll(1)) |signal| {
+        wakeup.prepare();
+        if (try discovery.poll(0)) |signal| {
             const matches_connection =
                 signal.connection_id == connection.id and
                 std.mem.eql(u8, signal.network_id, connection.remote_id);
@@ -253,6 +277,10 @@ pub fn dial(
                 .signal => |signal| try discovery.send(signal),
                 .message => return error.UnexpectedMessage,
             }
+        }
+        try discovery.io.checkCancel();
+        if (!connection.ready() and !connection.peer.hasPending(true)) {
+            try wakeup.wait(discovery.io, wake.earliest(discovery.tickDeadline(), connection.waitDeadline()));
         }
     }
 

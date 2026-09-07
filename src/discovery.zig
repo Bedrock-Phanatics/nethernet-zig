@@ -1,5 +1,6 @@
 const std = @import("std");
 
+const wake = @import("wakeup.zig");
 const codec = @import("discovery_codec.zig");
 const Signal = @import("signal.zig").Signal;
 const ServerData = @import("server_data.zig").ServerData;
@@ -31,6 +32,15 @@ pub const Discovery = struct {
     buffers: []u8,
     advertisement: ?[]u8 = null,
 
+    // One packet at a time. The reader waits until decoding finishes.
+    wakeup: wake.Wakeup = .{},
+    consumed: std.Io.Event = .unset,
+    receive_group: std.Io.Group = .init,
+    receive_mutex: std.Io.Mutex = .init,
+    incoming: ?std.Io.net.IncomingMessage = null,
+    receive_error: ?anyerror = null,
+    subscriber: ?*wake.Wakeup = null,
+
     last_tick: std.Io.Timestamp,
     network_name: [20]u8 = undefined,
     closed: bool = false,
@@ -51,7 +61,7 @@ pub const Discovery = struct {
         const self = try allocator.create(Discovery);
         errdefer allocator.destroy(self);
 
-        const buffers = try allocator.alloc(u8, codec.maximum_datagram * 3);
+        const buffers = try allocator.alloc(u8, codec.maximum_datagram * 4);
         errdefer allocator.free(buffers);
 
         const socket = try address.bind(io, .{
@@ -94,6 +104,8 @@ pub const Discovery = struct {
             options.maximum_servers,
         );
 
+        errdefer self.servers.deinit(allocator);
+        try self.receive_group.concurrent(io, receiveWorker, .{self});
         return self;
     }
 
@@ -101,6 +113,10 @@ pub const Discovery = struct {
         if (self.closed) return;
 
         self.closed = true;
+        self.receive_mutex.lockUncancelable(self.io);
+        self.notify();
+        self.receive_mutex.unlock(self.io);
+        self.receive_group.cancel(self.io);
         self.socket.close(self.io);
     }
 
@@ -208,6 +224,8 @@ pub const Discovery = struct {
             else => return err,
         };
 
+        defer self.consumed.set(self.io);
+
         if (message.flags.trunc) {
             self.malformed_datagrams +|= 1;
             return null;
@@ -286,59 +304,58 @@ pub const Discovery = struct {
         return null;
     }
 
-    fn receive(
-        self: *Discovery,
-        timeout_ms: u32,
-    ) !std.Io.net.IncomingMessage {
-        return self.socket.receiveTimeout(
-            self.io,
-            self.input(),
-            .{
-                .duration = .{
-                    .raw = .fromMilliseconds(timeout_ms),
-                    .clock = .awake,
-                },
-            },
-        ) catch |err| switch (err) {
-            // Zig 0.16 cannot batch concurrent UDP receives on Windows.
-            // A cancellable blocking receive works correctly here.
-            error.ConcurrencyUnavailable => {
-                const Result = union(enum) {
-                    packet: std.Io.net.Socket.ReceiveError!std.Io.net.IncomingMessage,
-                    timeout: std.Io.Cancelable!void,
-                };
+    pub fn subscribe(self: *Discovery, subscriber: ?*wake.Wakeup) void {
+        self.receive_mutex.lockUncancelable(self.io);
+        defer self.receive_mutex.unlock(self.io);
+        self.subscriber = subscriber;
+        self.notify();
+    }
 
-                var results: [2]Result = undefined;
-                var select = std.Io.Select(Result).init(self.io, &results);
-                defer select.cancelDiscard();
+    fn notify(self: *Discovery) void {
+        self.wakeup.signal(self.io);
+        if (self.subscriber) |subscriber| subscriber.signal(self.io);
+    }
 
-                try select.concurrent(
-                    .packet,
-                    std.Io.net.Socket.receive,
-                    .{ &self.socket, self.io, self.input() },
-                );
+    pub fn tickDeadline(self: *Discovery) std.Io.Timeout {
+        return wake.deadline(self.last_tick, 2000);
+    }
 
-                try select.concurrent(
-                    .timeout,
-                    std.Io.sleep,
-                    .{
-                        self.io,
-                        std.Io.Duration.fromMilliseconds(timeout_ms),
-                        .awake,
-                    },
-                );
+    fn receiveWorker(self: *Discovery) std.Io.Cancelable!void {
+        while (true) {
+            self.consumed.reset();
+            const message = self.socket.receive(self.io, self.buffers[codec.maximum_datagram * 3 ..]) catch |err| {
+                if (err == error.Canceled) return error.Canceled;
+                self.receive_mutex.lockUncancelable(self.io);
+                self.receive_error = err;
+                self.notify();
+                self.receive_mutex.unlock(self.io);
+                return;
+            };
+            self.receive_mutex.lockUncancelable(self.io);
+            self.incoming = message;
+            self.notify();
+            self.receive_mutex.unlock(self.io);
+            try self.consumed.wait(self.io);
+        }
+    }
 
-                return switch (try select.await()) {
-                    .packet => |result| result,
-                    .timeout => |result| {
-                        try result;
-                        return error.Timeout;
-                    },
-                };
-            },
-
-            else => return err,
-        };
+    fn receive(self: *Discovery, timeout_ms: u32) !std.Io.net.IncomingMessage {
+        const timeout = wake.deadline(std.Io.Clock.awake.now(self.io), timeout_ms);
+        while (true) {
+            try self.io.checkCancel();
+            self.wakeup.prepare();
+            self.receive_mutex.lockUncancelable(self.io);
+            const message = self.incoming;
+            self.incoming = null;
+            const failure = self.receive_error;
+            self.receive_mutex.unlock(self.io);
+            if (message) |value| return value;
+            if (failure) |err| return err;
+            if (self.closed) return error.ConnectionClosed;
+            if (std.Io.Clock.awake.now(self.io).nanoseconds >= timeout.deadline.raw.nanoseconds)
+                return error.Timeout;
+            try self.wakeup.wait(self.io, timeout);
+        }
     }
 
     fn write(
@@ -371,7 +388,7 @@ pub const Discovery = struct {
     }
 
     fn output(self: *Discovery) []u8 {
-        return self.buffers[codec.maximum_datagram * 2 ..];
+        return self.buffers[codec.maximum_datagram * 2 .. codec.maximum_datagram * 3];
     }
 };
 
