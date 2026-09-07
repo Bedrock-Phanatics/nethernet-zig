@@ -36,7 +36,7 @@ pub const Encoder = struct {
         const remaining = self.data.len - self.offset;
         if (remaining == 0) return null;
 
-        const payload_len = @min(remaining, maximum_segment_payload);
+        const payload_len: usize = @min(remaining, maximum_segment_payload);
         if (output.len < payload_len + 1) return error.NoSpaceLeft;
 
         output[0] = @intCast((remaining - 1) / maximum_segment_payload);

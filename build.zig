@@ -74,7 +74,7 @@ pub fn build(b: *std.Build) void {
         b.getInstallStep().dependOn(&dll.step);
     }
 
-    const benchmark_module = module(b, "benchmarks/main.zig", target, .ReleaseFast);
+    const benchmark_module = module(b, "bench/main.zig", target, .ReleaseFast);
     benchmark_module.addImport("discovery_codec", module(b, "src/discovery_codec.zig", target, .ReleaseFast));
     benchmark_module.addImport("framing", module(b, "src/framing.zig", target, .ReleaseFast));
     benchmark_module.addImport("queue", module(b, "src/queue.zig", target, .ReleaseFast));
