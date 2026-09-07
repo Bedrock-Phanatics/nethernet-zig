@@ -1,4 +1,5 @@
 const std = @import("std");
+
 const Error = error{ MalformedPacket, NoSpaceLeft, MessageTooLarge };
 
 const Reader = struct {
@@ -10,9 +11,11 @@ const Reader = struct {
         self.offset += len;
         return result;
     }
+
     fn byte(self: *Reader) Error!u8 {
         return (try self.take(1))[0];
     }
+
     fn uint(self: *Reader) Error!u32 {
         var value: u32 = 0;
         for (0..5) |i| {
@@ -23,13 +26,16 @@ const Reader = struct {
         }
         return error.MalformedPacket;
     }
+
     fn int(self: *Reader) Error!i32 {
         const value = try self.uint();
         return @as(i32, @intCast(value >> 1)) ^ -@as(i32, @intCast(value & 1));
     }
+
     fn string(self: *Reader) Error![]const u8 {
         return self.take(try self.uint());
     }
+
     fn fixed(self: *Reader) Error!i32 {
         return std.mem.readInt(i32, (try self.take(4))[0..4], .little);
     }
@@ -42,22 +48,27 @@ const Writer = struct {
         @memcpy(self.data[self.offset..][0..data.len], data);
         self.offset += data.len;
     }
+
     fn byte(self: *Writer, value: u8) Error!void {
         try self.put(&.{value});
     }
+
     fn uint(self: *Writer, value: u32) Error!void {
         var rest = value;
         while (rest >= 128) : (rest >>= 7) try self.byte(@as(u8, @truncate(rest)) | 128);
         try self.byte(@intCast(rest));
     }
+
     fn int(self: *Writer, value: i32) Error!void {
         try self.uint(@bitCast((value << 1) ^ (value >> 31)));
     }
+
     fn string(self: *Writer, value: []const u8) Error!void {
         if (value.len > std.math.maxInt(u32)) return error.MessageTooLarge;
         try self.uint(@intCast(value.len));
         try self.put(value);
     }
+
     fn fixed(self: *Writer, value: i32) Error!void {
         var bytes: [4]u8 = undefined;
         std.mem.writeInt(i32, &bytes, value, .little);
@@ -65,8 +76,7 @@ const Writer = struct {
     }
 };
 
-/// Decoded strings borrow the input. Enum-like protocol values remain signed
-/// integers so unknown wire values survive a round trip.
+/// Decoded strings use the input buffer. Signed values preserve unknown variants.
 pub const ServerData = struct {
     server_name: []const u8 = "",
     level_name: []const u8 = "",
@@ -117,7 +127,7 @@ pub const ServerData = struct {
         return result;
     }
 
-    /// String fields borrow the RakNet pong input.
+    /// String fields remain tied to the RakNet pong input.
     pub fn fromPong(pong: []const u8) Error!ServerData {
         var fields = std.mem.splitScalar(u8, pong, ';');
         var parts: [9][]const u8 = undefined;

@@ -1,6 +1,6 @@
 const std = @import("std");
 
-/// All string fields borrow their source. No allocation occurs during parsing.
+/// Parsed strings remain tied to the source buffer.
 pub const Signal = struct {
     kind: []const u8,
     connection_id: u64,

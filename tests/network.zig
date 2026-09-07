@@ -1,7 +1,7 @@
 const std = @import("std");
-const Connection = @import("connection.zig").Connection;
+const Connection = @import("../src/connection.zig").Connection;
 
-// Test-only loopback UDP relay. Faults affect encrypted datagrams below SCTP.
+// Adds packet loss and duplication below SCTP.
 const Proxy = struct {
     io: std.Io,
     socket: std.Io.net.Socket,
@@ -17,6 +17,7 @@ const Proxy = struct {
             else => self.failure.store(true, .release),
         };
     }
+
     fn loop(self: *Proxy) !void {
         const Delayed = struct { data: [2048]u8 = undefined, len: usize = 0, dest: std.Io.net.IpAddress = undefined, due: i64 = 0 };
         var delayed: [64]Delayed = @splat(.{});
@@ -32,6 +33,7 @@ const Proxy = struct {
             var results: [2]Result = undefined;
             var select = std.Io.Select(Result).init(self.io, &results);
             defer select.cancelDiscard();
+
             try select.concurrent(.packet, std.Io.net.Socket.receive, .{ &self.socket, self.io, &buffer });
             try select.concurrent(.timeout, std.Io.sleep, .{ self.io, std.Io.Duration.fromMilliseconds(2), .awake });
             const incoming = switch (try select.await()) {
@@ -64,9 +66,11 @@ const Proxy = struct {
             };
         }
     }
+
     fn rewrite(self: *Proxy, a: std.mem.Allocator, index: usize, sdp: []const u8) ![]u8 {
         var output: std.ArrayList(u8) = .empty;
         errdefer output.deinit(a);
+
         var lines = std.mem.tokenizeAny(u8, sdp, "\r\n");
         var added = false;
         while (lines.next()) |line| {
@@ -77,14 +81,14 @@ const Proxy = struct {
                 for (&parts) |*part| part.* = fields.next() orelse return error.InvalidCandidate;
                 const port = try std.fmt.parseInt(u16, parts[5], 10);
                 _ = std.Io.net.IpAddress.parseIp4(parts[4], port) catch continue;
-                // Native sockets are bound on all local addresses; route both
-                // the advertised candidate and the actual destination via loopback.
+                // Send wildcard-bound sockets through loopback for the test.
                 const endpoint = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
                 self.mutex.lockUncancelable(self.io);
                 self.endpoints[index] = endpoint;
                 self.mutex.unlock(self.io);
                 const replacement = try std.fmt.allocPrint(a, "a=candidate:proxy 1 UDP 2130706431 127.0.0.1 {d} typ host\r\n", .{self.socket.address.getPort()});
                 defer a.free(replacement);
+
                 try output.appendSlice(a, replacement);
                 added = true;
             } else {
@@ -103,12 +107,16 @@ test "real WebRTC survives loopback UDP loss duplication jitter and reordering" 
     const address = try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0");
     var proxy = Proxy{ .io = io, .socket = try address.bind(io, .{ .mode = .dgram, .protocol = .udp }) };
     defer proxy.socket.close(io);
+
     try proxy.group.concurrent(io, Proxy.run, .{&proxy});
     defer proxy.group.cancel(io);
+
     const client = try Connection.create(a, io, .client, 7, "server", .{ .native = .{ .disable_trickle = true }, .negotiation_timeout_ms = 30000, .connection_timeout_ms = 30000 });
     defer client.destroy();
+
     const server = try Connection.create(a, io, .server, 7, "client", .{ .native = .{ .disable_trickle = true }, .allow_anonymous = true, .negotiation_timeout_ms = 30000, .connection_timeout_ms = 30000 });
     defer server.destroy();
+
     try client.start();
     const started = std.Io.Clock.awake.now(io);
     while (!client.ready() or !server.ready()) {
@@ -117,6 +125,7 @@ test "real WebRTC survives loopback UDP loss duplication jitter and reordering" 
                 .signal => |signal| {
                     const rewritten = try proxy.rewrite(a, index, signal.data);
                     defer a.free(rewritten);
+
                     var routed = signal;
                     routed.data = rewritten;
                     routed.network_id = if (index == 0) "client" else "server";
@@ -130,6 +139,7 @@ test "real WebRTC survives loopback UDP loss duplication jitter and reordering" 
     }
     const data = try a.alloc(u8, 262156);
     defer a.free(data);
+
     for (data, 0..) |*byte, index| byte.* = @truncate(index);
     for ([_]usize{ 32, 128, 8192, 262156 }) |size| {
         try client.send(data[0..size], .reliable);

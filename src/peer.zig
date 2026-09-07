@@ -1,6 +1,7 @@
 const std = @import("std");
 const framing = @import("framing.zig");
 const Queue = @import("queue.zig").Queue;
+
 const c = @cImport({
     @cDefine("RTC_ENABLE_MEDIA", "0");
     @cDefine("RTC_ENABLE_WEBSOCKET", "0");
@@ -15,6 +16,7 @@ pub const Event = union(enum) {
     reliable_fragment: []const u8,
     unreliable_fragment: []const u8,
 };
+
 pub const Options = struct {
     queue_bytes: usize = 4 * 1024 * 1024,
     queue_entries: usize = 512,
@@ -24,10 +26,8 @@ pub const Options = struct {
     disable_trickle: bool = false,
 };
 
-/// Native WebRTC peer. All public calls belong to one application owner.
-/// Callbacks only update state or copy into a bounded queue; they never invoke
-/// application code. Destroy waits for callbacks before freeing their storage.
-/// `io` and allocator must outlive the peer. Event payloads borrow poll output.
+/// Use the WebRTC peer from one owner. Callbacks write to a bounded queue.
+/// The allocator and I/O context must outlive it.
 pub const Peer = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -47,10 +47,13 @@ pub const Peer = struct {
             options.maximum_buffered_send == 0 or options.ice_servers.len > 64) return error.InvalidConfiguration;
         const self = try allocator.create(Peer);
         errdefer allocator.destroy(self);
+
         const bytes = try allocator.alloc(u8, options.queue_bytes);
         errdefer allocator.free(bytes);
+
         const entries = try allocator.alloc(Queue.Entry, options.queue_entries);
         errdefer allocator.free(entries);
+
         self.* = .{ .allocator = allocator, .io = io, .options = options, .queue = try Queue.init(bytes, entries) };
         var config = std.mem.zeroes(c.rtcConfiguration);
         config.disableAutoNegotiation = true;
@@ -60,6 +63,7 @@ pub const Peer = struct {
         self.id = c.rtcCreatePeerConnection(&config);
         if (self.id < 0) return error.WebRtcFailure;
         errdefer _ = c.rtcDeletePeerConnection(self.id);
+
         c.rtcSetUserPointer(self.id, self);
         try check(c.rtcSetStateChangeCallback(self.id, onState));
         try check(c.rtcSetGatheringStateChangeCallback(self.id, onGathered));
@@ -86,7 +90,7 @@ pub const Peer = struct {
         self.id = -1;
     }
 
-    /// Exactly once, after the last owner operation. close itself is idempotent.
+    /// Call this once when the owner is finished with the peer.
     pub fn destroy(self: *Peer) void {
         self.close();
         const allocator = self.allocator;
@@ -98,6 +102,7 @@ pub const Peer = struct {
     pub fn getState(self: *Peer) State {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+
         return self.state;
     }
 
@@ -133,7 +138,7 @@ pub const Peer = struct {
         try check(c.rtcSetLocalDescription(self.id, "offer"));
     }
 
-    /// Caller must verify the SDP identity before passing remote descriptions.
+    /// Verify the SDP identity before setting the remote description.
     pub fn remoteDescription(self: *Peer, sdp: [:0]const u8, kind: enum { offer, answer }) !void {
         const state = self.getState();
         if ((kind == .offer and state != .new) or (kind == .answer and state != .connecting)) return error.InvalidState;
@@ -157,6 +162,7 @@ pub const Peer = struct {
     pub fn poll(self: *Peer, output: []u8) !?Event {
         return self.pollRestricted(output, false);
     }
+
     pub fn pollRestricted(self: *Peer, output: []u8, signals_only: bool) !?Event {
         self.mutex.lockUncancelable(self.io);
         if (self.stopping or self.state == .closed or self.state == .failed) {
@@ -177,6 +183,7 @@ pub const Peer = struct {
         }
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+
         if (signals_only and self.queue.count != 0 and self.queue.entries[self.queue.head].tag >= 3) return null;
         const entry = try self.queue.pop(output) orelse return null;
         return switch (entry.tag) {
@@ -189,9 +196,7 @@ pub const Peer = struct {
         };
     }
 
-    /// Queue a complete message. Backpressure is checked before any fragments.
-    /// If a native send fails after partial submission, the peer closes to avoid
-    /// corrupting countdown framing on a subsequent send.
+    /// A partial native send closes the peer so later frames cannot be corrupted.
     pub fn send(self: *Peer, data: []const u8, reliability: framing.Reliability, scratch: []u8) !void {
         var encoder = try framing.Encoder.init(data, reliability, self.options.maximum_message_size);
         if (!self.ready()) return error.InvalidState;
@@ -229,7 +234,7 @@ pub const Peer = struct {
         self.channels[index] = channel;
         transferred = true;
         self.mutex.unlock(self.io);
-        // Channel ownership has transferred; failure is fatal, cleanup occurs in close.
+        // The peer owns this channel from this point on.
         c.rtcSetUserPointer(channel, self);
         try check(c.rtcSetMessageCallback(channel, onMessage));
         try check(c.rtcSetClosedCallback(channel, onClosed));
@@ -239,26 +244,32 @@ pub const Peer = struct {
     fn from(ptr: ?*anyopaque) *Peer {
         return @ptrCast(@alignCast(ptr.?));
     }
+
     fn enqueue(self: *Peer, tag: u8, bytes: []const u8) void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+
         if (self.stopping or self.state == .failed) return;
         self.queue.push(tag, bytes) catch {
             self.state = .failed;
         };
     }
+
     fn onDescription(_: c_int, sdp: [*c]const u8, kind: [*c]const u8, ptr: ?*anyopaque) callconv(.c) void {
         const self = from(ptr);
         if (!self.options.disable_trickle) self.enqueue(if (std.mem.eql(u8, std.mem.span(kind), "offer")) 0 else 1, std.mem.span(sdp));
     }
+
     fn onCandidate(_: c_int, value: [*c]const u8, _: [*c]const u8, ptr: ?*anyopaque) callconv(.c) void {
         const self = from(ptr);
         if (!self.options.disable_trickle) self.enqueue(2, std.mem.span(value));
     }
+
     fn onState(_: c_int, state: c.rtcState, ptr: ?*anyopaque) callconv(.c) void {
         const self = from(ptr);
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+
         if (!self.stopping and self.state != .failed) self.state = switch (state) {
             c.RTC_NEW => .new,
             c.RTC_CONNECTING => .connecting,
@@ -268,36 +279,44 @@ pub const Peer = struct {
             else => .closed,
         };
     }
+
     fn onGathered(_: c_int, state: c.rtcGatheringState, ptr: ?*anyopaque) callconv(.c) void {
         const self = from(ptr);
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+
         self.gathered = state == c.RTC_GATHERING_COMPLETE;
     }
+
     fn onChannel(_: c_int, channel: c_int, ptr: ?*anyopaque) callconv(.c) void {
         const self = from(ptr);
         self.attach(channel) catch {
             onClosed(channel, ptr);
         };
     }
+
     fn onMessage(channel: c_int, data: [*c]const u8, size: c_int, ptr: ?*anyopaque) callconv(.c) void {
-        if (size < 0) return; // NOOP: Text messages are not part of the binary transport.
+        if (size < 0) return;
         const self = from(ptr);
         self.mutex.lockUncancelable(self.io);
         const reliable = self.channels[0] == channel;
         self.mutex.unlock(self.io);
         self.enqueue(if (reliable) 3 else 4, data[0..@intCast(size)]);
     }
+
     fn onClosed(_: c_int, ptr: ?*anyopaque) callconv(.c) void {
         const self = from(ptr);
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+
         if (!self.stopping) self.state = .failed;
     }
+
     fn onError(id: c_int, _: [*c]const u8, ptr: ?*anyopaque) callconv(.c) void {
         onClosed(id, ptr);
     }
 };
+
 fn check(result: c_int) error{WebRtcFailure}!void {
     if (result < 0) return error.WebRtcFailure;
 }
@@ -305,6 +324,7 @@ fn check(result: c_int) error{WebRtcFailure}!void {
 test "native callback queue exhaustion fails closed with bounded storage" {
     const value = try Peer.create(std.testing.allocator, std.testing.io, .{ .queue_entries = 2, .queue_bytes = framing.maximum_segment_payload + 1 });
     defer value.destroy();
+
     value.enqueue(3, "a");
     value.enqueue(3, "b");
     value.enqueue(3, "c");

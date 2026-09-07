@@ -104,8 +104,7 @@ Connections have one application owner. Received data borrows connection storage
 | `zig build test -Doptimize=ReleaseSafe` | Core tests with release safety checks |
 | `zig build test-native -Doptimize=ReleaseSafe` | Native suite with release safety checks |
 | `zig build bench` | Codec, framing, and queue microbenchmarks |
-| `zig fmt --check build.zig build.zig.zon src examples` | Formatting check |
-
+| `zig fmt --check build.zig build.zig.zon tests.zig native_tests.zig src tests benchmarks examples` | Formatting check |
 
 Coverage-guided fuzzing is unavailable on Windows in Zig 0.16. The ordinary test suite runs the fuzz corpus and deterministic malformed-input tests.
 
@@ -114,7 +113,9 @@ Coverage-guided fuzzing is unavailable on Windows in Zig 0.16. The ordinary test
 | Path | Contents |
 |---|---|
 | [src/root.zig](src/root.zig) | Public API exports |
-| [src/](src/) | Protocol implementation, colocated tests, and wire fixtures |
+| [src/](src/) | Production library code and colocated unit tests |
+| [tests/](tests/) | Core, fuzz, wire, and native integration suites and fixtures |
+| [benchmarks/](benchmarks/) | Performance benchmarks |
 | [examples/](examples/) | Small applications using the public module |
 | [tools/](tools/) | Native setup and bounds patch |
 | [docs/GUIDE.md](docs/GUIDE.md) | API, ownership, authentication, and resource limits |

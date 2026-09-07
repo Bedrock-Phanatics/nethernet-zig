@@ -20,6 +20,7 @@ pub const Options = struct {
     identity: ?auth.Identity = null,
     verify_client: ?auth.Verifier = null,
 };
+
 pub const Event = union(enum) {
     signal: Signal,
     message: Message,
@@ -46,9 +47,7 @@ const Assembly = struct {
     }
 };
 
-/// One application owner drives poll/send/applySignal/close. Native callbacks are
-/// synchronized internally. Message data borrows reassembly storage until the
-/// next poll; signal strings borrow internal storage until the next poll.
+/// Use the connection from one owner. Event data lasts until the next poll.
 pub const Connection = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -79,19 +78,25 @@ pub const Connection = struct {
         if (options.maximum_message_size == 0 or options.maximum_message_size > framing.maximum_segment_payload * 256 or options.negotiation_timeout_ms == 0 or options.connection_timeout_ms == 0 or options.reassembly_timeout_ms == 0) return error.InvalidConfiguration;
         const self = try a.create(Connection);
         errdefer a.destroy(self);
+
         if (remote_id.len > 4096 or options.local_network_id.len > 4096) return error.InvalidConfiguration;
         const local_id = try a.dupe(u8, options.local_network_id);
         errdefer a.free(local_id);
+
         const name = try a.dupe(u8, remote_id);
         errdefer a.free(name);
+
         const scratch = try a.alloc(u8, 1024 * 1024 + 1);
         errdefer a.free(scratch);
+
         const send_buffer = try a.alloc(u8, framing.maximum_segment_payload + 1);
         errdefer a.free(send_buffer);
+
         var native_options = options.native;
         native_options.maximum_message_size = options.maximum_message_size;
         const peer = try native.Peer.create(a, io, native_options);
         errdefer peer.destroy();
+
         self.* = .{ .allocator = a, .io = io, .peer = peer, .role = role, .id = id, .remote_id = name, .local_id = local_id, .options = options, .scratch = scratch, .send_buffer = send_buffer, .started = std.Io.Clock.awake.now(io) };
         if (role == .server and self.options.identity == null) {
             const key = jwt.Scheme.KeyPair.generate(io);
@@ -113,22 +118,28 @@ pub const Connection = struct {
         self.allocator.free(self.local_id);
         self.allocator.destroy(self);
     }
+
     pub fn close(self: *Connection) void {
         self.peer.close();
     }
+
     pub fn ready(self: *Connection) bool {
         return self.peer.ready();
     }
+
     pub fn state(self: *Connection) native.State {
         return self.peer.getState();
     }
+
     pub fn start(self: *Connection) !void {
         if (self.role != .client) return error.InvalidState;
         try self.peer.offer();
     }
+
     pub fn applySignal(self: *Connection, signal: Signal) !void {
         if (signal.connection_id != self.id or !std.mem.eql(u8, signal.network_id, self.remote_id)) return error.UnexpectedSignal;
         errdefer self.close();
+
         if (std.mem.eql(u8, signal.kind, Signal.failure)) return error.RemoteFailure;
         const is_offer = std.mem.eql(u8, signal.kind, Signal.offer);
         const is_answer = std.mem.eql(u8, signal.kind, Signal.answer);
@@ -136,6 +147,7 @@ pub const Connection = struct {
         if (signal.data.len > 1024 * 1024) return error.MessageTooLarge;
         const terminated = try self.allocator.dupeZ(u8, signal.data);
         defer self.allocator.free(terminated);
+
         if (!is_offer and !is_answer) return self.peer.remoteCandidate(terminated);
         if ((is_offer and self.role != .server) or (is_answer and self.role != .client)) return error.UnexpectedSignal;
         const identity_kind: auth.IdentityKind = if (self.role == .client) .server else .client;
@@ -149,12 +161,14 @@ pub const Connection = struct {
     pub fn poll(self: *Connection) !?Event {
         return self.pollInternal(false);
     }
-    /// Used by dialers/listeners to leave early application messages queued.
+    /// Lets dialers and listeners leave early messages in the queue.
     pub fn pollNegotiation(self: *Connection) !?Event {
         return self.pollInternal(true);
     }
+
     fn pollInternal(self: *Connection, signals_only: bool) !?Event {
         errdefer self.close();
+
         const now = std.Io.Clock.awake.now(self.io);
         if (self.peer.ready()) self.established = true;
         if (!self.established) {
@@ -190,15 +204,15 @@ pub const Connection = struct {
             },
         }
     }
+
     pub fn localAddress(self: *const Connection) Address {
         return .{ .network_id = self.local_id, .connection_id = self.id };
     }
+
     pub fn remoteAddress(self: *const Connection) Address {
         return .{ .network_id = self.remote_id, .connection_id = self.id };
     }
-    /// Receives either channel without discarding messages from the other one.
-    /// Message data borrows storage until the next poll/receive. For custom
-    /// signaling, use poll and route its signal events instead.
+    /// Waits for either channel. Use poll when handling signaling yourself.
     pub fn receive(self: *Connection) !Message {
         while (true) {
             if (try self.poll()) |event| switch (event) {
@@ -208,6 +222,7 @@ pub const Connection = struct {
             try std.Io.sleep(self.io, .fromMilliseconds(1), .awake);
         }
     }
+
     pub fn send(self: *Connection, data: []const u8, reliability: framing.Reliability) !void {
         if (data.len > self.options.maximum_message_size) return error.MessageTooLarge;
         try self.peer.send(data, reliability, self.send_buffer);
@@ -219,6 +234,7 @@ pub const Connection = struct {
 fn assemblyAllocationScenario(a: std.mem.Allocator) !void {
     var assembly = Assembly{ .decoder = framing.Reassembler.init(&.{}, .reliable) };
     defer assembly.buffer.deinit(a);
+
     const frame = [_]u8{1} ++ [_]u8{42} ** 1024;
     _ = try assembly.push(a, std.testing.io, &frame, 4096);
     const final = [_]u8{0} ++ [_]u8{43} ** 1024;
@@ -226,6 +242,7 @@ fn assemblyAllocationScenario(a: std.mem.Allocator) !void {
     try std.testing.expectEqual(@as(usize, 2048), message.len);
     for (message[0..1024]) |byte| try std.testing.expectEqual(@as(u8, 42), byte);
 }
+
 test "reassembly growth and every allocation failure preserve ownership" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, assemblyAllocationScenario, .{});
 }
@@ -233,14 +250,18 @@ test "reassembly growth and every allocation failure preserve ownership" {
 fn connectionCreationFailureScenario(a: std.mem.Allocator) !void {
     const value = try Connection.create(a, std.testing.io, .server, 1, "remote", .{ .local_network_id = "local" });
     defer value.destroy();
+
     try std.testing.expectEqualStrings("local", value.localAddress().network_id);
 }
+
 test "connection setup allocation failures release native and Zig resources" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, connectionCreationFailureScenario, .{});
 }
+
 test "negotiation timeout and repeated close fail pending sends" {
     const value = try Connection.create(std.testing.allocator, std.testing.io, .client, 1, "remote", .{ .negotiation_timeout_ms = 1 });
     defer value.destroy();
+
     try std.Io.sleep(std.testing.io, .fromMilliseconds(3), .awake);
     try std.testing.expectError(error.Timeout, value.poll());
     value.close();
@@ -251,6 +272,7 @@ test "negotiation timeout and repeated close fail pending sends" {
 test "incomplete reassembly expires and closes connection" {
     const value = try Connection.create(std.testing.allocator, std.testing.io, .client, 1, "remote", .{ .reassembly_timeout_ms = 1 });
     defer value.destroy();
+
     value.established = true;
     _ = try value.assemblies[0].push(std.testing.allocator, std.testing.io, &.{ 1, 42 }, 1024);
     try std.Io.sleep(std.testing.io, .fromMilliseconds(3), .awake);

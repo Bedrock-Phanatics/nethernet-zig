@@ -1,8 +1,6 @@
 const std = @import("std");
 
-/// Single-owner byte ring. Metadata and payload storage are caller-owned.
-/// Failed writes/reads are transactional. External synchronization is required
-/// when transferring between threads; the WebRTC adapter supplies that lock.
+/// A single owner uses this ring with storage provided by the caller.
 pub const Queue = struct {
     pub const Entry = struct { tag: u8, len: usize };
     bytes: []u8,
@@ -16,6 +14,7 @@ pub const Queue = struct {
         if (bytes.len == 0 or entries.len == 0) return error.InvalidConfiguration;
         return .{ .bytes = bytes, .entries = entries };
     }
+
     pub fn push(self: *Queue, tag: u8, data: []const u8) !void {
         if (self.count == self.entries.len or data.len > self.bytes.len - self.used_bytes) return error.QueueFull;
         const start = (self.read_byte + self.used_bytes) % self.bytes.len;
@@ -26,6 +25,7 @@ pub const Queue = struct {
         self.used_bytes += data.len;
         self.count += 1;
     }
+
     pub fn pop(self: *Queue, output: []u8) !?struct { tag: u8, data: []const u8 } {
         if (self.count == 0) return null;
         const entry = self.entries[self.head];

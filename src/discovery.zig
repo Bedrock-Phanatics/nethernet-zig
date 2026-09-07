@@ -2,21 +2,21 @@ const std = @import("std");
 const codec = @import("discovery_codec.zig");
 const Signal = @import("signal.zig").Signal;
 const ServerData = @import("server_data.zig").ServerData;
+
 pub const default_port = 7551;
 pub const Options = struct {
     network_id: u64 = 0,
     maximum_servers: u32 = 1024,
     broadcast_endpoint: ?std.Io.net.IpAddress = null,
 };
+
 pub const Known = struct {
     endpoint: std.Io.net.IpAddress,
     last_seen: std.Io.Timestamp,
     response: ?[]u8 = null,
 };
 
-/// Single application owner. poll drives discovery, expiration and signaling;
-/// no hidden thread is created. Map responses borrow owned cache memory until
-/// refreshed/expired/destroyed. Signals borrow scratch until the next poll/send.
+/// Call poll from one owner. Returned responses and signals use internal storage.
 pub const Discovery = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -37,10 +37,13 @@ pub const Discovery = struct {
         if (options.maximum_servers == 0) return error.InvalidConfiguration;
         const self = try a.create(Discovery);
         errdefer a.destroy(self);
+
         const buffers = try a.alloc(u8, codec.maximum_datagram * 3);
         errdefer a.free(buffers);
+
         const socket = try address.bind(io, .{ .mode = .dgram, .protocol = .udp, .allow_broadcast = true });
         errdefer socket.close(io);
+
         var actual = options;
         if (actual.broadcast_endpoint == null and socket.address.getPort() != default_port) actual.broadcast_endpoint = try std.Io.net.IpAddress.parseLiteral("255.255.255.255:7551");
         var random: [8]u8 = undefined;
@@ -49,11 +52,13 @@ pub const Discovery = struct {
         try self.servers.ensureTotalCapacity(a, options.maximum_servers);
         return self;
     }
+
     pub fn close(self: *Discovery) void {
         if (self.closed) return;
         self.closed = true;
         self.socket.close(self.io);
     }
+
     pub fn destroy(self: *Discovery) void {
         self.close();
         var it = self.servers.valueIterator();
@@ -63,30 +68,35 @@ pub const Discovery = struct {
         self.allocator.free(self.buffers);
         self.allocator.destroy(self);
     }
+
     pub fn setServerData(self: *Discovery, data: ServerData) !void {
         const encoded = try data.encode(self.plain());
         const owned = try self.allocator.dupe(u8, encoded);
         if (self.advertisement) |old| self.allocator.free(old);
         self.advertisement = owned;
     }
+
     pub fn setPongData(self: *Discovery, pong: []const u8) !void {
         try self.setServerData(try ServerData.fromPong(pong));
     }
+
     pub fn request(self: *Discovery, address: std.Io.net.IpAddress) !void {
         try self.write(.request, address);
     }
+
     pub fn send(self: *Discovery, signal: Signal) !void {
         const recipient = std.fmt.parseInt(u64, signal.network_id, 10) catch return error.InvalidNetworkId;
         const known = self.servers.get(recipient) orelse return error.UnknownNetworkId;
         const data = try signal.encode(self.input());
         try self.write(.{ .message = .{ .recipient_id = recipient, .data = data } }, known.endpoint);
     }
+
     pub fn tick(self: *Discovery) !void {
         if (self.closed) return error.ConnectionClosed;
         const now = std.Io.Clock.awake.now(self.io);
         if (self.last_tick.durationTo(now).toMilliseconds() < 2000) return;
         self.last_tick = now;
-        // Removal does not invalidate the hash map's storage or iterator.
+        // Removing the current entry keeps this iterator valid.
         var it = self.servers.iterator();
         while (it.next()) |entry| {
             if (entry.value_ptr.last_seen.durationTo(now).toMilliseconds() > 15000) {
@@ -96,6 +106,7 @@ pub const Discovery = struct {
         }
         if (self.options.broadcast_endpoint) |address| try self.request(address);
     }
+
     pub fn poll(self: *Discovery, timeout_ms: u32) !?Signal {
         try self.tick();
         const message = self.receive(timeout_ms) catch |err| switch (err) {
@@ -140,15 +151,17 @@ pub const Discovery = struct {
         }
         return null;
     }
+
     fn receive(self: *Discovery, timeout_ms: u32) !std.Io.net.IncomingMessage {
         return self.socket.receiveTimeout(self.io, self.input(), .{ .duration = .{ .raw = .fromMilliseconds(timeout_ms), .clock = .awake } }) catch |err| switch (err) {
-            // Zig 0.16 Threaded on Windows does not support concurrent batches
-            // for UDP receive. Its cancellable blocking receive does work.
+            // Zig 0.16 cannot batch concurrent UDP receives on Windows.
+            // A cancellable blocking receive works correctly here.
             error.ConcurrencyUnavailable => {
                 const Result = union(enum) { packet: std.Io.net.Socket.ReceiveError!std.Io.net.IncomingMessage, timeout: std.Io.Cancelable!void };
                 var results: [2]Result = undefined;
                 var select = std.Io.Select(Result).init(self.io, &results);
                 defer select.cancelDiscard();
+
                 try select.concurrent(.packet, std.Io.net.Socket.receive, .{ &self.socket, self.io, self.input() });
                 try select.concurrent(.timeout, std.Io.sleep, .{ self.io, std.Io.Duration.fromMilliseconds(timeout_ms), .awake });
                 return switch (try select.await()) {
@@ -162,18 +175,22 @@ pub const Discovery = struct {
             else => return err,
         };
     }
+
     fn write(self: *Discovery, packet: codec.Packet, address: std.Io.net.IpAddress) !void {
         if (self.closed) return error.ConnectionClosed;
         const wire = try self.codec.encode(packet, self.id, self.plain(), self.output());
         if (wire.len > 65507) return error.MessageTooLarge;
         try self.socket.send(self.io, &address, wire);
     }
+
     fn input(self: *Discovery) []u8 {
         return self.buffers[0..codec.maximum_datagram];
     }
+
     fn plain(self: *Discovery) []u8 {
         return self.buffers[codec.maximum_datagram .. codec.maximum_datagram * 2];
     }
+
     fn output(self: *Discovery) []u8 {
         return self.buffers[codec.maximum_datagram * 2 ..];
     }
@@ -185,8 +202,10 @@ test "UDP discovery and addressed signaling over loopback" {
     const address = try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0");
     const server = try Discovery.listen(a, io, address, .{ .network_id = 2 });
     defer server.destroy();
+
     const client = try Discovery.listen(a, io, address, .{ .network_id = 1 });
     defer client.destroy();
+
     try server.setServerData(.{ .server_name = "Zig" });
     try client.request(server.socket.address);
     _ = try server.poll(1000);
@@ -204,8 +223,10 @@ test "UDP discovery and addressed signaling over loopback" {
 fn creationFailureScenario(a: std.mem.Allocator) !void {
     const discovery = try Discovery.listen(a, std.testing.io, try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0"), .{ .maximum_servers = 2 });
     defer discovery.destroy();
+
     try discovery.setServerData(.{ .server_name = "allocation failure" });
 }
+
 test "discovery creation and advertisement allocation failures clean up" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, creationFailureScenario, .{});
 }

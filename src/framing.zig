@@ -5,8 +5,7 @@ pub const maximum_segments = 255;
 pub const default_maximum_message_size = 16 * 1024 * 1024;
 pub const Reliability = enum { reliable, unreliable };
 
-/// Borrows the message until exhausted. Caller owns and reuses the output buffer.
-/// Finish sending one iterator before starting another on the same channel.
+/// The message stays borrowed while the caller reuses the output buffer.
 pub const Encoder = struct {
     data: []const u8,
     offset: usize = 0,
@@ -19,7 +18,7 @@ pub const Encoder = struct {
 
     pub fn next(self: *Encoder, output: []u8) error{NoSpaceLeft}!?[]const u8 {
         const left = self.data.len - self.offset;
-        if (left == 0) return null; // NOOP: Empty messages emit no frames.
+        if (left == 0) return null;
         const count: usize = @min(left, maximum_segment_payload);
         if (output.len < count + 1) return error.NoSpaceLeft;
         output[0] = @intCast((left - 1) / maximum_segment_payload);
@@ -29,9 +28,8 @@ pub const Encoder = struct {
     }
 };
 
-/// Single-owner, caller-provided reassembly storage; no heap allocation or locks.
-/// Returned messages borrow storage until the next push/reset. Copy or consume
-/// before the next push. Feed complete binary WebRTC messages, never raw UDP.
+/// Reassembles WebRTC messages in storage provided by the caller.
+/// Results remain valid until the next push or reset.
 pub const Reassembler = struct {
     storage: []u8,
     reliability: Reliability,
@@ -52,6 +50,7 @@ pub const Reassembler = struct {
     pub fn push(self: *Reassembler, fragment: []const u8) !?[]const u8 {
         if (self.failed) return error.ConnectionClosed;
         errdefer self.failed = true;
+
         if (fragment.len < 2) return error.MalformedFragment;
         const remaining = fragment[0];
         if (self.reliability == .unreliable and remaining != 0) return error.MalformedFragment;
@@ -81,11 +80,14 @@ test "fragment boundaries and reassembly" {
     const allocator = std.testing.allocator;
     const data = try allocator.alloc(u8, maximum_segment_payload * 2 + 1);
     defer allocator.free(data);
+
     for (data, 0..) |*byte, i| byte.* = @truncate(i);
     const storage = try allocator.alloc(u8, data.len);
     defer allocator.free(storage);
+
     const frame = try allocator.alloc(u8, maximum_segment_payload + 1);
     defer allocator.free(frame);
+
     for ([_]usize{ 1, 32, maximum_segment_payload - 1, maximum_segment_payload, maximum_segment_payload + 1, data.len }) |size| {
         var encoder = try Encoder.init(data[0..size], .reliable, data.len);
         var decoder = Reassembler.init(storage, .reliable);

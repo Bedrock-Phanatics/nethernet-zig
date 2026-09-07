@@ -1,4 +1,5 @@
 const std = @import("std");
+
 const Hmac = std.crypto.auth.hmac.sha2.HmacSha256;
 const Aes = std.crypto.core.aes.Aes256;
 pub const maximum_payload = 65535;
@@ -9,10 +10,10 @@ pub const Packet = union(enum(u16)) {
     response: []const u8 = 1,
     message: struct { recipient_id: u64, data: []const u8 } = 2,
 };
+
 pub const Decoded = struct { sender_id: u64, packet: Packet };
 
-/// Immutable expanded keys; may be shared between threads. Encoding/decoding
-/// uses caller-owned, non-overlapping scratch/output buffers and allocates nothing.
+/// The caller provides separate buffers that the codec can reuse.
 pub const Codec = struct {
     key: [32]u8,
     enc: std.crypto.core.aes.AesEncryptCtx(Aes),
@@ -65,8 +66,7 @@ pub const Codec = struct {
         return output[0 .. padded + 32];
     }
 
-    /// Result borrows scratch until its next mutation. Hex advertisements decode
-    /// in place. Authentication failures never expose plaintext to the caller.
+    /// The result uses the scratch buffer. Failed authentication never exposes plaintext.
     pub fn decode(self: *const Codec, datagram: []const u8, scratch: []u8) !Decoded {
         if (datagram.len < 48 or datagram.len > maximum_datagram or (datagram.len - 32) % 16 != 0) return error.MalformedPacket;
         const padded = datagram.len - 32;
@@ -86,8 +86,7 @@ pub const Codec = struct {
     }
 };
 
-/// Authenticated plaintext decoder, also exposed as a bounded fuzzing target.
-/// Response data overwrites its hex representation in payload.
+/// Decodes authenticated payloads in the provided buffer.
 pub fn decodePayload(payload: []u8) !Decoded {
     if (payload.len < 20 or payload.len > maximum_payload) return error.MalformedPacket;
     const declared = std.mem.readInt(u16, payload[0..2], .little);
@@ -110,7 +109,7 @@ pub fn decodePayload(payload: []u8) !Decoded {
             if (payload.len < 32) return error.MalformedPacket;
             const len = std.mem.readInt(u32, payload[28..32], .little);
             if (len > payload.len - 32) return error.MalformedPacket;
-            // Reference accepts all trailing bytes, even beyond the declared string.
+            // Bedrock accepts trailing bytes after the declared string.
             break :blk .{ .message = .{ .recipient_id = std.mem.readInt(u64, payload[20..28], .little), .data = payload[32..] } };
         },
         else => return error.MalformedPacket,

@@ -1,13 +1,12 @@
 const std = @import("std");
-const discovery = @import("discovery_codec.zig");
-const framing = @import("framing.zig");
-const Signal = @import("signal.zig").Signal;
-const ServerData = @import("server_data.zig").ServerData;
+const discovery = @import("../src/discovery_codec.zig");
+const framing = @import("../src/framing.zig");
+const Signal = @import("../src/signal.zig").Signal;
+const ServerData = @import("../src/server_data.zig").ServerData;
 
 pub fn exercise(input: []u8) void {
     var scratch: [4096]u8 = undefined;
     const codec = discovery.Codec.init();
-    // NOOP on parser errors: malformed inputs are expected; crashes are not.
     _ = codec.decode(input, &scratch) catch {};
     _ = Signal.parse(input) catch {};
     _ = ServerData.decode(input) catch {};
@@ -20,14 +19,17 @@ pub fn exercise(input: []u8) void {
     }
     _ = discovery.decodePayload(input) catch {};
 }
+
 fn fuzzOne(_: void, smith: *std.testing.Smith) !void {
     var bytes: [4096]u8 = undefined;
     const len = smith.sliceWithHash(&bytes, 0x74129);
     exercise(bytes[0..len]);
 }
+
 test "fuzz protocol parsers and fragment state transitions" {
     try std.testing.fuzz({}, fuzzOne, .{ .corpus = &.{ "", "CONNECTREQUEST 7 v=0\r\n", &.{ 1, 2, 0, 3 } } });
 }
+
 test "deterministic malformed input campaign" {
     var random = std.Random.DefaultPrng.init(0xBEdBEd);
     var bytes: [4096]u8 = undefined;
