@@ -101,6 +101,7 @@ Connections have one application owner. Received data borrows connection storage
 |---|---|
 | `zig build test` | Core tests; no native dependency required |
 | `zig build test-native` | Real WebRTC, LAN, HTTP, and UDP fault-relay tests |
+| `zig build fuzz -Dfuzz-iterations=100000` | Fuzz corpus and deterministic malformed-input campaign |
 | `zig build test -Doptimize=ReleaseSafe` | Core tests with release safety checks |
 | `zig build test-native -Doptimize=ReleaseSafe` | Native suite with release safety checks |
 | `zig build bench` | Codec, framing, and queue microbenchmarks |

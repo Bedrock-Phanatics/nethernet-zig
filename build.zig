@@ -34,6 +34,10 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const native_prefix = b.option([]const u8, "native-prefix", "Installation prefix of patched libdatachannel") orelse b.pathFromRoot(".deps/native");
+    const fuzz_iterations = b.option(usize, "fuzz-iterations", "Number of deterministic fuzz inputs") orelse 20_000;
+
+    const build_options = b.addOptions();
+    build_options.addOption(usize, "fuzz_iterations", fuzz_iterations);
 
     const public_module = b.addModule("nethernet", .{
         .root_source_file = b.path("src/root.zig"),
@@ -44,8 +48,11 @@ pub fn build(b: *std.Build) void {
     addNative(b, public_module, target, native_prefix);
 
     const core_root = module(b, "tests.zig", target, optimize);
+    core_root.addOptions("build_options", build_options);
     const core_tests = b.addTest(.{ .root_module = core_root });
-    b.step("test", "Run core codec, discovery, fuzz corpus and allocation tests").dependOn(&b.addRunArtifact(core_tests).step);
+    const run_core_tests = b.addRunArtifact(core_tests);
+    b.step("test", "Run core codec, discovery, fuzz corpus and allocation tests").dependOn(&run_core_tests.step);
+    b.step("fuzz", "Run the fuzz corpus and deterministic malformed-input campaign").dependOn(&run_core_tests.step);
     b.default_step.dependOn(&core_tests.step);
 
     const native_root = nativeModule(b, "native_tests.zig", target, optimize, native_prefix);

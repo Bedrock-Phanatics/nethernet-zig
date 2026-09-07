@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_options = @import("build_options");
 const discovery = @import("../src/discovery_codec.zig");
 const framing = @import("../src/framing.zig");
 const Signal = @import("../src/signal.zig").Signal;
@@ -33,7 +34,7 @@ test "fuzz protocol parsers and fragment state transitions" {
 test "deterministic malformed input campaign" {
     var random = std.Random.DefaultPrng.init(0xBEdBEd);
     var bytes: [4096]u8 = undefined;
-    for (0..20000) |i| {
+    for (0..build_options.fuzz_iterations) |i| {
         const len = i % bytes.len;
         random.random().bytes(bytes[0..len]);
         exercise(bytes[0..len]);
