@@ -1,4 +1,4 @@
-# NetherNet for Zig 0.16
+# nethernet-zig
 
 A Minecraft Bedrock NetherNet networking library for Zig 0.16.
 
