@@ -1,4 +1,0 @@
-<Solution>
-  <Project Path="src/NetherNet/NetherNet.csproj" />
-  <Project Path="tests/NetherNet.Tests/NetherNet.Tests.csproj" />
-</Solution>

@@ -1,0 +1,2 @@
+tools/*.sh text eol=lf
+tools/*.patch text eol=lf

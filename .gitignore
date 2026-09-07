@@ -1,54 +1,23 @@
-# .NET build output
-[Bb]in/
-[Oo]bj/
+# Build output and local native dependencies
+.zig-cache/
+zig-out/
+.deps/
 artifacts/
-[Dd]ebug/
-[Rr]elease/
 
-# Tests, coverage, and benchmarks
-[Tt]est[Rr]esults/
-coverage/
-*.coverage
-*.coveragexml
-*.trx
-BenchmarkDotNet.Artifacts/
-
-# NuGet packages and locally produced packages
-packages/
-.nuget/
-*.nupkg
-*.snupkg
-
-# Visual Studio / VS Code
-.vs/
-.vscode/
-*.suo
-*.user
-*.userosscache
-*.sln.docstates
-
-# JetBrains Rider / ReSharper
+# Editor state
 .idea/
-*.sln.iml
-_ReSharper*/
-*.DotSettings.user
+.vscode/
 
-# Local tooling, logs, and temporary files
-*.lscache
+# Local files
 *.log
 *.tmp
 *.pid
-.upstream-*/
-
-# Local environment and private key material
 .env
 .env.*
 !.env.example
 *.key
 *.pfx
 *.p12
-
-# Operating-system metadata
 .DS_Store
 Thumbs.db
 Desktop.ini

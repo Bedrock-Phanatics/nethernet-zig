@@ -1,111 +1,125 @@
-# NetherNet for .NET 10
+# NetherNet for Zig 0.16
 
-An implementation of Minecraft: Bedrock Edition's NetherNet transport for C# and .NET 10, ported from [`df-mc/go-nethernet`](https://github.com/df-mc/go-nethernet).
+A Minecraft Bedrock NetherNet networking library for Zig 0.16.
 
-The library includes:
+- LAN discovery and signaling, including encrypted advertisements.
+- HTTP/HTTPS endpoint dialing and an HTTP endpoint listener.
+- ES384 identity tokens and signed SDP fingerprint assertions.
+- Reliable ordered and unreliable unordered WebRTC messages.
+- Bounded queues, explicit ownership, configurable limits, and reusable buffers.
 
-- WebRTC ICE/DTLS/SCTP connections with Minecraft's reliable and unreliable data channels.
-- NetherNet message fragmentation and reconstruction (up to 255 segments).
-- LAN discovery on UDP port `7551`, including the vanilla AES-ECB/HMAC packet envelope.
-- Version 6 server advertisements and RakNet pong-data conversion.
-- HTTP/HTTPS `/v1/join` endpoint signaling.
-- ES384 identity tokens and detached DTLS fingerprint assertions.
-- Trickle ICE and complete-SDP (non-trickle) negotiation.
+WebRTC uses **libdatachannel 0.24.5** with a local bounds patch and **Mbed TLS 3.6.7**.
 
 ## Build
 
-```powershell
-dotnet build NetherNet.slnx
-dotnet test NetherNet.slnx
-```
+Run all commands from the repository root.
 
-## LAN server
+### Windows
 
-```csharp
-using System.Net;
-using NetherNet;
-using NetherNet.Discovery;
+Requires Zig **0.16.0**, Git, and Python:
 
-await using var discovery = DiscoveryListener.Listen(
-    new IPEndPoint(IPAddress.Any, DiscoveryListener.DefaultPort));
+~~~powershell
+./tools/setup-native.ps1
+zig build
+~~~
 
-discovery.SetServerData(new ServerData
-{
-    ServerName = "My Server",
-    LevelName = "My World",
-    GameType = GameType.Survival,
-    MaxPlayerCount = 20,
-    AcceptsOnlineAuth = true,
-    AcceptsSelfSignedAuth = true,
-    Nonce = Convert.ToHexString(Guid.NewGuid().ToByteArray()).ToLowerInvariant()
+Setup keeps downloaded sources, CMake, Ninja, and native build output under `.deps/`. The build compiles the tests and installs examples and the native DLL into `zig-out/bin/`.
+
+### Linux and macOS
+
+The POSIX setup script requires Zig 0.16.0, Git, Python 3, CMake, and a C/C++ toolchain:
+
+~~~sh
+sh tools/setup-native.sh
+zig build
+~~~
+
+These platforms have not been runtime-validated. Ensure the installed libdatachannel shared library is discoverable by your platform's loader when running installed executables.
+
+To use an existing installation of the patched native dependency:
+
+~~~powershell
+zig build -Dnative-prefix=/absolute/path/to/native
+~~~
+
+## Run the echo example
+
+After building, start the listener in one terminal:
+
+~~~powershell
+./zig-out/bin/echo.exe
+~~~
+
+In a second terminal, also in this directory:
+
+~~~powershell
+./zig-out/bin/client.exe
+~~~
+
+The client prints `received hello`. These examples bind to loopback port 18750, exchange one reliable message, and exit. The listener allows anonymous clients for this local demonstration.
+
+Source: [client.zig](examples/client.zig) · [echo.zig](examples/echo.zig)
+
+## Use the library
+
+The public module is `nethernet`. Add this directory as a dependency in your application's package manifest, then import it in your build:
+
+~~~zig
+const dependency = b.dependency("nethernet", .{
+    .target = target,
+    .optimize = optimize,
+    .@"native-prefix" = native_prefix,
 });
+exe.root_module.addImport("nethernet", dependency.module("nethernet"));
+~~~
 
-await using var listener = NetherNetListener.Listen(discovery, new ListenerOptions
-{
-    // Set false in production and provide VerifyClientToken for authenticated clients.
-    AllowAnonymous = true
-});
+The native prefix is the absolute installation path of the patched native dependency. Distribute its shared library and applicable license notices with your application.
 
-await using NetherNetConnection connection = await listener.AcceptAsync();
-byte[] packet = await connection.ReceiveAsync();
-await connection.SendAsync(packet);
-```
+A minimal endpoint client:
 
-## LAN client
+~~~zig
+const std = @import("std");
+const nethernet = @import("nethernet");
 
-```csharp
-using System.Net;
-using NetherNet;
-using NetherNet.Discovery;
+pub fn main(init: std.process.Init) !void {
+    const connection = try nethernet.dialEndpoint(
+        init.gpa, init.io, "http://127.0.0.1:18750", 123, .{},
+    );
+    defer connection.destroy();
 
-await using var discovery = DiscoveryListener.Listen(new IPEndPoint(IPAddress.Any, 0));
+    try connection.send("hello", .reliable);
+    const message = try connection.receive();
+    std.debug.print("received {s}\n", .{message.data});
+}
+~~~
 
-// Responses are refreshed by the discovery listener every two seconds.
-await Task.Delay(TimeSpan.FromSeconds(3));
-ulong serverId = discovery.Responses.Keys.First();
+Connections have one application owner. Received data borrows connection storage until the next poll/receive. Closing is idempotent; call `destroy()` exactly once. See the [API and ownership guide](docs/GUIDE.md) before integrating custom signaling or authentication.
 
-await using NetherNetConnection connection = await new Dialer().DialAsync(
-    serverId.ToString(), discovery);
-```
+## Test and benchmark
 
-## HTTP endpoint server
+| Command | Purpose |
+|---|---|
+| `zig build test` | Core tests; no native dependency required |
+| `zig build test-native` | Real WebRTC, LAN, HTTP, and UDP fault-relay tests |
+| `zig build test -Doptimize=ReleaseSafe` | Core tests with release safety checks |
+| `zig build test-native -Doptimize=ReleaseSafe` | Native suite with release safety checks |
+| `zig build bench` | Codec, framing, and queue microbenchmarks |
+| `zig fmt --check build.zig build.zig.zon src examples` | Formatting check |
 
-```csharp
-using NetherNet;
-using NetherNet.Endpoint;
 
-var builder = WebApplication.CreateBuilder(args);
-var app = builder.Build();
-var signaling = app.MapNetherNet();
-await using var listener = NetherNetListener.Listen(signaling, new ListenerOptions
-{
-    AllowAnonymous = true
-});
+Coverage-guided fuzzing is unavailable on Windows in Zig 0.16. The ordinary test suite runs the fuzz corpus and deterministic malformed-input tests.
 
-await app.RunAsync();
-```
+## Directory guide
 
-For endpoint clients, create an `EndpointClient` and dial a network ID such as `https://example.com:443`.
+| Path | Contents |
+|---|---|
+| [src/root.zig](src/root.zig) | Public API exports |
+| [src/](src/) | Protocol implementation, colocated tests, and wire fixtures |
+| [examples/](examples/) | Small applications using the public module |
+| [tools/](tools/) | Native setup and bounds patch |
+| [docs/GUIDE.md](docs/GUIDE.md) | API, ownership, authentication, and resource limits |
+| [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Measurements, methodology, and limitations |
+| [docs/AUDIT.md](docs/AUDIT.md) | Compatibility review and validation scope |
+| [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md) | Native dependencies and licensing |
 
-## Resource limits
-
-Network-facing collections and negotiations are bounded by default. The limits can be tuned through:
-
-- `EndpointHandlerOptions.MaximumPendingOffers`
-- `ListenerOptions.MaximumConcurrentNegotiations`
-- `ListenerOptions.MaximumPendingAccepts`
-- `ListenerOptions.MaximumQueuedPacketsPerChannel`
-- `ListenerOptions.MaximumReconstructedMessageSize`
-- `DialerOptions.MaximumQueuedPacketsPerChannel`
-- `DialerOptions.MaximumReconstructedMessageSize`
-- `DiscoveryOptions.MaximumDiscoveredServers`
-
-Exceeding an admission or packet-queue limit rejects the offer or closes the offending connection rather than retaining unbounded state.
-
-## Authentication
-
-Servers generate a short-lived self-signed P-384 identity by default. Client identity tokens can be supplied through `DialerOptions.Identity`. For authenticated servers, keep `AllowAnonymous` disabled and provide `ListenerOptions.VerifyClientToken`; the library separately verifies that the token's `cpk` key signed the negotiated DTLS fingerprint assertion.
-
-WebRTC transport is provided by SIPSorcery. Its current DCEP decoder does not expose incoming reliability fields, so incoming channels are classified using Minecraft's fixed `ReliableDataChannel` and `UnreliableDataChannel` labels. Outgoing channel parameters still match NetherNet.
-
-Compact JWT and detached JWS signing and verification are provided by `jose-jwt`. Discovery encryption, UDP transport, HTTP signaling, JSON, and PKIX/JWK key handling use the .NET runtime libraries.
+Local validation covers Windows x64. Public TURN, long-running production load, native leak/race instrumentation, and non-Windows runtimes still need validation.
