@@ -305,10 +305,36 @@ pub const Discovery = struct {
     }
 
     pub fn subscribe(self: *Discovery, subscriber: ?*wake.Wakeup) void {
+        _ = self.replaceSubscriber(subscriber);
+    }
+
+    pub fn replaceSubscriber(self: *Discovery, subscriber: ?*wake.Wakeup) ?*wake.Wakeup {
         self.receive_mutex.lockUncancelable(self.io);
         defer self.receive_mutex.unlock(self.io);
+        const previous = self.subscriber;
         self.subscriber = subscriber;
         self.notify();
+        return previous;
+    }
+
+    pub fn restoreSubscriber(self: *Discovery, temporary: *wake.Wakeup, previous: ?*wake.Wakeup) void {
+        self.receive_mutex.lockUncancelable(self.io);
+        defer self.receive_mutex.unlock(self.io);
+        if (self.subscriber == temporary) self.subscriber = previous;
+        self.notify();
+    }
+
+    pub fn unsubscribe(self: *Discovery, subscriber: *wake.Wakeup) void {
+        self.receive_mutex.lockUncancelable(self.io);
+        defer self.receive_mutex.unlock(self.io);
+        if (self.subscriber == subscriber) self.subscriber = null;
+        self.notify();
+    }
+
+    pub fn isSubscribed(self: *Discovery, subscriber: *wake.Wakeup) bool {
+        self.receive_mutex.lockUncancelable(self.io);
+        defer self.receive_mutex.unlock(self.io);
+        return self.subscriber == subscriber;
     }
 
     fn notify(self: *Discovery) void {

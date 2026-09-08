@@ -152,6 +152,8 @@ test "LAN discovery signaling negotiates WebRTC with trickle ICE" {
     _ = try client_discovery.poll(1000);
     const listener = try lan.Listener.listen(a, server_discovery, .{ .connection = .{ .allow_anonymous = true } });
     defer listener.destroy();
+    const restored_listener = try lan.Listener.listen(a, client_discovery, .{ .connection = .{ .allow_anonymous = true } });
+    defer restored_listener.destroy();
 
     var dialing = try io.concurrent(lan.dial, .{ a, client_discovery, @as(u64, 22), @import("../src/connection.zig").Options{} });
     var taken = false;
@@ -166,6 +168,23 @@ test "LAN discovery signaling negotiates WebRTC with trickle ICE" {
     defer client.destroy();
 
     try std.testing.expect(client.public_key != null);
+    try std.testing.expect(client_discovery.isSubscribed(&restored_listener.wakeup));
+
+    // A second inbound negotiation must wake accept through the restored
+    // subscription rather than falling back to the two-second discovery tick.
+    const accept_started = std.Io.Clock.awake.now(io);
+    var reverse_dialing = try io.concurrent(lan.dial, .{ a, server_discovery, @as(u64, 11), @import("../src/connection.zig").Options{} });
+    var reverse_taken = false;
+    defer if (!reverse_taken) {
+        if (reverse_dialing.cancel(io)) |value| value.destroy() else |_| {}
+    };
+    const reverse_server = try restored_listener.accept();
+    defer reverse_server.destroy();
+    try std.testing.expect(accept_started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds() < 1900);
+
+    const reverse_client = try reverse_dialing.await(io);
+    reverse_taken = true;
+    defer reverse_client.destroy();
 }
 
 test {

@@ -52,7 +52,7 @@ pub const Listener = struct {
         if (self.closed) return;
         self.closed = true;
         self.wakeup.signal(self.discovery.io);
-        self.discovery.subscribe(null);
+        self.discovery.unsubscribe(&self.wakeup);
 
         for (self.pending) |*slot| {
             if (slot.*) |connection| {
@@ -254,8 +254,8 @@ pub fn dial(
     errdefer connection.destroy();
 
     var wakeup: wake.Wakeup = .{};
-    discovery.subscribe(&wakeup);
-    defer discovery.subscribe(null);
+    const previous_subscriber = discovery.replaceSubscriber(&wakeup);
+    defer discovery.restoreSubscriber(&wakeup, previous_subscriber);
     connection.peer.subscribe(&wakeup);
     defer connection.peer.subscribe(null);
     try connection.start();
