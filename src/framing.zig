@@ -1,7 +1,8 @@
 const std = @import("std");
 
-pub const maximum_segment_payload = 262143;
-pub const maximum_segments = 255;
+pub const maximum_segment_payload: usize = 262143;
+pub const maximum_segments: usize = 255;
+pub const maximum_reliable_message_size: usize = maximum_segment_payload * maximum_segments;
 pub const default_maximum_message_size = 16 * 1024 * 1024;
 
 pub const Reliability = enum {
@@ -19,6 +20,15 @@ pub fn singleFragmentPayload(fragment: []const u8, reliability: Reliability) !?[
     return fragment[1..];
 }
 
+pub fn validateMessageSize(size: usize, reliability: Reliability, limit: usize) !void {
+    if (size > limit or
+        size > maximum_reliable_message_size or
+        (reliability == .unreliable and size > maximum_segment_payload))
+    {
+        return error.MessageTooLarge;
+    }
+}
+
 /// The message stays borrowed while the caller reuses the output buffer.
 pub const Encoder = struct {
     data: []const u8,
@@ -29,13 +39,7 @@ pub const Encoder = struct {
         reliability: Reliability,
         limit: usize,
     ) !Encoder {
-        if (data.len > limit or
-            data.len > maximum_segment_payload * maximum_segments or
-            (reliability == .unreliable and data.len > maximum_segment_payload))
-        {
-            return error.MessageTooLarge;
-        }
-
+        try validateMessageSize(data.len, reliability, limit);
         return .{ .data = data };
     }
 
@@ -240,4 +244,17 @@ test "malformed, reordered, duplicate, oversized and unreliable fragments fail c
         error.MalformedFragment,
         reassembler.push(&.{ 1, 2 }),
     );
+}
+
+test "reliable message-size boundaries match 255 segment representation" {
+    try validateMessageSize(maximum_reliable_message_size, .reliable, maximum_reliable_message_size);
+    try std.testing.expectError(
+        error.MessageTooLarge,
+        validateMessageSize(maximum_reliable_message_size + 1, .reliable, maximum_reliable_message_size + 1),
+    );
+
+    const exact_segments = (maximum_reliable_message_size + maximum_segment_payload - 1) / maximum_segment_payload;
+    const overflow_segments = (maximum_reliable_message_size + 1 + maximum_segment_payload - 1) / maximum_segment_payload;
+    try std.testing.expectEqual(@as(usize, maximum_segments), exact_segments);
+    try std.testing.expectEqual(@as(usize, maximum_segments + 1), overflow_segments);
 }

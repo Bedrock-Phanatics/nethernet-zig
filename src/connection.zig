@@ -36,6 +36,17 @@ pub const Options = struct {
     verify_client: ?auth.Verifier = null,
 };
 
+fn validateOptions(options: Options) !void {
+    if (options.maximum_message_size == 0 or
+        options.maximum_message_size > framing.maximum_reliable_message_size or
+        options.negotiation_timeout_ms == 0 or
+        options.connection_timeout_ms == 0 or
+        options.reassembly_timeout_ms == 0)
+    {
+        return error.InvalidConfiguration;
+    }
+}
+
 pub const Event = union(enum) {
     signal: Signal,
     message: Message,
@@ -131,14 +142,7 @@ pub const Connection = struct {
         remote_id: []const u8,
         options: Options,
     ) !*Connection {
-        if (options.maximum_message_size == 0 or
-            options.maximum_message_size > framing.maximum_segment_payload * 256 or
-            options.negotiation_timeout_ms == 0 or
-            options.connection_timeout_ms == 0 or
-            options.reassembly_timeout_ms == 0)
-        {
-            return error.InvalidConfiguration;
-        }
+        try validateOptions(options);
 
         if (remote_id.len > maximum_network_id_length or
             options.local_network_id.len > maximum_network_id_length)
@@ -628,4 +632,25 @@ test "single-fragment assembly borrows poll storage without allocation" {
     const message = (try assembly.push(std.testing.allocator, std.testing.io, &fragment, 3)).?;
     try std.testing.expectEqual(@intFromPtr(fragment[1..].ptr), @intFromPtr(message.ptr));
     try std.testing.expectEqual(@as(usize, 0), assembly.buffer.capacity);
+}
+
+test "connection and encoder maximum message limits agree" {
+    var options: Options = .{ .maximum_message_size = framing.maximum_reliable_message_size };
+    try validateOptions(options);
+    try framing.validateMessageSize(
+        framing.maximum_reliable_message_size,
+        .reliable,
+        options.maximum_message_size,
+    );
+
+    options.maximum_message_size = framing.maximum_reliable_message_size + 1;
+    try std.testing.expectError(error.InvalidConfiguration, validateOptions(options));
+    try std.testing.expectError(
+        error.MessageTooLarge,
+        framing.validateMessageSize(
+            framing.maximum_reliable_message_size + 1,
+            .reliable,
+            options.maximum_message_size,
+        ),
+    );
 }
