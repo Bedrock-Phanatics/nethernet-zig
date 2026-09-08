@@ -13,6 +13,7 @@ pub const ErrorCode = @import("error_codes.zig").ErrorCode;
 
 pub const Connection = @import("connection.zig").Connection;
 pub const ConnectionOptions = @import("connection.zig").Options;
+pub const CallbackStats = @import("connection.zig").CallbackStats;
 pub const Address = @import("connection.zig").Address;
 pub const Message = @import("connection.zig").Message;
 

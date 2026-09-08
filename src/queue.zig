@@ -14,6 +14,8 @@ pub const Queue = struct {
     used_bytes: usize = 0,
     head: usize = 0,
     count: usize = 0,
+    high_water_bytes: usize = 0,
+    high_water_entries: usize = 0,
 
     pub fn init(bytes: []u8, entries: []Entry) !Queue {
         if (bytes.len == 0 or entries.len == 0) {
@@ -27,8 +29,24 @@ pub const Queue = struct {
     }
 
     pub fn push(self: *Queue, tag: u8, data: []const u8) !void {
-        if (self.count == self.entries.len or
-            data.len > self.bytes.len - self.used_bytes)
+        return self.pushWithReserve(tag, data, 0, 0);
+    }
+
+    pub fn pushWithReserve(
+        self: *Queue,
+        tag: u8,
+        data: []const u8,
+        reserve_bytes: usize,
+        reserve_entries: usize,
+    ) !void {
+        if (reserve_bytes > self.bytes.len or reserve_entries > self.entries.len) {
+            return error.InvalidConfiguration;
+        }
+        const byte_limit = self.bytes.len - reserve_bytes;
+        const entry_limit = self.entries.len - reserve_entries;
+        if (self.count >= entry_limit or
+            self.used_bytes > byte_limit or
+            data.len > byte_limit - self.used_bytes)
         {
             return error.QueueFull;
         }
@@ -47,6 +65,8 @@ pub const Queue = struct {
 
         self.used_bytes += data.len;
         self.count += 1;
+        self.high_water_bytes = @max(self.high_water_bytes, self.used_bytes);
+        self.high_water_entries = @max(self.high_water_entries, self.count);
     }
 
     pub fn pop(
@@ -113,6 +133,8 @@ test "byte and entry limits, wraparound, failed reads preserve messages" {
 
     try std.testing.expectEqualStrings("hijk", last.data);
     try std.testing.expectEqual(@as(u8, 3), last.tag);
+    try std.testing.expectEqual(@as(usize, 7), queue.high_water_bytes);
+    try std.testing.expectEqual(@as(usize, 2), queue.high_water_entries);
     try std.testing.expectEqual(@as(usize, 0), queue.used_bytes);
     try std.testing.expect((try queue.pop(&output)) == null);
 }

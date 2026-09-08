@@ -65,3 +65,6 @@ Run `zig build bench-memory` to report the bounded Zig buffer reservation for 1,
 ## Receive copies
 
 `zig build bench` includes receive-only cases for common 32–8192 byte Bedrock-sized messages and fragmented 256 KiB and 512 KiB payloads. The `receive_bytes_copied_per_op` column counts copies after the bounded callback queue: complete single-fragment messages report zero because they borrow the poll buffer directly; fragmented messages report their payload size because contiguous reassembly requires one copy. Encoder setup is excluded from the receive-only timing, and all cases remain allocation-free in the hot path.
+## Callback queue pressure policy
+
+`zig build bench` also compares sustained 512-byte unreliable traffic with the default fail-closed policy and the opt-in reserved-capacity drop policy. On the Windows x64 ReleaseFast evaluation run, fail-closed took 101.3 ns per pressure cycle and produced 10,000 simulated peer failures. Reserved dropping took 93.9 ns per cycle, dropped 100,000 unreliable messages, preserved every reliable admission, and produced zero simulated peer failures. This demonstrates a useful opt-in overload behavior, but not enough deployment evidence to change connection semantics globally; fail-closed therefore remains the default.

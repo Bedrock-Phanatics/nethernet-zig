@@ -31,7 +31,7 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(storage);
 
     var checksum: usize = 0;
-    std.debug.print("operation,bytes,iterations,ns_per_op,MiB_per_s,receive_bytes_copied_per_op,hot_path_allocations\n", .{});
+    std.debug.print("operation,bytes,iterations,ns_per_op,MiB_per_s,receive_bytes_copied_per_op,hot_path_allocations,dropped_unreliable,peer_failures\n", .{});
 
     const codec = discovery.Codec.init();
     for ([_]usize{ 32, 64, 128, 256, 512, 1024, 1400, 8192 }) |size| {
@@ -119,6 +119,9 @@ pub fn main(init: std.process.Init) !void {
         checksum +%= (try queue.pop(frame)).?.data.len;
     }
     report(io, start, "queue_roundtrip", queue_payload_size, queue_iterations, queue_payload_size);
+
+    try pressureBenchmark(io, false);
+    try pressureBenchmark(io, true);
     std.mem.doNotOptimizeAway(checksum);
 }
 
@@ -126,5 +129,55 @@ fn report(io: std.Io, start: std.Io.Timestamp, operation: []const u8, bytes: usi
     const elapsed: f64 = @floatFromInt(start.durationTo(std.Io.Clock.awake.now(io)).nanoseconds);
     const nanoseconds_per_operation = elapsed / @as(f64, @floatFromInt(count));
     const mebibytes_per_second = @as(f64, @floatFromInt(bytes)) / nanoseconds_per_operation * 1e9 / (1024 * 1024);
-    std.debug.print("{s},{d},{d},{d:.1},{d:.1},{d},0\n", .{ operation, bytes, count, nanoseconds_per_operation, mebibytes_per_second, copied });
+    std.debug.print("{s},{d},{d},{d:.1},{d:.1},{d},0,0,0\n", .{ operation, bytes, count, nanoseconds_per_operation, mebibytes_per_second, copied });
+}
+
+fn pressureBenchmark(io: std.Io, drop_unreliable: bool) !void {
+    const iterations = 10_000;
+    const payload = [_]u8{0} ++ [_]u8{42} ** 511;
+    var bytes: [4096]u8 = undefined;
+    var entries: [16]Queue.Entry = undefined;
+    var output: [512]u8 = undefined;
+    var dropped: usize = 0;
+    var failures: usize = 0;
+    var checksum: usize = 0;
+
+    const start = std.Io.Clock.awake.now(io);
+    for (0..iterations) |_| {
+        var queue = try Queue.init(&bytes, &entries);
+        for (0..16) |_| {
+            if (drop_unreliable) {
+                queue.pushWithReserve(4, &payload, 1024, 2) catch {
+                    dropped += 1;
+                };
+            } else {
+                queue.push(4, &payload) catch {
+                    failures += 1;
+                    break;
+                };
+            }
+        }
+        if (drop_unreliable) {
+            queue.push(3, &payload) catch {
+                failures += 1;
+            };
+        }
+        while (try queue.pop(&output)) |event| {
+            checksum +%= event.data[1];
+            std.mem.doNotOptimizeAway(event.data.ptr);
+        }
+    }
+    std.mem.doNotOptimizeAway(checksum);
+
+    const elapsed: f64 = @floatFromInt(start.durationTo(std.Io.Clock.awake.now(io)).nanoseconds);
+    const ns = elapsed / iterations;
+    const mib_s = 512.0 / ns * 1e9 / (1024 * 1024);
+    std.debug.print("queue_pressure_{s},512,{d},{d:.1},{d:.1},512,0,{d},{d}\n", .{
+        if (drop_unreliable) "drop_unreliable" else "fail_closed",
+        iterations,
+        ns,
+        mib_s,
+        dropped,
+        failures,
+    });
 }

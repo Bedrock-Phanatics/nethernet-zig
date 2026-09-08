@@ -11,6 +11,7 @@ const maximum_network_id_length = 4096;
 const maximum_signal_size = 1024 * 1024;
 
 pub const Role = enum { client, server };
+pub const CallbackStats = native.CallbackStats;
 
 pub const Address = struct {
     network_id: []const u8,
@@ -223,6 +224,10 @@ pub const Connection = struct {
 
     pub fn ready(self: *Connection) bool {
         return self.peer.ready();
+    }
+
+    pub fn callbackStats(self: *Connection) CallbackStats {
+        return self.peer.callbackStats();
     }
 
     pub fn state(self: *Connection) native.State {

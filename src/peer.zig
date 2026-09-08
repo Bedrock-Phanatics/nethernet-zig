@@ -10,6 +10,12 @@ const c = @cImport({
     @cInclude("rtc/rtc.h");
 });
 
+pub const CallbackStats = struct {
+    dropped_unreliable_packets: u64,
+    queue_high_water_bytes: usize,
+    queue_high_water_entries: usize,
+};
+
 pub const State = enum(u8) {
     new,
     connecting,
@@ -35,6 +41,10 @@ pub const Options = struct {
     maximum_message_size: usize = framing.default_maximum_message_size,
     ice_servers: []const [*:0]const u8 = &.{},
     disable_trickle: bool = false,
+    /// Opt-in until queue-pressure benchmarks justify changing the default.
+    drop_unreliable_on_pressure: bool = false,
+    unreliable_reserve_bytes: usize = framing.maximum_segment_payload + 1,
+    unreliable_reserve_entries: usize = 1,
 };
 
 /// Use the WebRTC peer from one owner. Callbacks write to a bounded queue.
@@ -58,12 +68,16 @@ pub const Peer = struct {
 
     options: Options,
     queue: Queue,
+    dropped_unreliable_packets: u64 = 0,
 
     pub fn create(allocator: std.mem.Allocator, io: std.Io, options: Options) !*Peer {
         if (options.queue_bytes < framing.maximum_segment_payload + 1 or
             options.queue_entries < 2 or
             options.maximum_buffered_send == 0 or
-            options.ice_servers.len > 64)
+            options.ice_servers.len > 64 or
+            (options.drop_unreliable_on_pressure and
+                (options.unreliable_reserve_bytes > options.queue_bytes or
+                    options.unreliable_reserve_entries >= options.queue_entries)))
         {
             return error.InvalidConfiguration;
         }
@@ -172,6 +186,16 @@ pub const Peer = struct {
         if (!self.gathered) return true;
         if (self.options.disable_trickle and !self.description_sent) return true;
         return self.queue.count != 0 and self.queue.entries[self.queue.head].tag < 3;
+    }
+
+    pub fn callbackStats(self: *Peer) CallbackStats {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return .{
+            .dropped_unreliable_packets = self.dropped_unreliable_packets,
+            .queue_high_water_bytes = self.queue.high_water_bytes,
+            .queue_high_water_entries = self.queue.high_water_entries,
+        };
     }
 
     pub fn getState(self: *Peer) State {
@@ -469,9 +493,22 @@ pub const Peer = struct {
 
         if (self.stopping or self.state == .failed) return;
 
-        self.queue.push(tag, data) catch {
-            self.state = .failed;
-        };
+        if (tag == 4 and self.options.drop_unreliable_on_pressure and
+            data.len >= 2 and data[0] == 0)
+        {
+            self.queue.pushWithReserve(
+                tag,
+                data,
+                self.options.unreliable_reserve_bytes,
+                self.options.unreliable_reserve_entries,
+            ) catch {
+                self.dropped_unreliable_packets +|= 1;
+            };
+        } else {
+            self.queue.push(tag, data) catch {
+                self.state = .failed;
+            };
+        }
         self.notify();
     }
 
@@ -652,4 +689,29 @@ test "state changes and errors wake subscribers" {
     wakeup.prepare();
     peer.close();
     try std.testing.expect(wakeup.event.isSet());
+}
+
+test "opt-in unreliable drops preserve capacity for reliable traffic" {
+    const peer = try Peer.create(std.testing.allocator, std.testing.io, .{
+        .queue_bytes = framing.maximum_segment_payload + 1,
+        .queue_entries = 3,
+        .drop_unreliable_on_pressure = true,
+        .unreliable_reserve_bytes = 8,
+        .unreliable_reserve_entries = 1,
+    });
+    defer peer.destroy();
+
+    const unreliable = [_]u8{0} ++ [_]u8{42} ** (framing.maximum_segment_payload - 8);
+    peer.enqueue(4, &unreliable);
+    peer.enqueue(4, &.{ 0, 1 });
+    peer.enqueue(3, "reliable");
+
+    try std.testing.expectEqual(State.new, peer.getState());
+    const stats = peer.callbackStats();
+    try std.testing.expectEqual(@as(u64, 1), stats.dropped_unreliable_packets);
+    try std.testing.expectEqual(framing.maximum_segment_payload + 1, stats.queue_high_water_bytes);
+    try std.testing.expectEqual(@as(usize, 2), stats.queue_high_water_entries);
+
+    peer.enqueue(3, "x");
+    try std.testing.expectEqual(State.failed, peer.getState());
 }
