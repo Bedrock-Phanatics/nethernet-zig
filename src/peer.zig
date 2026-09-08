@@ -10,6 +10,8 @@ const c = @cImport({
     @cInclude("rtc/rtc.h");
 });
 
+pub const maximum_signal_size = 1024 * 1024;
+
 pub const CallbackStats = struct {
     dropped_unreliable_packets: u64,
     queue_high_water_bytes: usize,
@@ -35,7 +37,7 @@ pub const Event = union(enum) {
 
 pub const Options = struct {
     /// Aggregate callback storage for two maximum-sized fragments.
-    queue_bytes: usize = 2 * (framing.maximum_segment_payload + 1),
+    queue_bytes: usize = maximum_signal_size,
     queue_entries: usize = 512,
     maximum_buffered_send: usize = 16 * 1024 * 1024 + 255,
     maximum_message_size: usize = framing.default_maximum_message_size,
@@ -270,7 +272,7 @@ pub const Peer = struct {
         }
 
         if (sdp.len == 0 or
-            sdp.len > 1024 * 1024 or
+            sdp.len > maximum_signal_size or
             std.mem.indexOfScalar(u8, sdp, 0) != null)
         {
             return error.MalformedSignal;
@@ -714,4 +716,17 @@ test "opt-in unreliable drops preserve capacity for reliable traffic" {
 
     peer.enqueue(3, "x");
     try std.testing.expectEqual(State.failed, peer.getState());
+}
+
+test "default callback queue accepts a maximum-sized signaling event" {
+    const peer = try Peer.create(std.testing.allocator, std.testing.io, .{});
+    defer peer.destroy();
+
+    const signal = try std.testing.allocator.alloc(u8, maximum_signal_size);
+    defer std.testing.allocator.free(signal);
+    @memset(signal, 's');
+
+    peer.enqueue(0, signal);
+    try std.testing.expectEqual(State.new, peer.getState());
+    try std.testing.expectEqual(maximum_signal_size, peer.queue.used_bytes);
 }
