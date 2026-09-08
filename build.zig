@@ -93,4 +93,11 @@ pub fn build(b: *std.Build) void {
     benchmark_module.addImport("queue", module(b, "src/queue.zig", target, .ReleaseFast));
     const benchmark = b.addExecutable(.{ .name = "nethernet-benchmark", .root_module = benchmark_module });
     b.step("bench", "Measure codecs, framing and bounded queues").dependOn(&b.addRunArtifact(benchmark).step);
+
+    const memory_module = module(b, "bench/memory.zig", target, .ReleaseFast);
+    memory_module.addImport("framing", module(b, "src/framing.zig", target, .ReleaseFast));
+    memory_module.addImport("queue", module(b, "src/queue.zig", target, .ReleaseFast));
+    const memory_bench = b.addExecutable(.{ .name = "memory-benchmark", .root_module = memory_module });
+    const run_memory_bench = b.addRunArtifact(memory_bench);
+    b.step("bench-memory", "Report bounded Zig buffer memory at 1, 100, 500, and 1000 connections").dependOn(&run_memory_bench.step);
 }

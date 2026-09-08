@@ -28,7 +28,8 @@ pub const Event = union(enum) {
 };
 
 pub const Options = struct {
-    queue_bytes: usize = 4 * 1024 * 1024,
+    /// Aggregate callback storage for two maximum-sized fragments.
+    queue_bytes: usize = 2 * (framing.maximum_segment_payload + 1),
     queue_entries: usize = 512,
     maximum_buffered_send: usize = 16 * 1024 * 1024 + 255,
     maximum_message_size: usize = framing.default_maximum_message_size,
@@ -161,6 +162,16 @@ pub const Peer = struct {
         defer self.mutex.unlock(self.io);
         return self.queue.count != 0 and
             (!signals_only or self.queue.entries[self.queue.head].tag < 3);
+    }
+
+    /// Whether the next poll can produce negotiation data larger than a packet.
+    pub fn needsNegotiationBuffer(self: *Peer) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+
+        if (!self.gathered) return true;
+        if (self.options.disable_trickle and !self.description_sent) return true;
+        return self.queue.count != 0 and self.queue.entries[self.queue.head].tag < 3;
     }
 
     pub fn getState(self: *Peer) State {

@@ -51,3 +51,14 @@ target OS and compare multiple runs before drawing performance conclusions.
 Timing percentiles are reported rather than asserted in CI to avoid scheduler
 noise causing failures. Functional tests cover notification races, cancellation,
 queue exhaustion, deadline expiry, and real native/LAN/HTTP traffic.
+
+## Connection buffer memory
+
+Run `zig build bench-memory` to report the bounded Zig buffer reservation for 1, 100, 500, and 1000 default connections. The figures cover callback bytes and entries, packet scratch, send scratch, and negotiation scratch; they intentionally exclude small structs, reassembly growth, allocator metadata, and native WebRTC state.
+
+| Connections | Negotiating | Established |
+|---:|---:|---:|
+| 1 | 2.01 MiB | 1.01 MiB |
+| 100 | 200.78 MiB | 100.78 MiB |
+| 500 | 1003.91 MiB | 503.91 MiB |
+| 1000 | 2007.81 MiB | 1007.81 MiB |

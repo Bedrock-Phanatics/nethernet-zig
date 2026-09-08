@@ -98,7 +98,8 @@ pub const Connection = struct {
     answered: ?std.Io.Timestamp = null,
     established: bool = false,
 
-    scratch: []u8,
+    packet_scratch: []u8,
+    negotiation_scratch: ?[]u8,
     send_buffer: []u8,
     assemblies: [2]Assembly = .{
         .{ .decoder = framing.Reassembler.init(&.{}, .reliable) },
@@ -145,10 +146,16 @@ pub const Connection = struct {
         const remote_id_copy = try allocator.dupe(u8, remote_id);
         errdefer allocator.free(remote_id_copy);
 
-        const scratch = try allocator.alloc(u8, maximum_signal_size + 1);
-        errdefer allocator.free(scratch);
+        const packet_payload_size: usize = @min(options.maximum_message_size, framing.maximum_segment_payload);
+        const packet_buffer_size = packet_payload_size + 1;
 
-        const send_buffer = try allocator.alloc(u8, framing.maximum_segment_payload + 1);
+        const packet_scratch = try allocator.alloc(u8, packet_buffer_size);
+        errdefer allocator.free(packet_scratch);
+
+        const negotiation_scratch = try allocator.alloc(u8, maximum_signal_size + 1);
+        errdefer allocator.free(negotiation_scratch);
+
+        const send_buffer = try allocator.alloc(u8, packet_buffer_size);
         errdefer allocator.free(send_buffer);
 
         var native_options = options.native;
@@ -166,7 +173,8 @@ pub const Connection = struct {
             .remote_id = remote_id_copy,
             .local_id = local_id,
             .options = options,
-            .scratch = scratch,
+            .packet_scratch = packet_scratch,
+            .negotiation_scratch = negotiation_scratch,
             .send_buffer = send_buffer,
             .started = std.Io.Clock.awake.now(io),
         };
@@ -193,7 +201,8 @@ pub const Connection = struct {
         if (self.owned_token) |token| self.allocator.free(token);
         if (self.signal_buffer) |buffer| self.allocator.free(buffer);
 
-        self.allocator.free(self.scratch);
+        self.allocator.free(self.packet_scratch);
+        if (self.negotiation_scratch) |scratch| self.allocator.free(scratch);
         self.allocator.free(self.send_buffer);
         self.allocator.free(self.remote_id);
         self.allocator.free(self.local_id);
@@ -318,7 +327,19 @@ pub const Connection = struct {
             self.signal_buffer = null;
         }
 
-        const event = try self.peer.pollRestricted(self.scratch, signals_only) orelse return null;
+        const needs_negotiation = self.peer.needsNegotiationBuffer();
+        if (self.established and !needs_negotiation) {
+            if (self.negotiation_scratch) |scratch| {
+                self.allocator.free(scratch);
+                self.negotiation_scratch = null;
+            }
+        }
+
+        const scratch = if (needs_negotiation)
+            self.negotiation_scratch orelse return error.InvalidState
+        else
+            self.packet_scratch;
+        const event = try self.peer.pollRestricted(scratch, signals_only) orelse return null;
 
         switch (event) {
             .offer, .answer, .candidate => |data| {
@@ -561,4 +582,25 @@ test "receive drains partial messages without waiting" {
     try connection.peer.queue.push(3, &.{ 0, 'b' });
     const message = try connection.receive();
     try std.testing.expectEqualStrings("ab", message.data);
+}
+
+test "buffers follow message limit and negotiation scratch is released" {
+    const connection = try Connection.create(
+        std.testing.allocator,
+        std.testing.io,
+        .client,
+        1,
+        "remote",
+        .{ .maximum_message_size = 1024 },
+    );
+    defer connection.destroy();
+
+    try std.testing.expectEqual(@as(usize, 1025), connection.packet_scratch.len);
+    try std.testing.expectEqual(@as(usize, 1025), connection.send_buffer.len);
+    try std.testing.expect(connection.negotiation_scratch != null);
+
+    connection.established = true;
+    connection.peer.gathered = true;
+    try std.testing.expect((try connection.poll()) == null);
+    try std.testing.expect(connection.negotiation_scratch == null);
 }
