@@ -62,3 +62,6 @@ Run `zig build bench-memory` to report the bounded Zig buffer reservation for 1,
 | 100 | 200.78 MiB | 100.78 MiB |
 | 500 | 1003.91 MiB | 503.91 MiB |
 | 1000 | 2007.81 MiB | 1007.81 MiB |
+## Receive copies
+
+`zig build bench` includes receive-only cases for common 32–8192 byte Bedrock-sized messages and fragmented 256 KiB and 512 KiB payloads. The `receive_bytes_copied_per_op` column counts copies after the bounded callback queue: complete single-fragment messages report zero because they borrow the poll buffer directly; fragmented messages report their payload size because contiguous reassembly requires one copy. Encoder setup is excluded from the receive-only timing, and all cases remain allocation-free in the hot path.

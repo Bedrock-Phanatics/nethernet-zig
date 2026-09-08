@@ -9,6 +9,16 @@ pub const Reliability = enum {
     unreliable,
 };
 
+/// Returns a borrowed payload only when the frame is a complete message.
+pub fn singleFragmentPayload(fragment: []const u8, reliability: Reliability) !?[]const u8 {
+    if (fragment.len < 2) return error.MalformedFragment;
+    if (fragment[0] != 0) {
+        if (reliability == .unreliable) return error.MalformedFragment;
+        return null;
+    }
+    return fragment[1..];
+}
+
 /// The message stays borrowed while the caller reuses the output buffer.
 pub const Encoder = struct {
     data: []const u8,

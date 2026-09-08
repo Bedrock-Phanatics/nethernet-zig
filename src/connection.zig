@@ -59,6 +59,14 @@ const Assembly = struct {
             return error.MessageTooLarge;
         }
 
+        // The peer poll buffer already has the required borrowed lifetime.
+        if (self.decoder.used == 0) {
+            if (self.decoder.failed) return error.ConnectionClosed;
+            if (try framing.singleFragmentPayload(data, self.decoder.reliability)) |payload| {
+                return payload;
+            }
+        }
+
         const needed = self.decoder.used + payload_len;
         self.buffer.items.len = self.decoder.used;
 
@@ -603,4 +611,16 @@ test "buffers follow message limit and negotiation scratch is released" {
     connection.peer.gathered = true;
     try std.testing.expect((try connection.poll()) == null);
     try std.testing.expect(connection.negotiation_scratch == null);
+}
+
+test "single-fragment assembly borrows poll storage without allocation" {
+    var assembly = Assembly{
+        .decoder = framing.Reassembler.init(&.{}, .reliable),
+    };
+    defer assembly.buffer.deinit(std.testing.allocator);
+
+    const fragment = [_]u8{ 0, 1, 2, 3 };
+    const message = (try assembly.push(std.testing.allocator, std.testing.io, &fragment, 3)).?;
+    try std.testing.expectEqual(@intFromPtr(fragment[1..].ptr), @intFromPtr(message.ptr));
+    try std.testing.expectEqual(@as(usize, 0), assembly.buffer.capacity);
 }

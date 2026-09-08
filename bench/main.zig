@@ -31,7 +31,7 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(storage);
 
     var checksum: usize = 0;
-    std.debug.print("operation,bytes,iterations,ns_per_op,MiB_per_s,hot_path_allocations\n", .{});
+    std.debug.print("operation,bytes,iterations,ns_per_op,MiB_per_s,receive_bytes_copied_per_op,hot_path_allocations\n", .{});
 
     const codec = discovery.Codec.init();
     for ([_]usize{ 32, 64, 128, 256, 512, 1024, 1400, 8192 }) |size| {
@@ -41,7 +41,7 @@ pub fn main(init: std.process.Init) !void {
             std.mem.doNotOptimizeAway(data);
             checksum +%= data.len;
         }
-        report(io, start, "discovery_encode", size, default_iterations);
+        report(io, start, "discovery_encode", size, default_iterations, 0);
 
         const wire = try codec.encode(.{ .response = payload[0..size] }, 7, scratch, output);
         start = std.Io.Clock.awake.now(io);
@@ -50,7 +50,7 @@ pub fn main(init: std.process.Init) !void {
             checksum +%= decoded.packet.response.len;
             std.mem.doNotOptimizeAway(scratch.ptr);
         }
-        report(io, start, "discovery_decode", size, default_iterations);
+        report(io, start, "discovery_decode", size, default_iterations, 0);
     }
 
     for ([_]usize{ 32, 64, 128, 256, 512, 1024, 1400, 8192, 262143, 262144, payload_size }) |size| {
@@ -66,9 +66,51 @@ pub fn main(init: std.process.Init) !void {
                 }
             }
         }
-        report(io, start, "frame_reassemble", size, iterations);
+        report(io, start, "frame_reassemble", size, iterations, if (size <= framing.maximum_segment_payload) 0 else size);
     }
 
+    // Receive-only measurements use preframed input so encoder copies are not timed.
+    for ([_]usize{ 32, 64, 128, 256, 512, 1024, 1400, 8192 }) |size| {
+        frame[0] = 0;
+        @memcpy(frame[1..][0..size], payload[0..size]);
+        const start = std.Io.Clock.awake.now(io);
+        for (0..default_iterations) |_| {
+            const message = (try framing.singleFragmentPayload(frame[0 .. size + 1], .reliable)).?;
+            checksum +%= message.len;
+            std.mem.doNotOptimizeAway(message.ptr);
+        }
+        report(io, start, "receive_single_fragment", size, default_iterations, 0);
+    }
+
+    const wire = try allocator.alloc(u8, payload_size + 3);
+    defer allocator.free(wire);
+    for ([_]usize{ framing.maximum_segment_payload + 1, payload_size }) |size| {
+        var encoder = try framing.Encoder.init(payload[0..size], .reliable, payload.len);
+        var offsets: [3]usize = undefined;
+        var lengths: [3]usize = undefined;
+        var count: usize = 0;
+        var wire_used: usize = 0;
+        while (try encoder.next(frame)) |part| {
+            offsets[count] = wire_used;
+            lengths[count] = part.len;
+            @memcpy(wire[wire_used..][0..part.len], part);
+            wire_used += part.len;
+            count += 1;
+        }
+
+        const iterations: usize = 1000;
+        const start = std.Io.Clock.awake.now(io);
+        for (0..iterations) |_| {
+            var decoder = framing.Reassembler.init(storage, .reliable);
+            for (offsets[0..count], lengths[0..count]) |offset, length| {
+                if (try decoder.push(wire[offset..][0..length])) |message| {
+                    checksum +%= message.len;
+                    std.mem.doNotOptimizeAway(message.ptr);
+                }
+            }
+        }
+        report(io, start, "receive_fragmented", size, iterations, size);
+    }
     var entries: [256]Queue.Entry = undefined;
     var queue = try Queue.init(storage, &entries);
     const start = std.Io.Clock.awake.now(io);
@@ -76,13 +118,13 @@ pub fn main(init: std.process.Init) !void {
         try queue.push(0, payload[0..queue_payload_size]);
         checksum +%= (try queue.pop(frame)).?.data.len;
     }
-    report(io, start, "queue_roundtrip", queue_payload_size, queue_iterations);
+    report(io, start, "queue_roundtrip", queue_payload_size, queue_iterations, queue_payload_size);
     std.mem.doNotOptimizeAway(checksum);
 }
 
-fn report(io: std.Io, start: std.Io.Timestamp, operation: []const u8, bytes: usize, count: usize) void {
+fn report(io: std.Io, start: std.Io.Timestamp, operation: []const u8, bytes: usize, count: usize, copied: usize) void {
     const elapsed: f64 = @floatFromInt(start.durationTo(std.Io.Clock.awake.now(io)).nanoseconds);
     const nanoseconds_per_operation = elapsed / @as(f64, @floatFromInt(count));
     const mebibytes_per_second = @as(f64, @floatFromInt(bytes)) / nanoseconds_per_operation * 1e9 / (1024 * 1024);
-    std.debug.print("{s},{d},{d},{d:.1},{d:.1},0\n", .{ operation, bytes, count, nanoseconds_per_operation, mebibytes_per_second });
+    std.debug.print("{s},{d},{d},{d:.1},{d:.1},{d},0\n", .{ operation, bytes, count, nanoseconds_per_operation, mebibytes_per_second, copied });
 }
