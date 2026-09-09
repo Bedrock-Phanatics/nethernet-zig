@@ -14,6 +14,12 @@ pub const ErrorCode = @import("error_codes.zig").ErrorCode;
 pub const Connection = @import("connection.zig").Connection;
 pub const ConnectionOptions = @import("connection.zig").Options;
 pub const CallbackStats = @import("connection.zig").CallbackStats;
+pub const ConnectionDiagnostics = @import("connection.zig").Diagnostics;
+pub const IceState = @import("connection.zig").IceState;
+pub const IceGatheringState = @import("connection.zig").IceGatheringState;
+pub const ChannelState = @import("connection.zig").ChannelState;
+pub const ChannelDiagnostics = @import("connection.zig").ChannelDiagnostics;
+pub const SelectedIceAddresses = @import("connection.zig").SelectedIceAddresses;
 pub const Address = @import("connection.zig").Address;
 pub const Message = @import("connection.zig").Message;
 

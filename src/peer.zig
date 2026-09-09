@@ -28,6 +28,52 @@ pub const State = enum(u8) {
     closed,
 };
 
+pub const IceState = enum(u8) {
+    new,
+    checking,
+    connected,
+    completed,
+    failed,
+    disconnected,
+    closed,
+};
+
+pub const GatheringState = enum(u8) {
+    new,
+    in_progress,
+    complete,
+};
+
+pub const ChannelState = enum(u8) {
+    unavailable,
+    connecting,
+    open,
+    closed,
+};
+
+pub const ChannelDiagnostics = struct {
+    state: ChannelState,
+    buffered_outgoing_bytes: ?usize,
+};
+
+pub const Diagnostics = struct {
+    ice_state: IceState,
+    gathering_state: GatheringState,
+    reliable: ChannelDiagnostics,
+    unreliable: ChannelDiagnostics,
+
+    pub fn bufferedOutgoingBytes(self: Diagnostics) usize {
+        return (self.reliable.buffered_outgoing_bytes orelse 0) +|
+            (self.unreliable.buffered_outgoing_bytes orelse 0);
+    }
+};
+
+pub const SelectedIceAddresses = struct {
+    /// Slices borrow the caller-provided buffers until those buffers are reused.
+    local: []const u8,
+    remote: []const u8,
+};
+
 pub const Event = union(enum) {
     offer: []const u8,
     answer: []const u8,
@@ -67,6 +113,8 @@ pub const Peer = struct {
     stopping: bool = false,
     send_stopped: bool = false,
     gathered: bool = false,
+    ice_state: IceState = .new,
+    gathering_state: GatheringState = .new,
     description_sent: bool = false,
     description_kind: enum { offer, answer } = .offer,
 
@@ -118,6 +166,7 @@ pub const Peer = struct {
         c.rtcSetUserPointer(self.id, self);
 
         try check(c.rtcSetStateChangeCallback(self.id, onState));
+        try check(c.rtcSetIceStateChangeCallback(self.id, onIceState));
         try check(c.rtcSetGatheringStateChangeCallback(self.id, onGathered));
         try check(c.rtcSetLocalDescriptionCallback(self.id, onDescription));
         try check(c.rtcSetLocalCandidateCallback(self.id, onCandidate));
@@ -236,6 +285,87 @@ pub const Peer = struct {
             .dropped_unreliable_packets = self.dropped_unreliable_packets,
             .queue_high_water_bytes = self.queue.high_water_bytes,
             .queue_high_water_entries = self.queue.high_water_entries,
+        };
+    }
+
+    pub fn diagnostics(self: *Peer) Diagnostics {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+
+        return .{
+            .ice_state = self.ice_state,
+            .gathering_state = self.gathering_state,
+            .reliable = channelDiagnostics(self.channels[0]),
+            .unreliable = channelDiagnostics(self.channels[1]),
+        };
+    }
+
+    fn channelDiagnostics(channel: c_int) ChannelDiagnostics {
+        if (channel < 0) return .{
+            .state = .unavailable,
+            .buffered_outgoing_bytes = null,
+        };
+
+        const buffered = c.rtcGetBufferedAmount(channel);
+        return .{
+            .state = if (c.rtcIsOpen(channel))
+                .open
+            else if (c.rtcIsClosed(channel))
+                .closed
+            else
+                .connecting,
+            .buffered_outgoing_bytes = if (buffered < 0)
+                null
+            else
+                @intCast(buffered),
+        };
+    }
+
+    /// Copies the selected ICE addresses into caller-owned buffers.
+    pub fn selectedIceAddresses(
+        self: *Peer,
+        local_buffer: []u8,
+        remote_buffer: []u8,
+    ) !?SelectedIceAddresses {
+        if (local_buffer.len == 0 or remote_buffer.len == 0 or
+            local_buffer.len > std.math.maxInt(c_int) or
+            remote_buffer.len > std.math.maxInt(c_int))
+        {
+            return error.InvalidConfiguration;
+        }
+
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.id < 0) return null;
+
+        const local_length = c.rtcGetLocalAddress(
+            self.id,
+            local_buffer.ptr,
+            @intCast(local_buffer.len),
+        );
+        if (local_length == c.RTC_ERR_NOT_AVAIL) return null;
+        if (local_length == c.RTC_ERR_TOO_SMALL) return error.NoSpaceLeft;
+        try check(local_length);
+
+        const remote_length = c.rtcGetRemoteAddress(
+            self.id,
+            remote_buffer.ptr,
+            @intCast(remote_buffer.len),
+        );
+        if (remote_length == c.RTC_ERR_NOT_AVAIL) return null;
+        if (remote_length == c.RTC_ERR_TOO_SMALL) return error.NoSpaceLeft;
+        try check(remote_length);
+
+        if (local_length < 1 or remote_length < 1 or
+            local_length > local_buffer.len or
+            remote_length > remote_buffer.len)
+        {
+            return error.WebRtcFailure;
+        }
+
+        return .{
+            .local = local_buffer[0 .. @as(usize, @intCast(local_length)) - 1],
+            .remote = remote_buffer[0 .. @as(usize, @intCast(remote_length)) - 1],
         };
     }
 
@@ -605,6 +735,28 @@ pub const Peer = struct {
         }
     }
 
+    fn onIceState(
+        _: c_int,
+        state: c.rtcIceState,
+        ptr: ?*anyopaque,
+    ) callconv(.c) void {
+        const self = from(ptr);
+
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+
+        self.ice_state = switch (state) {
+            c.RTC_ICE_NEW => .new,
+            c.RTC_ICE_CHECKING => .checking,
+            c.RTC_ICE_CONNECTED => .connected,
+            c.RTC_ICE_COMPLETED => .completed,
+            c.RTC_ICE_FAILED => .failed,
+            c.RTC_ICE_DISCONNECTED => .disconnected,
+            else => .closed,
+        };
+        self.notify();
+    }
+
     fn onGathered(
         _: c_int,
         state: c.rtcGatheringState,
@@ -616,6 +768,11 @@ pub const Peer = struct {
         defer self.mutex.unlock(self.io);
 
         self.gathered = state == c.RTC_GATHERING_COMPLETE;
+        self.gathering_state = switch (state) {
+            c.RTC_GATHERING_NEW => .new,
+            c.RTC_GATHERING_INPROGRESS => .in_progress,
+            else => .complete,
+        };
         self.notify();
     }
 

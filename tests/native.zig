@@ -74,6 +74,25 @@ test "native peers negotiate and exchange both channel types" {
             if (!got and !b.hasPending(false)) try b.wakeup.wait(io, wake.deadline(start, 20000));
         }
     }
+    const diagnostics = a.diagnostics();
+    try std.testing.expect(
+        diagnostics.ice_state == .connected or diagnostics.ice_state == .completed,
+    );
+    try std.testing.expectEqual(.complete, diagnostics.gathering_state);
+    try std.testing.expectEqual(.open, diagnostics.reliable.state);
+    try std.testing.expectEqual(.open, diagnostics.unreliable.state);
+    try std.testing.expect(diagnostics.reliable.buffered_outgoing_bytes != null);
+    try std.testing.expect(diagnostics.unreliable.buffered_outgoing_bytes != null);
+
+    var local_ice: [128]u8 = undefined;
+    var remote_ice: [128]u8 = undefined;
+    const ice_addresses = (try a.selectedIceAddresses(
+        &local_ice,
+        &remote_ice,
+    )).?;
+    try std.testing.expect(ice_addresses.local.len != 0);
+    try std.testing.expect(ice_addresses.remote.len != 0);
+
     a.close();
     a.close();
 }
@@ -117,6 +136,9 @@ test "connections verify identities, reassemble large messages, and reconnect" {
                 try wakeup.wait(io, wake.deadline(started, 20000));
         }
         try std.testing.expect(client.public_key != null);
+
+        try std.testing.expect(client.remoteIceCandidateCount() > 0);
+
         try client.send(payload, .reliable);
         const message = try server.receive();
         try std.testing.expectEqualSlices(u8, payload, message.data);

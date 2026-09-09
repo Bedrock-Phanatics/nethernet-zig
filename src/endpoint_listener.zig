@@ -382,7 +382,7 @@ fn encodeStatus(status: ServerStatus, output: []u8) ![]const u8 {
     try writeJsonString(&writer, status.version);
     try writer.writeAll(",\"level\":");
     try writeJsonString(&writer, status.level);
-    try writer.print(",\"gameType\":{d},\"players\":{d},\"maxPlayers\":{d}}", .{
+    try writer.print(",\"gameType\":{d},\"players\":{d},\"maxPlayers\":{d}}}", .{
         status.game_type,
         status.players,
         status.max_players,

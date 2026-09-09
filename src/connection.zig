@@ -12,6 +12,24 @@ const maximum_signal_size = 1024 * 1024;
 
 pub const Role = enum { client, server };
 pub const CallbackStats = native.CallbackStats;
+pub const IceState = native.IceState;
+pub const IceGatheringState = native.GatheringState;
+pub const ChannelState = native.ChannelState;
+pub const ChannelDiagnostics = native.ChannelDiagnostics;
+pub const SelectedIceAddresses = native.SelectedIceAddresses;
+
+pub const Diagnostics = struct {
+    ice_state: IceState,
+    ice_gathering_state: IceGatheringState,
+    reliable: ChannelDiagnostics,
+    unreliable: ChannelDiagnostics,
+    remote_ice_candidates: usize,
+
+    pub fn bufferedOutgoingBytes(self: Diagnostics) usize {
+        return (self.reliable.buffered_outgoing_bytes orelse 0) +|
+            (self.unreliable.buffered_outgoing_bytes orelse 0);
+    }
+};
 
 pub const Address = struct {
     network_id: []const u8,
@@ -146,6 +164,7 @@ pub const Connection = struct {
     answered: ?std.Io.Timestamp = null,
     established: bool = false,
     remote_candidates: RemoteCandidates = .{},
+    remote_candidate_count: std.atomic.Value(usize) = .init(0),
 
     packet_scratch: []u8,
     negotiation_scratch: ?[]u8,
@@ -270,6 +289,31 @@ pub const Connection = struct {
         return self.peer.getState();
     }
 
+    /// Returns a point-in-time snapshot without borrowing native state.
+    pub fn diagnostics(self: *Connection) Diagnostics {
+        const transport = self.peer.diagnostics();
+        return .{
+            .ice_state = transport.ice_state,
+            .ice_gathering_state = transport.gathering_state,
+            .reliable = transport.reliable,
+            .unreliable = transport.unreliable,
+            .remote_ice_candidates = self.remote_candidate_count.load(.acquire),
+        };
+    }
+
+    pub fn remoteIceCandidateCount(self: *Connection) usize {
+        return self.remote_candidate_count.load(.acquire);
+    }
+
+    /// Returned slices borrow the supplied buffers until they are reused.
+    pub fn selectedIceAddresses(
+        self: *Connection,
+        local_buffer: []u8,
+        remote_buffer: []u8,
+    ) !?SelectedIceAddresses {
+        return self.peer.selectedIceAddresses(local_buffer, remote_buffer);
+    }
+
     pub fn start(self: *Connection) !void {
         if (self.role != .client) return error.InvalidState;
         try self.peer.offer();
@@ -303,6 +347,7 @@ pub const Connection = struct {
         } else {
             try self.remote_candidates.addSdp(signal.data, self.options.maximum_remote_candidates);
         }
+        self.remote_candidate_count.store(self.remote_candidates.count, .release);
 
         const terminated = try self.allocator.dupeZ(u8, signal.data);
         defer self.allocator.free(terminated);
@@ -747,4 +792,20 @@ test "bundled and trickled remote ICE candidates share one limit" {
         candidates.addTrickled(3),
     );
     try std.testing.expectEqual(@as(usize, 3), candidates.count);
+}
+test "diagnostics total buffered bytes handles unavailable channels" {
+    const diagnostics: Diagnostics = .{
+        .ice_state = .new,
+        .ice_gathering_state = .new,
+        .reliable = .{
+            .state = .open,
+            .buffered_outgoing_bytes = 20,
+        },
+        .unreliable = .{
+            .state = .unavailable,
+            .buffered_outgoing_bytes = null,
+        },
+        .remote_ice_candidates = 3,
+    };
+    try std.testing.expectEqual(@as(usize, 20), diagnostics.bufferedOutgoingBytes());
 }
