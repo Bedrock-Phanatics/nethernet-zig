@@ -22,8 +22,12 @@ $mbedTag = & git -C .deps/mbedtls describe --tags --exact-match
 if ($mbedTag -notin @('mbedtls-3.6.7','v3.6.7') -or (& git -C .deps/mbedtls rev-parse HEAD) -ne '068ff080b369adfac81509f9b57b2afabaf82dc5') { throw 'Unexpected Mbed TLS checkout.' }
 Run-Native python @('.deps/mbedtls/scripts/config.py','-f','.deps/mbedtls/include/mbedtls/mbedtls_config.h','set','MBEDTLS_SSL_DTLS_SRTP')
 $patch = Join-Path $root 'tools/libdatachannel-bounds.patch'
+$savedErrorActionPreference = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
 & git -C .deps/libdatachannel apply --reverse --check $patch 2>$null
-if ($LASTEXITCODE -ne 0) { Run-Native git @('-C','.deps/libdatachannel','apply',$patch) }
+$patchAlreadyApplied = $LASTEXITCODE -eq 0
+$ErrorActionPreference = $savedErrorActionPreference
+if (!$patchAlreadyApplied) { Run-Native git @('-C','.deps/libdatachannel','apply',$patch) }
 foreach ($tool in @{'cc'='cc'; 'cxx'='c++'; 'ar'='ar'; 'ranlib'='ranlib'}.GetEnumerator()) {
     Set-Content -LiteralPath ".deps/zig-$($tool.Key).cmd" -Value "@echo off`nzig $($tool.Value) %*"
 }
