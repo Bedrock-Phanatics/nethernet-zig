@@ -49,7 +49,7 @@ fn run(io: std.Io, mode: Mode) !void {
             }
             switch (mode) {
                 .polling_1ms => try std.Io.sleep(io, .fromMilliseconds(1), .awake),
-                .event_driven => try harness.wakeup.wait(io, .none),
+                .event_driven => try harness.wakeup.wait(io, wake.deadline(std.Io.Clock.awake.now(io), 5000)),
             }
         }
     }

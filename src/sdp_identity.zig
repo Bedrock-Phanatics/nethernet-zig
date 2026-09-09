@@ -37,7 +37,9 @@ pub fn fingerprintPayload(
         if (!std.mem.startsWith(u8, line, "a=fingerprint:")) continue;
 
         const value = line[14..];
-        const space = std.mem.indexOfScalar(u8, value, ' ') orelse continue;
+        const space = std.mem.indexOfScalar(u8, value, ' ') orelse
+            return error.InvalidIdentity;
+        if (space == 0 or space + 1 == value.len) return error.InvalidIdentity;
 
         const fingerprint: Fingerprint = .{
             .algorithm = value[0..space],
@@ -63,6 +65,8 @@ pub fn fingerprintPayload(
 
         try fingerprints.append(allocator, fingerprint);
     }
+
+    if (fingerprints.items.len == 0) return error.InvalidIdentity;
 
     return std.json.Stringify.valueAlloc(
         allocator,
@@ -122,12 +126,25 @@ pub fn add(
 
     _ = std.base64.standard.Encoder.encode(encoded, json);
 
-    const media = std.mem.indexOf(u8, sdp, "m=") orelse sdp.len;
+    var media = sdp.len;
+    var offset: usize = 0;
+    var lines = std.mem.splitScalar(u8, sdp, '\n');
+    while (lines.next()) |line_with_cr| {
+        const line = std.mem.trimEnd(u8, line_with_cr, "\r");
+        if (std.mem.startsWith(u8, line, "m=")) {
+            media = offset;
+            break;
+        }
+        offset += line_with_cr.len + 1;
+    }
+
+    const separator = if (media == sdp.len and sdp.len != 0 and
+        !std.mem.endsWith(u8, sdp, "\n")) "\r\n" else "";
 
     return std.fmt.allocPrintSentinel(
         allocator,
-        "{s}a=identity:{s}\r\n{s}",
-        .{ sdp[0..media], encoded, sdp[media..] },
+        "{s}{s}a=identity:{s}\r\n{s}",
+        .{ sdp[0..media], separator, encoded, sdp[media..] },
         0,
     );
 }
@@ -190,22 +207,47 @@ pub fn verify(
     try jwt.verify(allocator, signature, key, payload);
 
     if (verifier) |application_verifier| {
-        if (try application_verifier.verify(
+        const verified_key = (try application_verifier.verify(
             application_verifier.context,
             token,
-        )) |verified_key| {
-            try jwt.verify(
-                allocator,
-                signature,
-                verified_key,
-                payload,
-            );
-
-            key = verified_key;
-        }
+        )) orelse return error.InvalidIdentity;
+        try jwt.verify(allocator, signature, verified_key, payload);
+        key = verified_key;
     }
 
     return key;
+}
+
+test "SDP identity requires a valid fingerprint and explicit verifier acceptance" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.InvalidIdentity, fingerprintPayload(allocator, "v=0\r\n"));
+    try std.testing.expectError(error.InvalidIdentity, fingerprintPayload(allocator, "a=fingerprint:sha-256\r\n"));
+    try std.testing.expectError(error.InvalidIdentity, fingerprintPayload(allocator, "a=fingerprint: 00:11\r\n"));
+    try std.testing.expectError(error.InvalidIdentity, fingerprintPayload(allocator, "a=fingerprint:sha-256 \r\n"));
+
+    const Rejector = struct {
+        fn reject(_: ?*anyopaque, _: []const u8) anyerror!?Key {
+            return null;
+        }
+    };
+    const key = try jwt.Scheme.KeyPair.generateDeterministic(.{3} ** 48);
+    const token = try jwt.serverToken(allocator, key, 1000);
+    defer allocator.free(token);
+    const signed = try add(allocator, "v=0\r\na=fingerprint:sha-256 00:11\r\n", .{ .key = key, .token = token });
+    defer allocator.free(signed);
+    try std.testing.expectError(error.InvalidIdentity, verify(allocator, signed, 1000, .server, .{ .verify = Rejector.reject }));
+}
+
+test "identity insertion ignores m equals inside attribute values" {
+    const allocator = std.testing.allocator;
+    const key = try jwt.Scheme.KeyPair.generateDeterministic(.{4} ** 48);
+    const token = try jwt.serverToken(allocator, key, 1000);
+    defer allocator.free(token);
+    const source = "v=0\r\na=x:term=value\r\na=fingerprint:sha-256 00:11\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n";
+    const signed = try add(allocator, source, .{ .key = key, .token = token });
+    defer allocator.free(signed);
+    try std.testing.expect(std.mem.indexOf(u8, signed, "a=x:term=value\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, signed, "a=identity:").? < std.mem.indexOf(u8, signed, "m=application").?);
 }
 
 test "SDP identity nesting, fingerprint deduplication and proof binding" {

@@ -58,7 +58,12 @@ pub const Urls = struct {
 
                 const colon = std.mem.indexOfScalar(u8, url, ':') orelse
                     return error.InvalidIceServer;
-
+                const authority = std.mem.trimStart(u8, url[colon + 1 ..], "/");
+                if (authority.len == 0 or
+                    std.mem.indexOfScalar(u8, authority, '@') != null)
+                {
+                    return error.InvalidIceServer;
+                }
                 const scheme = url[0..colon];
                 const is_stun = std.ascii.eqlIgnoreCase(scheme, "stun");
                 const is_turn =
@@ -119,6 +124,14 @@ fn authenticatedUrl(
     const escaped_password = try escape(allocator, password);
     defer allocator.free(escaped_password);
 
+    var final_length = std.math.add(usize, scheme.len, 1) catch return error.InvalidIceServer;
+    final_length = std.math.add(usize, final_length, escaped_username.len) catch return error.InvalidIceServer;
+    final_length = std.math.add(usize, final_length, 1) catch return error.InvalidIceServer;
+    final_length = std.math.add(usize, final_length, escaped_password.len) catch return error.InvalidIceServer;
+    final_length = std.math.add(usize, final_length, 1) catch return error.InvalidIceServer;
+    final_length = std.math.add(usize, final_length, authority.len) catch return error.InvalidIceServer;
+    if (final_length > maximum_url_length) return error.InvalidIceServer;
+
     return std.fmt.allocPrintSentinel(
         allocator,
         "{s}:{s}:{s}@{s}",
@@ -172,6 +185,26 @@ test "TURN credentials escape delimiters and flatten URLs" {
         "stun:stun.example:3478",
         std.mem.span(urls.values[1]),
     );
+}
+
+test "ICE URL authorities and encoded lengths are bounded" {
+    const allocator = std.testing.allocator;
+    for ([_][]const u8{ "stun:", "turn:", "turn:///" }) |url| {
+        try std.testing.expectError(error.InvalidIceServer, Urls.init(allocator, .{
+            .ice_servers = &.{.{ .urls = &.{url} }},
+        }));
+    }
+
+    const credential = try allocator.alloc(u8, maximum_credential_length);
+    defer allocator.free(credential);
+    @memset(credential, '@');
+    try std.testing.expectError(error.InvalidIceServer, Urls.init(allocator, .{
+        .ice_servers = &.{.{
+            .username = credential,
+            .password = credential,
+            .urls = &.{"turn:relay.example"},
+        }},
+    }));
 }
 
 fn credentialsFailureScenario(allocator: std.mem.Allocator) !void {

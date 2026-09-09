@@ -53,15 +53,18 @@ pub fn build(b: *std.Build) void {
     const run_core_tests = b.addRunArtifact(core_tests);
     b.step("test", "Run core codec, discovery, fuzz corpus and allocation tests").dependOn(&run_core_tests.step);
     b.step("fuzz", "Run the fuzz corpus and deterministic malformed-input campaign").dependOn(&run_core_tests.step);
-    b.default_step.dependOn(&core_tests.step);
+    b.default_step.dependOn(&run_core_tests.step);
 
     const native_root = nativeModule(b, "native_tests.zig", target, optimize, native_prefix);
     const native_tests = b.addTest(.{ .root_module = native_root });
     const run_native_tests = b.addRunArtifact(native_tests);
     run_native_tests.addPathDir(b.pathJoin(&.{ native_prefix, "bin" }));
-    run_native_tests.setEnvironmentVariable("LD_LIBRARY_PATH", b.pathJoin(&.{ native_prefix, "lib" }));
+    run_native_tests.setEnvironmentVariable(
+        if (target.result.os.tag == .macos) "DYLD_LIBRARY_PATH" else "LD_LIBRARY_PATH",
+        b.pathJoin(&.{ native_prefix, "lib" }),
+    );
     b.step("test-native", "Run real WebRTC, endpoint and LAN integration tests").dependOn(&run_native_tests.step);
-    b.default_step.dependOn(&native_tests.step);
+    b.default_step.dependOn(&run_native_tests.step);
 
     inline for (.{
         .{ "client", "examples/client.zig" },
@@ -69,7 +72,9 @@ pub fn build(b: *std.Build) void {
     }) |example| {
         const example_module = module(b, example[1], target, optimize);
         example_module.addImport("nethernet", public_module);
-        b.installArtifact(b.addExecutable(.{ .name = example[0], .root_module = example_module }));
+        const executable = b.addExecutable(.{ .name = example[0], .root_module = example_module });
+        b.installArtifact(executable);
+        b.step(b.fmt("example-{s}", .{example[0]}), b.fmt("Build the {s} example", .{example[0]})).dependOn(&executable.step);
     }
 
     if (target.result.os.tag == .windows) {

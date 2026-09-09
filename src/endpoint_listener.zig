@@ -22,6 +22,8 @@ pub const Listener = struct {
     group: std.Io.Group = .init,
     accepted: std.Io.Queue(*conn.Connection),
     slots: []*conn.Connection,
+    accept_mutex: std.Io.Mutex = .init,
+    reserved_accepts: usize = 0,
     closed: bool = false,
 
     pub fn listen(
@@ -77,7 +79,24 @@ pub const Listener = struct {
 
     /// The caller owns the returned connection, even after the listener closes.
     pub fn accept(self: *Listener) !*conn.Connection {
-        return self.accepted.getOne(self.io);
+        const connection = try self.accepted.getOne(self.io);
+        self.releaseAccept();
+        return connection;
+    }
+
+    fn reserveAccept(self: *Listener) bool {
+        self.accept_mutex.lockUncancelable(self.io);
+        defer self.accept_mutex.unlock(self.io);
+        if (self.reserved_accepts == self.options.maximum_pending_accepts) return false;
+        self.reserved_accepts += 1;
+        return true;
+    }
+
+    fn releaseAccept(self: *Listener) void {
+        self.accept_mutex.lockUncancelable(self.io);
+        defer self.accept_mutex.unlock(self.io);
+        std.debug.assert(self.reserved_accepts != 0);
+        self.reserved_accepts -= 1;
     }
 
     pub fn close(self: *Listener) void {
@@ -233,6 +252,15 @@ pub const Listener = struct {
 
         const connection_id = std.mem.readInt(u64, &random, .little);
 
+        if (!self.reserveAccept()) {
+            return request.respond("Accept queue full", .{
+                .status = .service_unavailable,
+                .keep_alive = false,
+            });
+        }
+        var accept_reserved = true;
+        defer if (accept_reserved) self.releaseAccept();
+
         var connection_options = self.options.connection;
         connection_options.native.disable_trickle = true;
 
@@ -291,10 +319,8 @@ pub const Listener = struct {
             try connection.wait(true);
         }
 
-        if (try self.accepted.put(self.io, &.{connection}, 0) == 0) {
-            return error.AcceptQueueFull;
-        }
-
+        if (try self.accepted.put(self.io, &.{connection}, 0) == 0) unreachable;
         transferred = true;
+        accept_reserved = false;
     }
 };

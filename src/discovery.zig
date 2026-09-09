@@ -37,6 +37,7 @@ pub const Discovery = struct {
     consumed: std.Io.Event = .unset,
     receive_group: std.Io.Group = .init,
     receive_mutex: std.Io.Mutex = .init,
+    operation_active: bool = false,
     incoming: ?std.Io.net.IncomingMessage = null,
     receive_error: ?anyerror = null,
     subscriber: ?*wake.Wakeup = null,
@@ -142,6 +143,7 @@ pub const Discovery = struct {
 
     pub fn setServerData(self: *Discovery, data: ServerData) !void {
         const encoded = try data.encode(self.plain());
+        if (encoded.len > codec.maximum_response_data) return error.MessageTooLarge;
         const owned = try self.allocator.dupe(u8, encoded);
 
         if (self.advertisement) |old| {
@@ -256,9 +258,11 @@ pub const Discovery = struct {
                 .endpoint = message.from,
                 .last_seen = now,
             };
+        } else if (!std.meta.eql(entry.value_ptr.endpoint, message.from)) {
+            self.malformed_datagrams +|= 1;
+            return null;
         }
 
-        entry.value_ptr.endpoint = message.from;
         entry.value_ptr.last_seen = now;
 
         switch (decoded.packet) {
@@ -302,6 +306,20 @@ pub const Discovery = struct {
         }
 
         return null;
+    }
+
+    pub fn beginOperation(self: *Discovery) !void {
+        self.receive_mutex.lockUncancelable(self.io);
+        defer self.receive_mutex.unlock(self.io);
+        if (self.operation_active) return error.OperationInProgress;
+        self.operation_active = true;
+    }
+
+    pub fn endOperation(self: *Discovery) void {
+        self.receive_mutex.lockUncancelable(self.io);
+        defer self.receive_mutex.unlock(self.io);
+        self.operation_active = false;
+        self.notify();
     }
 
     pub fn subscribe(self: *Discovery, subscriber: ?*wake.Wakeup) void {
@@ -438,6 +456,12 @@ test "UDP discovery and addressed signaling over loopback" {
         .{ .network_id = 1 },
     );
     defer client.destroy();
+
+    try client.beginOperation();
+    try std.testing.expectError(error.OperationInProgress, client.beginOperation());
+    client.endOperation();
+    try client.beginOperation();
+    client.endOperation();
 
     try server.setServerData(.{ .server_name = "Zig" });
     try client.request(server.socket.address);

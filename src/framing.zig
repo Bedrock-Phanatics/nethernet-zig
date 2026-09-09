@@ -10,9 +10,14 @@ pub const Reliability = enum {
     unreliable,
 };
 
+pub fn validateFragmentSize(size: usize) !void {
+    if (size < 2) return error.MalformedFragment;
+    if (size - 1 > maximum_segment_payload) return error.MessageTooLarge;
+}
+
 /// Returns a borrowed payload only when the frame is a complete message.
 pub fn singleFragmentPayload(fragment: []const u8, reliability: Reliability) !?[]const u8 {
-    if (fragment.len < 2) return error.MalformedFragment;
+    try validateFragmentSize(fragment.len);
     if (fragment[0] != 0) {
         if (reliability == .unreliable) return error.MalformedFragment;
         return null;
@@ -91,11 +96,17 @@ pub const Reassembler = struct {
         if (self.failed) return error.ConnectionClosed;
         errdefer self.failed = true;
 
-        if (fragment.len < 2) return error.MalformedFragment;
+        try validateFragmentSize(fragment.len);
 
         const remaining = fragment[0];
 
         if (self.reliability == .unreliable and remaining != 0) {
+            return error.MalformedFragment;
+        }
+
+        if (self.reliability == .reliable and self.used == 0 and
+            remaining >= maximum_segments)
+        {
             return error.MalformedFragment;
         }
 
@@ -122,6 +133,12 @@ pub const Reassembler = struct {
         return message;
     }
 };
+
+test "inbound fragment payload boundaries match the encoder" {
+    try validateFragmentSize(maximum_segment_payload + 1);
+    try std.testing.expectError(error.MessageTooLarge, validateFragmentSize(maximum_segment_payload + 2));
+    try std.testing.expectError(error.MalformedFragment, validateFragmentSize(1));
+}
 
 test "empty sends no frames; output exhaustion leaves iterator unchanged" {
     var empty = try Encoder.init("", .reliable, 10);
@@ -244,6 +261,25 @@ test "malformed, reordered, duplicate, oversized and unreliable fragments fail c
         error.MalformedFragment,
         reassembler.push(&.{ 1, 2 }),
     );
+}
+
+test "reassembler rejects a 256-fragment countdown" {
+    var storage: [256]u8 = undefined;
+    var reassembler = Reassembler.init(&storage, .reliable);
+    try std.testing.expectError(error.MalformedFragment, reassembler.push(&.{ 255, 1 }));
+    try std.testing.expectError(error.ConnectionClosed, reassembler.push(&.{ 254, 1 }));
+
+    reassembler.reset();
+    var remaining: usize = maximum_segments - 1;
+    while (true) {
+        const result = try reassembler.push(&.{ @intCast(remaining), 1 });
+        if (remaining == 0) {
+            try std.testing.expectEqual(@as(usize, maximum_segments), result.?.len);
+            break;
+        }
+        try std.testing.expect(result == null);
+        remaining -= 1;
+    }
 }
 
 test "reliable message-size boundaries match 255 segment representation" {

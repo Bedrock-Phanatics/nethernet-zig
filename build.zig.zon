@@ -3,5 +3,5 @@
     .version = "0.1.0",
     .fingerprint = 0x8b6cc58fa8d39a76,
     .minimum_zig_version = "0.16.0",
-    .paths = .{ "build.zig", "build.zig.zon", "src", "tools/setup-native.ps1", "tools/setup-native.sh", "tools/libdatachannel-bounds.patch", "examples", "docs", "README.md", "LICENSE" },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "tests.zig", "native_tests.zig", "tests", "bench", "tools/setup-native.ps1", "tools/setup-native.sh", "tools/libdatachannel-bounds.patch", "examples", "docs", "README.md", "LICENSE" },
 }

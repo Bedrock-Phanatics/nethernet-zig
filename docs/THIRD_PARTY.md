@@ -6,8 +6,8 @@ The native build pins:
 
 | Component | Version / source | License | Role |
 |---|---|---|---|
-| libdatachannel | v0.24.5, https://github.com/paullouisageneau/libdatachannel | MPL-2.0 | WebRTC C API |
-| Mbed TLS | mbedtls-3.6.7, https://github.com/Mbed-TLS/mbedtls | Apache-2.0 OR GPL-2.0-or-later (use Apache-2.0) | DTLS and certificate cryptography |
+| libdatachannel | v0.24.5 (443f6934d9007eb7076ab7825ba330f355fcbead), https://github.com/paullouisageneau/libdatachannel | MPL-2.0 | WebRTC C API |
+| Mbed TLS | mbedtls-3.6.7 (068ff080b369adfac81509f9b57b2afabaf82dc5), https://github.com/Mbed-TLS/mbedtls | Apache-2.0 OR GPL-2.0-or-later (use Apache-2.0) | DTLS and certificate cryptography |
 | libjuice | libdatachannel's pinned submodule | MPL-2.0 | ICE/STUN/TURN |
 | usrsctp | libdatachannel's pinned submodule | BSD-3-Clause | SCTP |
 | plog | libdatachannel's pinned submodule | MIT | Native logging |

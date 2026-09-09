@@ -1,69 +1,78 @@
 diff --git a/src/impl/sctptransport.cpp b/src/impl/sctptransport.cpp
-index 552ee94..7a7c5f7 100644
+index 552ee94..87f7d0b 100644
 --- a/src/impl/sctptransport.cpp
 +++ b/src/impl/sctptransport.cpp
-@@ -517,8 +517,10 @@ void SctpTransport::doRecv() {
+@@ -515,11 +515,13 @@ void SctpTransport::doRecv() {
+ 
+ 			} else {
  				// SCTP message
- 				mPartialMessage.insert(mPartialMessage.end(), buffer, buffer + len);
- 				if (mPartialMessage.size() > mMaxMessageSize) {
+-				mPartialMessage.insert(mPartialMessage.end(), buffer, buffer + len);
+-				if (mPartialMessage.size() > mMaxMessageSize) {
 -					PLOG_WARNING << "SCTP message is too large, truncating it";
 -					mPartialMessage.resize(mMaxMessageSize);
++				if (static_cast<size_t>(len) > mMaxMessageSize - mPartialMessage.size()) {
 +					PLOG_WARNING << "SCTP message is too large, failing association";
 +					mPartialMessage.clear();
-+                    changeState(State::Failed);
-+                    return;
++					changeState(State::Failed);
++					return;
  				}
++				mPartialMessage.insert(mPartialMessage.end(), buffer, buffer + len);
  
  				if (flags & MSG_EOR) {
-@@ -795,7 +797,11 @@ void SctpTransport::processData(binary &&data, uint16_t sid, PayloadId ppid) {
+ 					// Message is complete, process it
+@@ -794,8 +796,12 @@ void SctpTransport::processData(binary &&data, uint16_t sid, PayloadId ppid) {
+ 		break;
  
  	case PPID_STRING_PARTIAL: // deprecated
++		if (data.size() > mMaxMessageSize - mPartialStringData.size()) {
++			mPartialStringData.clear();
++			changeState(State::Failed);
++			return;
++		}
  		mPartialStringData.insert(mPartialStringData.end(), data.begin(), data.end());
 -		mPartialStringData.resize(mMaxMessageSize);
-+		if (mPartialStringData.size() > mMaxMessageSize) {
-+                mPartialStringData.clear();
-+                changeState(State::Failed);
-+                return;
-+            }
  		break;
  
  	case PPID_STRING:
-@@ -804,7 +810,11 @@ void SctpTransport::processData(binary &&data, uint16_t sid, PayloadId ppid) {
+@@ -803,8 +809,12 @@ void SctpTransport::processData(binary &&data, uint16_t sid, PayloadId ppid) {
+ 			mBytesReceived += data.size();
  			recv(make_message(std::move(data), Message::String, sid));
  		} else {
++			if (data.size() > mMaxMessageSize - mPartialStringData.size()) {
++				mPartialStringData.clear();
++				changeState(State::Failed);
++				return;
++			}
  			mPartialStringData.insert(mPartialStringData.end(), data.begin(), data.end());
 -			mPartialStringData.resize(mMaxMessageSize);
-+			if (mPartialStringData.size() > mMaxMessageSize) {
-+                mPartialStringData.clear();
-+                changeState(State::Failed);
-+                return;
-+            }
  			mBytesReceived += mPartialStringData.size();
  			auto message = make_message(std::move(mPartialStringData), Message::String, sid);
  			mPartialStringData.clear();
-@@ -819,7 +829,11 @@ void SctpTransport::processData(binary &&data, uint16_t sid, PayloadId ppid) {
+@@ -818,8 +828,12 @@ void SctpTransport::processData(binary &&data, uint16_t sid, PayloadId ppid) {
+ 		break;
  
  	case PPID_BINARY_PARTIAL: // deprecated
++		if (data.size() > mMaxMessageSize - mPartialBinaryData.size()) {
++			mPartialBinaryData.clear();
++			changeState(State::Failed);
++			return;
++		}
  		mPartialBinaryData.insert(mPartialBinaryData.end(), data.begin(), data.end());
 -		mPartialBinaryData.resize(mMaxMessageSize);
-+		if (mPartialBinaryData.size() > mMaxMessageSize) {
-+                mPartialBinaryData.clear();
-+                changeState(State::Failed);
-+                return;
-+            }
  		break;
  
  	case PPID_BINARY:
-@@ -828,7 +842,11 @@ void SctpTransport::processData(binary &&data, uint16_t sid, PayloadId ppid) {
+@@ -827,8 +841,12 @@ void SctpTransport::processData(binary &&data, uint16_t sid, PayloadId ppid) {
+ 			mBytesReceived += data.size();
  			recv(make_message(std::move(data), Message::Binary, sid));
  		} else {
++			if (data.size() > mMaxMessageSize - mPartialBinaryData.size()) {
++				mPartialBinaryData.clear();
++				changeState(State::Failed);
++				return;
++			}
  			mPartialBinaryData.insert(mPartialBinaryData.end(), data.begin(), data.end());
 -			mPartialBinaryData.resize(mMaxMessageSize);
-+			if (mPartialBinaryData.size() > mMaxMessageSize) {
-+                mPartialBinaryData.clear();
-+                changeState(State::Failed);
-+                return;
-+            }
  			mBytesReceived += mPartialBinaryData.size();
  			auto message = make_message(std::move(mPartialBinaryData), Message::Binary, sid);
  			mPartialBinaryData.clear();

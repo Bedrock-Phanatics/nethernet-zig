@@ -7,6 +7,11 @@ pub const Queue = struct {
         len: usize,
     };
 
+    pub const Popped = struct {
+        tag: u8,
+        data: []const u8,
+    };
+
     bytes: []u8,
     entries: []Entry,
 
@@ -72,7 +77,7 @@ pub const Queue = struct {
     pub fn pop(
         self: *Queue,
         output: []u8,
-    ) !?struct { tag: u8, data: []const u8 } {
+    ) !?Popped {
         if (self.count == 0) return null;
 
         const entry = self.entries[self.head];
@@ -102,7 +107,71 @@ pub const Queue = struct {
             .data = output[0..entry.len],
         };
     }
+
+    pub fn hasTagBelow(self: *const Queue, limit: u8) bool {
+        for (0..self.count) |offset| {
+            const index = (self.head + offset) % self.entries.len;
+            if (self.entries[index].tag < limit) return true;
+        }
+        return false;
+    }
+
+    /// Removes the first matching entry while preserving all other entry order.
+    pub fn popFirstTagBelow(
+        self: *Queue,
+        limit: u8,
+        output: []u8,
+    ) !?Popped {
+        var byte_offset: usize = 0;
+        var entry_offset: usize = 0;
+        while (entry_offset < self.count) : (entry_offset += 1) {
+            const index = (self.head + entry_offset) % self.entries.len;
+            const entry = self.entries[index];
+            if (entry.tag < limit) {
+                if (output.len < entry.len) return error.NoSpaceLeft;
+
+                for (0..entry.len) |i| {
+                    output[i] = self.bytes[(self.read_byte + byte_offset + i) % self.bytes.len];
+                }
+
+                const trailing = self.used_bytes - byte_offset - entry.len;
+                for (0..trailing) |i| {
+                    const destination = (self.read_byte + byte_offset + i) % self.bytes.len;
+                    const source = (self.read_byte + byte_offset + entry.len + i) % self.bytes.len;
+                    self.bytes[destination] = self.bytes[source];
+                }
+
+                var shift = entry_offset;
+                while (shift + 1 < self.count) : (shift += 1) {
+                    const destination = (self.head + shift) % self.entries.len;
+                    const source = (self.head + shift + 1) % self.entries.len;
+                    self.entries[destination] = self.entries[source];
+                }
+
+                self.used_bytes -= entry.len;
+                self.count -= 1;
+                return .{ .tag = entry.tag, .data = output[0..entry.len] };
+            }
+            byte_offset += entry.len;
+        }
+        return null;
+    }
 };
+
+test "priority pop bypasses data and preserves class order" {
+    var bytes: [32]u8 = undefined;
+    var entries: [4]Queue.Entry = undefined;
+    var output: [32]u8 = undefined;
+    var queue = try Queue.init(&bytes, &entries);
+    try queue.push(3, "data-a");
+    try queue.push(2, "signal");
+    try queue.push(4, "data-b");
+    try std.testing.expect(queue.hasTagBelow(3));
+    try std.testing.expectEqualStrings("signal", (try queue.popFirstTagBelow(3, &output)).?.data);
+    try std.testing.expect(!queue.hasTagBelow(3));
+    try std.testing.expectEqualStrings("data-a", (try queue.pop(&output)).?.data);
+    try std.testing.expectEqualStrings("data-b", (try queue.pop(&output)).?.data);
+}
 
 test "byte and entry limits, wraparound, failed reads preserve messages" {
     var bytes: [7]u8 = undefined;

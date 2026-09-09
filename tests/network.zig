@@ -12,6 +12,7 @@ const Proxy = struct {
     dropped: std.atomic.Value(u32) = .init(0),
     duplicated: std.atomic.Value(u32) = .init(0),
     failure: std.atomic.Value(bool) = .init(false),
+    overflowed: std.atomic.Value(u32) = .init(0),
     fn run(self: *Proxy) std.Io.Cancelable!void {
         self.loop() catch |err| switch (err) {
             error.Canceled => return error.Canceled,
@@ -65,14 +66,22 @@ const Proxy = struct {
             }
             const copies: usize = if (random.random().uintLessThan(u32, 100) < 5) 2 else 1;
             if (copies == 2) _ = self.duplicated.fetchAdd(1, .monotonic);
-            for (0..copies) |_| for (&delayed) |*packet| {
-                if (packet.len != 0) continue;
-                @memcpy(packet.data[0..incoming.data.len], incoming.data);
-                packet.len = incoming.data.len;
-                packet.dest = target;
-                packet.due = std.Io.Clock.awake.now(self.io).toMilliseconds() + 2 + random.random().uintLessThan(u32, 8);
-                break;
-            };
+            for (0..copies) |_| {
+                var queued = false;
+                for (&delayed) |*packet| {
+                    if (packet.len != 0) continue;
+                    @memcpy(packet.data[0..incoming.data.len], incoming.data);
+                    packet.len = incoming.data.len;
+                    packet.dest = target;
+                    packet.due = std.Io.Clock.awake.now(self.io).toMilliseconds() + 2 + random.random().uintLessThan(u32, 8);
+                    queued = true;
+                    break;
+                }
+                if (!queued) {
+                    _ = self.overflowed.fetchAdd(1, .monotonic);
+                    return error.ProxyQueueFull;
+                }
+            }
         }
     }
 
@@ -176,6 +185,7 @@ test "real WebRTC survives loopback UDP loss duplication jitter and reordering" 
     }
     try std.testing.expect(proxy.dropped.load(.acquire) > 0);
     try std.testing.expect(proxy.duplicated.load(.acquire) > 0);
+    try std.testing.expectEqual(@as(u32, 0), proxy.overflowed.load(.acquire));
     const end = std.Io.Clock.awake.now(io);
     while (end.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds() < 200) {
         server.prepareWait();

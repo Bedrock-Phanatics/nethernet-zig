@@ -4,6 +4,7 @@ const Hmac = std.crypto.auth.hmac.sha2.HmacSha256;
 const Aes = std.crypto.core.aes.Aes256;
 
 pub const maximum_payload = 65535;
+pub const maximum_response_data = (maximum_payload - 24) / 2;
 pub const maximum_datagram = 32 + 65536;
 
 pub const Packet = union(enum(u16)) {
@@ -53,7 +54,7 @@ pub const Codec = struct {
             .request => 20,
 
             .response => |data| blk: {
-                if (data.len > (maximum_payload - 24) / 2) {
+                if (data.len > maximum_response_data) {
                     return error.MessageTooLarge;
                 }
 
@@ -147,6 +148,9 @@ pub const Codec = struct {
         const padded = datagram.len - 32;
         if (scratch.len < padded) return error.NoSpaceLeft;
 
+        var authenticated = false;
+        defer if (!authenticated) std.crypto.secureZero(u8, scratch[0..padded]);
+
         var offset: usize = 0;
         while (offset < padded) : (offset += 16) {
             self.dec.decrypt(
@@ -182,7 +186,9 @@ pub const Codec = struct {
             return error.AuthenticationFailed;
         }
 
-        return decodePayload(scratch[0..size]);
+        const decoded = try decodePayload(scratch[0..size]);
+        authenticated = true;
+        return decoded;
     }
 };
 
@@ -238,7 +244,7 @@ pub fn decodePayload(payload: []u8) !Decoded {
                         payload[20..28],
                         .little,
                     ),
-                    .data = payload[32..],
+                    .data = payload[32..][0..length],
                 },
             };
         },
@@ -316,7 +322,22 @@ test "all packet kinds roundtrip and reject tampering" {
             error.AuthenticationFailed,
             codec.decode(encoded, &scratch),
         );
+        for (scratch[0 .. encoded.len - 32]) |byte| {
+            try std.testing.expectEqual(@as(u8, 0), byte);
+        }
     }
+}
+
+test "declared message length excludes compatible trailing bytes" {
+    var payload = [_]u8{0} ** 41;
+    std.mem.writeInt(u16, payload[0..2], payload.len, .little);
+    std.mem.writeInt(u16, payload[2..4], 2, .little);
+    std.mem.writeInt(u64, payload[4..12], 7, .little);
+    std.mem.writeInt(u64, payload[20..28], 9, .little);
+    std.mem.writeInt(u32, payload[28..32], 4, .little);
+    @memcpy(payload[32..], "PingEXTRA");
+    const decoded = try decodePayload(&payload);
+    try std.testing.expectEqualStrings("Ping", decoded.packet.message.data);
 }
 
 test "arbitrary datagrams and plaintext fail safely without allocations" {

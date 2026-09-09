@@ -15,6 +15,7 @@ pub const Signal = struct {
     pub fn parse(text: []const u8) error{MalformedSignal}!Signal {
         const first = std.mem.indexOfScalar(u8, text, ' ') orelse
             return error.MalformedSignal;
+        if (first == 0) return error.MalformedSignal;
         const second = std.mem.indexOfScalarPos(u8, text, first + 1, ' ') orelse
             return error.MalformedSignal;
 
@@ -63,6 +64,7 @@ test "signal preserves whitespace and UInt64 boundaries" {
         "A 18446744073709551616 x",
         "A  x",
         "A 1_0 x",
+        " 1 payload",
     };
 
     for (malformed) |text| {

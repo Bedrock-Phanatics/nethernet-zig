@@ -15,4 +15,5 @@ pub fn main(init: std.process.Init) !void {
 
     const message = try connection.receive();
     std.debug.print("received: {s}\n", .{message.data});
+    try connection.send("ack", .reliable);
 }

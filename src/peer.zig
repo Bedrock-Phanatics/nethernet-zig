@@ -176,8 +176,7 @@ pub const Peer = struct {
     pub fn hasPending(self: *Peer, signals_only: bool) bool {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        return self.queue.count != 0 and
-            (!signals_only or self.queue.entries[self.queue.head].tag < 3);
+        return if (signals_only) self.queue.hasTagBelow(3) else self.queue.count != 0;
     }
 
     /// Whether the next poll can produce negotiation data larger than a packet.
@@ -187,7 +186,7 @@ pub const Peer = struct {
 
         if (!self.gathered) return true;
         if (self.options.disable_trickle and !self.description_sent) return true;
-        return self.queue.count != 0 and self.queue.entries[self.queue.head].tag < 3;
+        return self.queue.hasTagBelow(3);
     }
 
     pub fn callbackStats(self: *Peer) CallbackStats {
@@ -319,7 +318,7 @@ pub const Peer = struct {
     ) !?Event {
         self.mutex.lockUncancelable(self.io);
 
-        if (self.stopping or self.state == .closed or self.state == .failed) {
+        if (self.stopping or self.state == .closed or self.state == .failed or self.state == .disconnected) {
             self.mutex.unlock(self.io);
             return error.ConnectionClosed;
         }
@@ -362,14 +361,10 @@ pub const Peer = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
-        if (signals_only and
-            self.queue.count != 0 and
-            self.queue.entries[self.queue.head].tag >= 3)
-        {
-            return null;
-        }
-
-        const entry = try self.queue.pop(output) orelse return null;
+        const entry = (if (signals_only)
+            try self.queue.popFirstTagBelow(3, output)
+        else
+            try self.queue.pop(output)) orelse return null;
 
         return switch (entry.tag) {
             0 => .{ .offer = entry.data },

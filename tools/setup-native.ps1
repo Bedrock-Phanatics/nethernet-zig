@@ -8,7 +8,7 @@ function Run-Native([string]$Program, [string[]]$Arguments) {
 }
 if ((& zig version) -ne '0.16.0') { throw 'This build requires Zig 0.16.0.' }
 New-Item -ItemType Directory -Force .deps | Out-Null
-if (!(Test-Path -LiteralPath .deps/python/cmake/data/bin/cmake.exe)) {
+if (!(Test-Path -LiteralPath .deps/python/cmake/data/bin/cmake.exe) -or !(Test-Path -LiteralPath .deps/python/bin/ninja.exe)) {
     Run-Native python @('-m','pip','install','--target','.deps/python','cmake==3.31.10','ninja==1.13.0')
 }
 if (!(Test-Path -LiteralPath .deps/libdatachannel/.git)) {
@@ -17,9 +17,9 @@ if (!(Test-Path -LiteralPath .deps/libdatachannel/.git)) {
 if (!(Test-Path -LiteralPath .deps/mbedtls/.git)) {
     Run-Native git @('clone','--branch','mbedtls-3.6.7','--depth','1','--recurse-submodules','--shallow-submodules','https://github.com/Mbed-TLS/mbedtls.git','.deps/mbedtls')
 }
-if ((& git -C .deps/libdatachannel describe --tags --exact-match) -ne 'v0.24.5') { throw 'Unexpected libdatachannel checkout.' }
+if ((& git -C .deps/libdatachannel rev-parse HEAD) -ne '443f6934d9007eb7076ab7825ba330f355fcbead') { throw 'Unexpected libdatachannel checkout.' }
 $mbedTag = & git -C .deps/mbedtls describe --tags --exact-match
-if ($mbedTag -notin @('mbedtls-3.6.7','v3.6.7')) { throw 'Expected Mbed TLS 3.6.7.' }
+if ($mbedTag -notin @('mbedtls-3.6.7','v3.6.7') -or (& git -C .deps/mbedtls rev-parse HEAD) -ne '068ff080b369adfac81509f9b57b2afabaf82dc5') { throw 'Unexpected Mbed TLS checkout.' }
 Run-Native python @('.deps/mbedtls/scripts/config.py','-f','.deps/mbedtls/include/mbedtls/mbedtls_config.h','set','MBEDTLS_SSL_DTLS_SRTP')
 $patch = Join-Path $root 'tools/libdatachannel-bounds.patch'
 & git -C .deps/libdatachannel apply --reverse --check $patch 2>$null

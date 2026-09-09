@@ -23,6 +23,13 @@ const Reader = struct {
     fn byte(self: *Reader) Error!u8 {
         return (try self.take(1))[0];
     }
+    fn boolean(self: *Reader) Error!bool {
+        return switch (try self.byte()) {
+            0 => false,
+            1 => true,
+            else => error.MalformedPacket,
+        };
+    }
 
     fn uint(self: *Reader) Error!u32 {
         var value: u32 = 0;
@@ -162,10 +169,10 @@ pub const ServerData = struct {
             .game_type = try reader.int(),
             .player_count = try reader.fixed(),
             .max_player_count = try reader.fixed(),
-            .editor_world = try reader.byte() != 0,
-            .hardcore = try reader.byte() != 0,
-            .accepts_online_auth = try reader.byte() != 0,
-            .accepts_self_signed_auth = try reader.byte() != 0,
+            .editor_world = try reader.boolean(),
+            .hardcore = try reader.boolean(),
+            .accepts_online_auth = try reader.boolean(),
+            .accepts_self_signed_auth = try reader.boolean(),
             .nonce = try reader.string(),
             .transport_layer = try reader.int(),
             .connection_type = try reader.int(),
@@ -196,12 +203,12 @@ pub const ServerData = struct {
                 i32,
                 std.mem.trim(u8, parts[4], " \t"),
                 10,
-            ) catch 0,
+            ) catch return error.MalformedPacket,
             .max_player_count = std.fmt.parseInt(
                 i32,
                 std.mem.trim(u8, parts[5], " \t"),
                 10,
-            ) catch 0,
+            ) catch return error.MalformedPacket,
             .game_type = if (std.ascii.eqlIgnoreCase(game_type, "CREATIVE"))
                 1
             else if (std.ascii.eqlIgnoreCase(game_type, "ADVENTURE"))
@@ -291,6 +298,21 @@ test "version six advertisement matches wire fixture" {
         error.MalformedPacket,
         ServerData.decode(&.{ 6, 255, 255, 255, 255, 127 }),
     );
+}
+
+test "advertisements reject noncanonical booleans and malformed pong counts" {
+    var encoded: [64]u8 = undefined;
+    const wire = try (ServerData{}).encode(&encoded);
+    var malformed: [64]u8 = undefined;
+    @memcpy(malformed[0..wire.len], wire);
+    malformed[14] = 2;
+    try std.testing.expectError(error.MalformedPacket, ServerData.decode(malformed[0..wire.len]));
+
+    for ([_][]const u8{
+        "MCPE;server;1;2;;4;5;world;CREATIVE",
+        "MCPE;server;1;2;bad;4;5;world;CREATIVE",
+        "MCPE;server;1;2;3;999999999999;5;world;CREATIVE",
+    }) |pong| try std.testing.expectError(error.MalformedPacket, ServerData.fromPong(pong));
 }
 
 test "signed varint boundaries and pong conversion" {

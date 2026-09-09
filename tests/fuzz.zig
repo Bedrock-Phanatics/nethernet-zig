@@ -35,7 +35,7 @@ test "deterministic malformed input campaign" {
     var random = std.Random.DefaultPrng.init(0xBEdBEd);
     var bytes: [4096]u8 = undefined;
     for (0..build_options.fuzz_iterations) |i| {
-        const len = i % bytes.len;
+        const len = i % (bytes.len + 1);
         random.random().bytes(bytes[0..len]);
         exercise(bytes[0..len]);
     }

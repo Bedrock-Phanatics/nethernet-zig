@@ -44,6 +44,12 @@ pub fn main(init: std.process.Init) !void {
         report(io, start, "discovery_encode", size, default_iterations, 0);
 
         const wire = try codec.encode(.{ .response = payload[0..size] }, 7, scratch, output);
+        const preflight = try codec.decode(wire, scratch);
+        if (preflight.sender_id != 7 or
+            !std.mem.eql(u8, preflight.packet.response, payload[0..size]))
+        {
+            return error.BenchmarkPreflightFailed;
+        }
         start = std.Io.Clock.awake.now(io);
         for (0..default_iterations) |_| {
             const decoded = try codec.decode(wire, scratch);
@@ -55,6 +61,7 @@ pub fn main(init: std.process.Init) !void {
 
     for ([_]usize{ 32, 64, 128, 256, 512, 1024, 1400, 8192, 262143, 262144, payload_size }) |size| {
         const iterations: usize = if (size > 8192) 1000 else default_iterations;
+        try validateFraming(payload[0..size], frame, storage);
         const start = std.Io.Clock.awake.now(io);
         for (0..iterations) |_| {
             var encoder = try framing.Encoder.init(payload[0..size], .reliable, payload.len);
@@ -113,6 +120,10 @@ pub fn main(init: std.process.Init) !void {
     }
     var entries: [256]Queue.Entry = undefined;
     var queue = try Queue.init(storage, &entries);
+    try queue.push(0, payload[0..queue_payload_size]);
+    const queued = (try queue.pop(frame)).?;
+    if (queued.tag != 0 or !std.mem.eql(u8, queued.data, payload[0..queue_payload_size]))
+        return error.BenchmarkPreflightFailed;
     const start = std.Io.Clock.awake.now(io);
     for (0..queue_iterations) |_| {
         try queue.push(0, payload[0..queue_payload_size]);
@@ -123,6 +134,15 @@ pub fn main(init: std.process.Init) !void {
     try pressureBenchmark(io, false);
     try pressureBenchmark(io, true);
     std.mem.doNotOptimizeAway(checksum);
+}
+
+fn validateFraming(payload: []const u8, frame: []u8, storage: []u8) !void {
+    var encoder = try framing.Encoder.init(payload, .reliable, storage.len);
+    var decoder = framing.Reassembler.init(storage, .reliable);
+    var result: ?[]const u8 = null;
+    while (try encoder.next(frame)) |part| result = try decoder.push(part);
+    if (result == null or !std.mem.eql(u8, result.?, payload))
+        return error.BenchmarkPreflightFailed;
 }
 
 fn report(io: std.Io, start: std.Io.Timestamp, operation: []const u8, bytes: usize, count: usize, copied: usize) void {

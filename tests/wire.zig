@@ -31,7 +31,10 @@ test "discovery packets match encrypted wire fixtures" {
         switch (packet) {
             .request => try std.testing.expect(decoded.packet == .request),
             .response => |bytes| try std.testing.expectEqualSlices(u8, bytes, decoded.packet.response),
-            .message => |message| try std.testing.expectEqualStrings(message.data, decoded.packet.message.data),
+            .message => |message| {
+                try std.testing.expectEqual(message.recipient_id, decoded.packet.message.recipient_id);
+                try std.testing.expectEqualStrings(message.data, decoded.packet.message.data);
+            },
         }
     }
 }

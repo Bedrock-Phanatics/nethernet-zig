@@ -56,7 +56,7 @@ In a second terminal, also in this directory:
 ./zig-out/bin/client.exe
 ~~~
 
-The client prints `received hello`. These examples bind to loopback port 18750, exchange one reliable message, and exit. The listener allows anonymous clients for this local demonstration.
+The client prints `received: hello`. These examples bind to loopback port 18750, exchange one reliable message, and exit. The listener allows anonymous clients for this local demonstration.
 
 Source: [client.zig](examples/client.zig) · [echo.zig](examples/echo.zig)
 

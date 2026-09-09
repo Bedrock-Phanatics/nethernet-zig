@@ -24,5 +24,6 @@ pub fn main(init: std.process.Init) !void {
     const message = try connection.receive();
     try connection.send(message.data, message.reliability);
 
-    try std.Io.sleep(init.io, .fromMilliseconds(100), .awake);
+    const acknowledgement = try connection.receive();
+    if (!std.mem.eql(u8, acknowledgement.data, "ack")) return error.InvalidAcknowledgement;
 }

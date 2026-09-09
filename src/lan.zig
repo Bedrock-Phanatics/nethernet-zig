@@ -69,9 +69,11 @@ pub const Listener = struct {
     }
 
     pub fn accept(self: *Listener) !*conn.Connection {
+        try self.discovery.beginOperation();
+        defer self.discovery.endOperation();
         while (true) {
             self.wakeup.prepare();
-            if (try self.pollAccept()) |connection| return connection;
+            if (try self.pollAcceptOwned()) |connection| return connection;
             var deadline = self.discovery.tickDeadline();
             var pending_work = false;
             for (self.pending) |slot| {
@@ -86,6 +88,12 @@ pub const Listener = struct {
     }
 
     pub fn pollAccept(self: *Listener) !?*conn.Connection {
+        try self.discovery.beginOperation();
+        defer self.discovery.endOperation();
+        return self.pollAcceptOwned();
+    }
+
+    fn pollAcceptOwned(self: *Listener) !?*conn.Connection {
         if (self.closed) return error.ConnectionClosed;
 
         if (try self.discovery.poll(0)) |signal| {
@@ -226,6 +234,9 @@ pub fn dial(
     target: u64,
     options: conn.Options,
 ) !*conn.Connection {
+    try discovery.beginOperation();
+    defer discovery.endOperation();
+
     var remote_buf: [20]u8 = undefined;
     const remote_id = try std.fmt.bufPrint(&remote_buf, "{d}", .{target});
 
