@@ -1,127 +1,84 @@
 # nethernet-zig
 
-A Minecraft Bedrock NetherNet networking library for Zig 0.16.
+A bounded Minecraft Bedrock NetherNet transport library for Zig 0.16.
 
-- LAN discovery and signaling, including encrypted advertisements.
-- HTTP/HTTPS endpoint dialing and an HTTP endpoint listener.
-- ES384 identity tokens and signed SDP fingerprint assertions.
-- Reliable ordered and unreliable unordered WebRTC messages.
-- Bounded queues, explicit ownership, configurable limits, and reusable buffers.
+It provides LAN discovery, HTTP signaling, authenticated SDP exchange, and reliable or unreliable WebRTC DataChannels through libdatachannel. Queues, message sizes, ICE candidates, listeners, and negotiation work are explicitly bounded.
 
-WebRTC uses **libdatachannel 0.24.5** with a local bounds patch and **Mbed TLS 3.6.7**.
+## Requirements
+
+- Zig 0.16.0
+- Git and Python
+- CMake and a C/C++ toolchain on Linux or macOS
+
+Native dependencies are pinned to libdatachannel 0.24.5 and Mbed TLS 3.6.7.
 
 ## Build
 
-Run all commands from the repository root.
+Windows:
 
-### Windows
-
-Requires Zig **0.16.0**, Git, and Python:
-
-~~~powershell
+```powershell
 ./tools/setup-native.ps1
 zig build
-~~~
+```
 
-Setup keeps downloaded sources, CMake, Ninja, and native build output under `.deps/`. The build compiles the tests and installs examples and the native DLL into `zig-out/bin/`.
+Linux or macOS:
 
-### Linux and macOS
-
-The POSIX setup script requires Zig 0.16.0, Git, Python 3, CMake, and a C/C++ toolchain:
-
-~~~sh
+```sh
 sh tools/setup-native.sh
 zig build
-~~~
+```
 
-These platforms have not been runtime-validated. Ensure the installed libdatachannel shared library is discoverable by your platform's loader when running installed executables.
+Use `-Dnative-prefix=/path/to/prefix` when supplying an existing patched libdatachannel installation.
 
-To use an existing installation of the patched native dependency:
+## Usage
 
-~~~powershell
-zig build -Dnative-prefix=/absolute/path/to/native
-~~~
+Add the package module to your executable:
 
-## Run the echo example
-
-After building, start the listener in one terminal:
-
-~~~powershell
-./zig-out/bin/echo.exe
-~~~
-
-In a second terminal, also in this directory:
-
-~~~powershell
-./zig-out/bin/client.exe
-~~~
-
-The client prints `received: hello`. These examples bind to loopback port 18750, exchange one reliable message, and exit. The listener allows anonymous clients for this local demonstration.
-
-Source: [client.zig](examples/client.zig) · [echo.zig](examples/echo.zig)
-
-## Use the library
-
-The public module is `nethernet`. Add this directory as a dependency in your application's package manifest, then import it in your build:
-
-~~~zig
+```zig
 const dependency = b.dependency("nethernet", .{
     .target = target,
     .optimize = optimize,
     .@"native-prefix" = native_prefix,
 });
 exe.root_module.addImport("nethernet", dependency.module("nethernet"));
-~~~
-
-The native prefix is the absolute installation path of the patched native dependency. Distribute its shared library and applicable license notices with your application.
+```
 
 A minimal endpoint client:
 
-~~~zig
+```zig
 const std = @import("std");
 const nethernet = @import("nethernet");
 
 pub fn main(init: std.process.Init) !void {
     const connection = try nethernet.dialEndpoint(
-        init.gpa, init.io, "http://127.0.0.1:18750", 123, .{},
+        init.gpa,
+        init.io,
+        "http://127.0.0.1:18750",
+        123,
+        .{},
     );
     defer connection.destroy();
 
     try connection.send("hello", .reliable);
     const message = try connection.receive();
-    std.debug.print("received {s}\n", .{message.data});
+    std.debug.print("received: {s}\n", .{message.data});
 }
-~~~
+```
 
-Connections have one application owner. Received data borrows connection storage until the next poll/receive. Closing is idempotent; call `destroy()` exactly once. See the [API and ownership guide](docs/GUIDE.md) before integrating custom signaling or authentication.
+Connections have one application owner. Received slices remain valid until the next `poll()` or `receive()`. `close()` is immediate, `closeGracefully()` drains buffered sends up to its configured deadline, and `destroy()` must be called exactly once.
 
-## Test and benchmark
+## Commands
 
-| Command | Purpose |
-|---|---|
-| `zig build test` | Core tests; no native dependency required |
-| `zig build test-native` | Real WebRTC, LAN, HTTP, and UDP fault-relay tests |
-| `zig build fuzz -Dfuzz-iterations=100000` | Fuzz corpus and deterministic malformed-input campaign |
-| `zig build test -Doptimize=ReleaseSafe` | Core tests with release safety checks |
-| `zig build test-native -Doptimize=ReleaseSafe` | Native suite with release safety checks |
-| `zig build bench` | Codec, framing, and queue microbenchmarks |
-| `zig fmt --check build.zig build.zig.zon tests.zig native_tests.zig src tests bench examples` | Formatting check |
+```sh
+zig build test
+zig build test-native
+zig build -Doptimize=ReleaseSafe test
+zig build test-native -Doptimize=ReleaseSafe
+zig build fuzz -Dfuzz-iterations=100000
+zig build bench
+zig build stress-smoke -Doptimize=ReleaseSafe
+```
 
-Coverage-guided fuzzing is unavailable on Windows in Zig 0.16. The ordinary test suite runs the fuzz corpus and deterministic malformed-input tests.
+The larger transport stress action is manual-only in GitHub Actions. Local production-scale runs use `zig build stress -- [options]`.
 
-## Directory guide
-
-| Path | Contents |
-|---|---|
-| [src/root.zig](src/root.zig) | Public API exports |
-| [src/](src/) | Production library code and colocated unit tests |
-| [tests/](tests/) | Core, fuzz, wire, and native integration suites and fixtures |
-| [bench/](bench/) | Performance benchmarks |
-| [examples/](examples/) | Small applications using the public module |
-| [tools/](tools/) | Native setup and bounds patch |
-| [docs/GUIDE.md](docs/GUIDE.md) | API, ownership, authentication, and resource limits |
-| [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Measurements, methodology, and limitations |
-| [docs/AUDIT.md](docs/AUDIT.md) | Compatibility review and validation scope |
-| [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md) | Native dependencies and licensing |
-
-Local validation covers Windows x64. Public TURN, long-running production load, native leak/race instrumentation, and non-Windows runtimes still need validation.
+See [docs/README.md](docs/README.md) for API and operational notes and [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md) for dependency licenses.

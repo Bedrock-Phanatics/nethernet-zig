@@ -1,5 +1,5 @@
 //! NetherNet networking for Zig 0.16.
-//! API details are in `docs/GUIDE.md`.
+//! API details are in `docs/README.md`.
 
 pub const framing = @import("framing.zig");
 pub const identity = @import("identity.zig");

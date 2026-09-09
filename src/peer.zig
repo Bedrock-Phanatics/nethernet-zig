@@ -467,6 +467,8 @@ pub const Peer = struct {
         }
     }
 
+    // Reject channels as soon as libdatachannel exposes them. Only the two
+    // protocol channels are kept; everything else is deleted below.
     fn attach(self: *Peer, channel: c_int) !void {
         var transferred = false;
         errdefer if (!transferred) {
@@ -814,6 +816,51 @@ test "graceful close handles an empty native buffer and repeated close" {
     peer.close();
     peer.close();
     try std.testing.expectEqual(State.closed, peer.getState());
+}
+fn testDataChannel(peer: *Peer, label: [:0]const u8) !c_int {
+    const channel = c.rtcCreateDataChannel(peer.id, label);
+    try check(channel);
+    return channel;
+}
+
+fn expectChannelDeleted(channel: c_int) !void {
+    var label: [64]u8 = undefined;
+    try std.testing.expect(c.rtcGetDataChannelLabel(channel, &label, label.len) < 0);
+}
+
+test "unknown remote data channel is deleted and fails the peer" {
+    const peer = try Peer.create(std.testing.allocator, std.testing.io, .{});
+    defer peer.destroy();
+    const channel = try testDataChannel(peer, "UnknownDataChannel");
+    Peer.onChannel(peer.id, channel, peer);
+    try expectChannelDeleted(channel);
+    try std.testing.expectEqual(State.failed, peer.getState());
+    try std.testing.expectEqualSlices(c_int, &.{ -1, -1 }, &peer.channels);
+}
+
+test "duplicate remote data channel is deleted and fails the peer" {
+    const peer = try Peer.create(std.testing.allocator, std.testing.io, .{});
+    defer peer.destroy();
+    const accepted = try testDataChannel(peer, "ReliableDataChannel");
+    try peer.attach(accepted);
+    const duplicate = try testDataChannel(peer, "ReliableDataChannel");
+    Peer.onChannel(peer.id, duplicate, peer);
+    try expectChannelDeleted(duplicate);
+    try std.testing.expectEqual(State.failed, peer.getState());
+    try std.testing.expectEqual(accepted, peer.channels[0]);
+    try std.testing.expectEqual(@as(c_int, -1), peer.channels[1]);
+}
+
+test "remote data channel flood retains no rejected C API handles" {
+    const peer = try Peer.create(std.testing.allocator, std.testing.io, .{});
+    defer peer.destroy();
+    for (0..256) |_| {
+        const channel = try testDataChannel(peer, "FloodDataChannel");
+        Peer.onChannel(peer.id, channel, peer);
+        try expectChannelDeleted(channel);
+    }
+    try std.testing.expectEqual(State.failed, peer.getState());
+    try std.testing.expectEqualSlices(c_int, &.{ -1, -1 }, &peer.channels);
 }
 test "native callback queue exhaustion fails closed with bounded storage" {
     const peer = try Peer.create(
