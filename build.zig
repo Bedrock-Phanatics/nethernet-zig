@@ -35,6 +35,8 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const native_prefix = b.option([]const u8, "native-prefix", "Installation prefix of patched libdatachannel") orelse b.pathFromRoot(".deps/native");
     const fuzz_iterations = b.option(usize, "fuzz-iterations", "Number of deterministic fuzz inputs") orelse 20_000;
+    const NativeSanitizer = enum { address, thread };
+    const native_sanitizer = b.option(NativeSanitizer, "native-sanitizer", "Link a matching instrumented native dependency build");
 
     const build_options = b.addOptions();
     build_options.addOption(usize, "fuzz_iterations", fuzz_iterations);
@@ -105,4 +107,30 @@ pub fn build(b: *std.Build) void {
     const memory_bench = b.addExecutable(.{ .name = "memory-benchmark", .root_module = memory_module });
     const run_memory_bench = b.addRunArtifact(memory_bench);
     b.step("bench-memory", "Report bounded Zig buffer memory at 1, 100, 500, and 1000 connections").dependOn(&run_memory_bench.step);
+    const stress_module = module(b, "bench/stress.zig", target, optimize);
+    stress_module.addImport("nethernet", public_module);
+    if (target.result.os.tag == .windows) stress_module.linkSystemLibrary("psapi", .{});
+    if (native_sanitizer) |sanitizer| stress_module.linkSystemLibrary(switch (sanitizer) {
+        .address => "asan",
+        .thread => "tsan",
+    }, .{});
+    const stress = b.addExecutable(.{ .name = "transport-stress", .root_module = stress_module });
+    b.installArtifact(stress);
+    const run_stress = b.addRunArtifact(stress);
+    run_stress.addPathDir(b.pathJoin(&.{ native_prefix, "bin" }));
+    run_stress.setEnvironmentVariable(
+        if (target.result.os.tag == .macos) "DYLD_LIBRARY_PATH" else "LD_LIBRARY_PATH",
+        b.pathJoin(&.{ native_prefix, "lib" }),
+    );
+    if (b.args) |args| run_stress.addArgs(args);
+    b.step("stress", "Run configurable real-transport stress diagnostics").dependOn(&run_stress.step);
+
+    const run_stress_smoke = b.addRunArtifact(stress);
+    run_stress_smoke.addPathDir(b.pathJoin(&.{ native_prefix, "bin" }));
+    run_stress_smoke.setEnvironmentVariable(
+        if (target.result.os.tag == .macos) "DYLD_LIBRARY_PATH" else "LD_LIBRARY_PATH",
+        b.pathJoin(&.{ native_prefix, "lib" }),
+    );
+    run_stress_smoke.addArgs(&.{ "--connections", "2", "--duration-ms", "1500", "--payload-size", "8192", "--churn-messages", "50" });
+    b.step("stress-smoke", "Run the short real-transport stress suite").dependOn(&run_stress_smoke.step);
 }

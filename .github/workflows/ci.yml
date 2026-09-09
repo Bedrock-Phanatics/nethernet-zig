@@ -23,6 +23,7 @@ jobs:
       - run: zig build fuzz -Dfuzz-iterations=100000
       - run: zig build -Doptimize=ReleaseSafe test
       - run: zig build test-native -Doptimize=ReleaseSafe
+      - run: zig build stress-smoke -Doptimize=ReleaseSafe
       - run: zig build bench
 
   windows-native:
@@ -36,3 +37,4 @@ jobs:
       - run: zig fmt --check build.zig build.zig.zon tests.zig native_tests.zig src tests bench examples
       - run: zig build
       - run: zig build test-native -Doptimize=ReleaseSafe
+      - run: zig build stress-smoke -Doptimize=ReleaseSafe

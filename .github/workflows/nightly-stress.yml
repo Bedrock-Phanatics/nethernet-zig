@@ -1,0 +1,18 @@
+name: transport stress
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  stress:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+        with:
+          version: 0.16.0
+      - run: tools/setup-native.sh
+      - run: zig build stress -Doptimize=ReleaseSafe -- --connections 100 --duration-ms 600000 --payload-size 8192 --rate 20 --churn-messages 10000

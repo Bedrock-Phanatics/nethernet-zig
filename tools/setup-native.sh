@@ -10,8 +10,11 @@ test "$(git -C .deps/mbedtls rev-parse HEAD)" = 068ff080b369adfac81509f9b57b2afa
 python3 .deps/mbedtls/scripts/config.py -f .deps/mbedtls/include/mbedtls/mbedtls_config.h set MBEDTLS_SSL_DTLS_SRTP
 patch="$(pwd)/tools/libdatachannel-bounds.patch"
 git -C .deps/libdatachannel apply --reverse --check "$patch" 2>/dev/null || git -C .deps/libdatachannel apply "$patch"
-prefix="$(pwd)/.deps/native"
-cmake -S .deps/mbedtls -B .deps/mbedtls-build -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_INSTALL_PREFIX="$prefix" -DENABLE_TESTING=OFF -DENABLE_PROGRAMS=OFF
-cmake --build .deps/mbedtls-build -j 4 --target install
-cmake -S .deps/libdatachannel -B .deps/rtc-build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$prefix" -DCMAKE_PREFIX_PATH="$prefix" -DNO_TESTS=ON -DNO_EXAMPLES=ON -DNO_MEDIA=ON -DNO_WEBSOCKET=ON -DUSE_MBEDTLS=ON -DBUILD_SHARED_LIBS=ON
-cmake --build .deps/rtc-build -j 4 --target install
+prefix="${NETHERNET_NATIVE_PREFIX:-$(pwd)/.deps/native}"
+mbedtls_build="${NETHERNET_MBEDTLS_BUILD:-.deps/mbedtls-build}"
+rtc_build="${NETHERNET_RTC_BUILD:-.deps/rtc-build}"
+flags="${NETHERNET_SANITIZER_FLAGS:-}"
+cmake -S .deps/mbedtls -B "$mbedtls_build" -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_INSTALL_PREFIX="$prefix" -DCMAKE_C_FLAGS="$flags" -DCMAKE_CXX_FLAGS="$flags" -DENABLE_TESTING=OFF -DENABLE_PROGRAMS=OFF
+cmake --build "$mbedtls_build" -j 4 --target install
+cmake -S .deps/libdatachannel -B "$rtc_build" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$prefix" -DCMAKE_PREFIX_PATH="$prefix" -DCMAKE_C_FLAGS="$flags" -DCMAKE_CXX_FLAGS="$flags" -DNO_TESTS=ON -DNO_EXAMPLES=ON -DNO_MEDIA=ON -DNO_WEBSOCKET=ON -DUSE_MBEDTLS=ON -DBUILD_SHARED_LIBS=ON
+cmake --build "$rtc_build" -j 4 --target install
