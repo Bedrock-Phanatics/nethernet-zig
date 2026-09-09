@@ -16,7 +16,7 @@ jobs:
           version: 0.16.0
       - run: zig version
       - run: zig fmt --check build.zig build.zig.zon tests.zig native_tests.zig src tests bench examples
-      - run: tools/setup-native.sh
+      - run: sh tools/setup-native.sh
       - run: zig build
       - run: zig build test-native --summary all
       - run: zig build test

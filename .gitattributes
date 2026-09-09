@@ -1,2 +1,4 @@
+*.zig text eol=lf
+*.zon text eol=lf
 tools/*.sh text eol=lf
 tools/*.patch text eol=lf
