@@ -103,6 +103,19 @@ test "connections verify identities, reassemble large messages, and reconnect" {
         const message = try server.receive();
         try std.testing.expectEqualSlices(u8, payload, message.data);
         try std.testing.expectEqual(@as(u64, payload.len), server.received_bytes);
+        var draining_receive = try io.concurrent(Connection.receive, .{server});
+        var receive_taken = false;
+        defer if (!receive_taken) {
+            _ = draining_receive.cancel(io) catch {};
+        };
+        try client.send(payload, .reliable);
+        try client.closeGracefully();
+        const drained = try draining_receive.await(io);
+        receive_taken = true;
+        try std.testing.expectEqualSlices(u8, payload, drained.data);
+        try std.testing.expectError(error.InvalidState, client.send("late", .reliable));
+        client.close();
+        client.close();
     }
 }
 

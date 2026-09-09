@@ -31,6 +31,7 @@ pub const Options = struct {
     negotiation_timeout_ms: u32 = 15000,
     connection_timeout_ms: u32 = 10000,
     reassembly_timeout_ms: u32 = 30000,
+    graceful_shutdown_timeout_ms: u32 = 2000,
     maximum_remote_candidates: usize = 32,
     allow_anonymous: bool = false,
     identity: ?auth.Identity = null,
@@ -42,7 +43,8 @@ fn validateOptions(options: Options) !void {
         options.maximum_message_size > framing.maximum_reliable_message_size or
         options.negotiation_timeout_ms == 0 or
         options.connection_timeout_ms == 0 or
-        options.reassembly_timeout_ms == 0)
+        options.reassembly_timeout_ms == 0 or
+        options.graceful_shutdown_timeout_ms == 0)
     {
         return error.InvalidConfiguration;
     }
@@ -253,6 +255,9 @@ pub const Connection = struct {
         self.peer.close();
     }
 
+    pub fn closeGracefully(self: *Connection) !void {
+        try self.peer.closeGracefully(self.options.graceful_shutdown_timeout_ms);
+    }
     pub fn ready(self: *Connection) bool {
         return self.peer.ready();
     }

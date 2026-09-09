@@ -1,7 +1,8 @@
 const std = @import("std");
 
 const framing = @import("framing.zig");
-const Wakeup = @import("wakeup.zig").Wakeup;
+const wake = @import("wakeup.zig");
+const Wakeup = wake.Wakeup;
 const Queue = @import("queue.zig").Queue;
 
 const c = @cImport({
@@ -64,6 +65,7 @@ pub const Peer = struct {
 
     state: State = .new,
     stopping: bool = false,
+    send_stopped: bool = false,
     gathered: bool = false,
     description_sent: bool = false,
     description_kind: enum { offer, answer } = .offer,
@@ -133,22 +135,60 @@ pub const Peer = struct {
         }
 
         self.stopping = true;
+        self.send_stopped = true;
         self.state = .closed;
+        const id = self.id;
+        const channels = self.channels;
+        self.id = -1;
+        self.channels = .{ -1, -1 };
         self.notify();
         self.mutex.unlock(self.io);
 
         // Never wait for native callbacks while holding their mutex.
-        _ = c.rtcDeletePeerConnection(self.id);
-
-        for (self.channels) |channel| {
-            if (channel >= 0) {
-                _ = c.rtcDeleteDataChannel(channel);
-            }
+        if (id >= 0) _ = c.rtcDeletePeerConnection(id);
+        for (channels) |channel| {
+            if (channel >= 0) _ = c.rtcDeleteDataChannel(channel);
         }
-
-        self.id = -1;
     }
 
+    pub fn closeGracefully(self: *Peer, timeout_ms: u32) !void {
+        if (timeout_ms == 0) return error.InvalidConfiguration;
+        return gracefulDrain(Peer, self, self.io, timeout_ms);
+    }
+
+    fn stopSends(self: *Peer) void {
+        self.mutex.lockUncancelable(self.io);
+        self.send_stopped = true;
+        self.notify();
+        self.mutex.unlock(self.io);
+    }
+
+    fn drainStatus(self: *Peer) enum { open, closed, failed } {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.stopping or self.state == .closed) return .closed;
+        if (self.state == .failed or self.state == .disconnected) return .failed;
+        return .open;
+    }
+
+    fn bufferedAmount(self: *Peer) !usize {
+        self.mutex.lockUncancelable(self.io);
+        const channels = self.channels;
+        self.mutex.unlock(self.io);
+
+        var total: usize = 0;
+        for (channels) |channel| {
+            if (channel < 0) continue;
+            const amount = c.rtcGetBufferedAmount(channel);
+            try check(amount);
+            total +|= @intCast(amount);
+        }
+        return total;
+    }
+
+    fn forceClose(self: *Peer) void {
+        self.close();
+    }
     /// Call this once when the owner is finished with the peer.
     pub fn destroy(self: *Peer) void {
         self.close();
@@ -210,7 +250,7 @@ pub const Peer = struct {
         self.mutex.lockUncancelable(self.io);
 
         const channels = self.channels;
-        const connected = self.state == .connected and !self.stopping;
+        const connected = self.state == .connected and !self.stopping and !self.send_stopped;
 
         self.mutex.unlock(self.io);
 
@@ -474,6 +514,8 @@ pub const Peer = struct {
         try check(c.rtcSetMessageCallback(channel, onMessage));
         try check(c.rtcSetClosedCallback(channel, onClosed));
         try check(c.rtcSetErrorCallback(channel, onError));
+        try check(c.rtcSetBufferedAmountLowThreshold(channel, 0));
+        try check(c.rtcSetBufferedAmountLowCallback(channel, onBufferedAmountLow));
         // onOpen is not called for channels that are already open.
         self.mutex.lockUncancelable(self.io);
         self.notify();
@@ -607,6 +649,12 @@ pub const Peer = struct {
         );
     }
 
+    fn onBufferedAmountLow(_: c_int, ptr: ?*anyopaque) callconv(.c) void {
+        const self = from(ptr);
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        self.notify();
+    }
     fn onOpen(_: c_int, ptr: ?*anyopaque) callconv(.c) void {
         const self = from(ptr);
         self.mutex.lockUncancelable(self.io);
@@ -635,10 +683,138 @@ pub const Peer = struct {
     }
 };
 
+fn gracefulDrain(
+    comptime T: type,
+    target: *T,
+    io: std.Io,
+    timeout_ms: u32,
+) !void {
+    target.stopSends();
+    errdefer target.forceClose();
+
+    const started = std.Io.Clock.awake.now(io);
+    const timeout = wake.deadline(started, timeout_ms);
+    while (true) {
+        target.wakeup.prepare();
+        switch (target.drainStatus()) {
+            .open => {},
+            .closed => return,
+            .failed => return error.ConnectionClosed,
+        }
+        if (try target.bufferedAmount() == 0) {
+            target.forceClose();
+            return;
+        }
+        if (std.Io.Clock.awake.now(io).nanoseconds >= timeout.deadline.raw.nanoseconds)
+            return error.Timeout;
+        try target.wakeup.wait(io, timeout);
+    }
+}
 fn check(result: c_int) error{WebRtcFailure}!void {
     if (result < 0) return error.WebRtcFailure;
 }
 
+const DrainHarness = struct {
+    io: std.Io,
+    wakeup: Wakeup = .{},
+    observed: std.Io.Event = .unset,
+    buffered: std.atomic.Value(usize) = .init(0),
+    status: std.atomic.Value(u8) = .init(0),
+    closed: std.atomic.Value(bool) = .init(false),
+    sends_stopped: std.atomic.Value(bool) = .init(false),
+
+    fn stopSends(self: *DrainHarness) void {
+        self.sends_stopped.store(true, .release);
+        self.wakeup.signal(self.io);
+    }
+
+    fn drainStatus(self: *DrainHarness) enum { open, closed, failed } {
+        if (self.closed.load(.acquire)) return .closed;
+        return if (self.status.load(.acquire) == 0) .open else .failed;
+    }
+
+    fn bufferedAmount(self: *DrainHarness) !usize {
+        self.observed.set(self.io);
+        return self.buffered.load(.acquire);
+    }
+
+    fn forceClose(self: *DrainHarness) void {
+        self.closed.store(true, .release);
+        self.wakeup.signal(self.io);
+    }
+
+    fn drain(self: *DrainHarness, timeout_ms: u32) !void {
+        try gracefulDrain(DrainHarness, self, self.io, timeout_ms);
+    }
+
+    fn release(self: *DrainHarness) !void {
+        try self.observed.wait(self.io);
+        self.buffered.store(0, .release);
+        self.wakeup.signal(self.io);
+    }
+
+    fn fail(self: *DrainHarness) !void {
+        try self.observed.wait(self.io);
+        self.status.store(1, .release);
+        self.wakeup.signal(self.io);
+    }
+};
+
+test "graceful drain closes empty buffers and is repeatable" {
+    var harness: DrainHarness = .{ .io = std.testing.io };
+    try harness.drain(100);
+    try harness.drain(100);
+    try std.testing.expect(harness.sends_stopped.load(.acquire));
+    try std.testing.expect(harness.closed.load(.acquire));
+}
+
+test "graceful drain waits for buffered-low wakeup" {
+    const io = std.testing.io;
+    var harness: DrainHarness = .{ .io = io };
+    harness.buffered.store(1, .release);
+    var release = try io.concurrent(DrainHarness.release, .{&harness});
+    defer release.cancel(io) catch {};
+    try harness.drain(1000);
+    try release.await(io);
+    try std.testing.expect(harness.closed.load(.acquire));
+}
+
+test "graceful drain force closes on timeout" {
+    var harness: DrainHarness = .{ .io = std.testing.io };
+    harness.buffered.store(1, .release);
+    try std.testing.expectError(error.Timeout, harness.drain(1));
+    try std.testing.expect(harness.closed.load(.acquire));
+}
+
+test "graceful drain force closes on cancellation" {
+    const io = std.testing.io;
+    var harness: DrainHarness = .{ .io = io };
+    harness.buffered.store(1, .release);
+    var draining = try io.concurrent(DrainHarness.drain, .{ &harness, @as(u32, 1000) });
+    try harness.observed.wait(io);
+    try std.testing.expectError(error.Canceled, draining.cancel(io));
+    try std.testing.expect(harness.closed.load(.acquire));
+}
+
+test "graceful drain force closes on native failure" {
+    const io = std.testing.io;
+    var harness: DrainHarness = .{ .io = io };
+    harness.buffered.store(1, .release);
+    var failure = try io.concurrent(DrainHarness.fail, .{&harness});
+    defer failure.cancel(io) catch {};
+    try std.testing.expectError(error.ConnectionClosed, harness.drain(1000));
+    try failure.await(io);
+    try std.testing.expect(harness.closed.load(.acquire));
+}
+test "graceful close handles an empty native buffer and repeated close" {
+    const peer = try Peer.create(std.testing.allocator, std.testing.io, .{});
+    defer peer.destroy();
+    try peer.closeGracefully(100);
+    try peer.closeGracefully(100);
+    peer.close();
+    peer.close();
+    try std.testing.expectEqual(State.closed, peer.getState());
+}
 test "native callback queue exhaustion fails closed with bounded storage" {
     const peer = try Peer.create(
         std.testing.allocator,
@@ -678,6 +854,9 @@ test "state changes and errors wake subscribers" {
     try std.testing.expect(wakeup.event.isSet());
     wakeup.prepare();
     Peer.onOpen(0, peer);
+    try std.testing.expect(wakeup.event.isSet());
+    wakeup.prepare();
+    Peer.onBufferedAmountLow(0, peer);
     try std.testing.expect(wakeup.event.isSet());
     wakeup.prepare();
     Peer.onError(0, null, peer);
