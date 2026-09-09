@@ -31,6 +31,7 @@ pub const Options = struct {
     negotiation_timeout_ms: u32 = 15000,
     connection_timeout_ms: u32 = 10000,
     reassembly_timeout_ms: u32 = 30000,
+    maximum_remote_candidates: usize = 32,
     allow_anonymous: bool = false,
     identity: ?auth.Identity = null,
     verify_client: ?auth.Verifier = null,
@@ -47,6 +48,31 @@ fn validateOptions(options: Options) !void {
     }
 }
 
+const RemoteCandidates = struct {
+    count: usize = 0,
+
+    fn addSdp(self: *RemoteCandidates, sdp: []const u8, maximum: usize) !void {
+        var additional: usize = 0;
+        var lines = std.mem.splitScalar(u8, sdp, '\n');
+        while (lines.next()) |line_with_cr| {
+            const line = std.mem.trimEnd(u8, line_with_cr, "\r");
+            if (!std.mem.startsWith(u8, line, "a=candidate:")) continue;
+            if (additional >= maximum) return error.TooManyRemoteCandidates;
+            additional += 1;
+        }
+        try self.add(additional, maximum);
+    }
+
+    fn addTrickled(self: *RemoteCandidates, maximum: usize) !void {
+        try self.add(1, maximum);
+    }
+
+    fn add(self: *RemoteCandidates, additional: usize, maximum: usize) !void {
+        if (self.count > maximum or additional > maximum - self.count)
+            return error.TooManyRemoteCandidates;
+        self.count += additional;
+    }
+};
 pub const Event = union(enum) {
     signal: Signal,
     message: Message,
@@ -117,6 +143,7 @@ pub const Connection = struct {
     started: std.Io.Timestamp,
     answered: ?std.Io.Timestamp = null,
     established: bool = false,
+    remote_candidates: RemoteCandidates = .{},
 
     packet_scratch: []u8,
     negotiation_scratch: ?[]u8,
@@ -266,11 +293,16 @@ pub const Connection = struct {
 
         if (signal.data.len > maximum_signal_size) return error.MessageTooLarge;
 
+        if (is_candidate) {
+            try self.remote_candidates.addTrickled(self.options.maximum_remote_candidates);
+        } else {
+            try self.remote_candidates.addSdp(signal.data, self.options.maximum_remote_candidates);
+        }
+
         const terminated = try self.allocator.dupeZ(u8, signal.data);
         defer self.allocator.free(terminated);
 
         if (is_candidate) return self.peer.remoteCandidate(terminated);
-
         if ((is_offer and self.role != .server) or
             (is_answer and self.role != .client))
         {
@@ -653,4 +685,61 @@ test "connection and encoder maximum message limits agree" {
             options.maximum_message_size,
         ),
     );
+}
+
+test "remote ICE candidates accept exactly the configured limit" {
+    try std.testing.expectEqual(@as(usize, 32), (Options{}).maximum_remote_candidates);
+
+    var candidates: RemoteCandidates = .{};
+    try candidates.addSdp(
+        "v=0\r\na=candidate:first\r\na=candidate:second\r\n",
+        2,
+    );
+    try std.testing.expectEqual(@as(usize, 2), candidates.count);
+}
+
+test "remote ICE candidates reject an over-limit bundled SDP" {
+    var candidates: RemoteCandidates = .{};
+    try std.testing.expectError(
+        error.TooManyRemoteCandidates,
+        candidates.addSdp(
+            "v=0\n" ++
+                "a=candidate:first\n" ++
+                "a=candidate:second\n" ++
+                "a=candidate:third\n",
+            2,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), candidates.count);
+}
+
+test "remote ICE candidates reject over-limit trickle" {
+    var candidates: RemoteCandidates = .{};
+    try candidates.addTrickled(2);
+    try candidates.addTrickled(2);
+    try std.testing.expectError(
+        error.TooManyRemoteCandidates,
+        candidates.addTrickled(2),
+    );
+    try std.testing.expectEqual(@as(usize, 2), candidates.count);
+
+    candidates.count = std.math.maxInt(usize);
+    try std.testing.expectError(
+        error.TooManyRemoteCandidates,
+        candidates.addTrickled(std.math.maxInt(usize) - 1),
+    );
+}
+
+test "bundled and trickled remote ICE candidates share one limit" {
+    var candidates: RemoteCandidates = .{};
+    try candidates.addSdp(
+        "a=candidate:bundled-one\r\na=candidate:bundled-two\r\n",
+        3,
+    );
+    try candidates.addTrickled(3);
+    try std.testing.expectError(
+        error.TooManyRemoteCandidates,
+        candidates.addTrickled(3),
+    );
+    try std.testing.expectEqual(@as(usize, 3), candidates.count);
 }
