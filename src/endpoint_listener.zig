@@ -4,11 +4,31 @@ const conn = @import("connection.zig");
 const Signal = @import("signal.zig").Signal;
 const maximum_sdp_size = @import("endpoint.zig").maximum_sdp_size;
 
+pub const maximum_status_response_size = 16 * 1024;
+
+pub const ServerStatus = struct {
+    name: []const u8,
+    protocol: u32,
+    version: []const u8,
+    level: []const u8,
+    players: u32,
+    max_players: u32,
+    game_type: i32,
+};
+
+pub const StatusProvider = struct {
+    context: ?*anyopaque = null,
+    get: *const fn (context: ?*anyopaque) anyerror!ServerStatus,
+};
+
 pub const Options = struct {
     connection: conn.Options = .{},
     maximum_negotiations: usize = 8,
     maximum_pending_accepts: usize = 64,
     request_timeout_ms: u32 = 15000,
+    /// Called concurrently by HTTP workers. Returned strings must remain valid
+    /// while the listener is running.
+    status_provider: ?StatusProvider = null,
 };
 
 /// Uses a fixed worker pool. The allocator and verifier must support concurrent calls.
@@ -179,7 +199,29 @@ pub const Listener = struct {
         if (request.head.method == .GET and
             std.mem.eql(u8, request.head.target, "/v1/join"))
         {
-            return request.respond("", .{ .keep_alive = false });
+            const provider = self.options.status_provider orelse
+                return request.respond("", .{ .keep_alive = false });
+
+            const status = provider.get(provider.context) catch
+                return request.respond("", .{
+                    .status = .service_unavailable,
+                    .keep_alive = false,
+                });
+
+            var status_output: [maximum_status_response_size]u8 = undefined;
+            const body = encodeStatus(status, &status_output) catch
+                return request.respond("", .{
+                    .status = .internal_server_error,
+                    .keep_alive = false,
+                });
+
+            return request.respond(body, .{
+                .keep_alive = false,
+                .extra_headers = &.{.{
+                    .name = "Content-Type",
+                    .value = "application/json",
+                }},
+            });
         }
 
         if (request.head.method != .POST or
@@ -324,3 +366,81 @@ pub const Listener = struct {
         accept_reserved = false;
     }
 };
+fn encodeStatus(status: ServerStatus, output: []u8) ![]const u8 {
+    if (!std.unicode.utf8ValidateSlice(status.name) or
+        !std.unicode.utf8ValidateSlice(status.version) or
+        !std.unicode.utf8ValidateSlice(status.level) or
+        status.players > status.max_players)
+    {
+        return error.InvalidServerStatus;
+    }
+
+    var writer = std.Io.Writer.fixed(output);
+    try writer.writeAll("{\"name\":");
+    try writeJsonString(&writer, status.name);
+    try writer.print(",\"protocol\":{d},\"version\":", .{status.protocol});
+    try writeJsonString(&writer, status.version);
+    try writer.writeAll(",\"level\":");
+    try writeJsonString(&writer, status.level);
+    try writer.print(",\"gameType\":{d},\"players\":{d},\"maxPlayers\":{d}}", .{
+        status.game_type,
+        status.players,
+        status.max_players,
+    });
+    return writer.buffered();
+}
+
+fn writeJsonString(writer: *std.Io.Writer, value: []const u8) !void {
+    try writer.writeByte('"');
+    for (value) |byte| switch (byte) {
+        '"' => try writer.writeAll("\\\""),
+        '\\' => try writer.writeAll("\\\\"),
+        '\x08' => try writer.writeAll("\\b"),
+        '\x0c' => try writer.writeAll("\\f"),
+        '\n' => try writer.writeAll("\\n"),
+        '\r' => try writer.writeAll("\\r"),
+        '\t' => try writer.writeAll("\\t"),
+        0...7, 11, 14...31 => try writer.print("\\u00{x:0>2}", .{byte}),
+        else => try writer.writeByte(byte),
+    };
+    try writer.writeByte('"');
+}
+
+test "server status JSON is bounded and escaped" {
+    var output: [maximum_status_response_size]u8 = undefined;
+    const json = try encodeStatus(.{
+        .name = "Nether \"Server\"\\One\n",
+        .protocol = 800,
+        .version = "1.21.0",
+        .level = "Snowman ☃\t",
+        .players = 3,
+        .max_players = 20,
+        .game_type = 1,
+    }, &output);
+
+    try std.testing.expectEqualStrings(
+        "{\"name\":\"Nether \\\"Server\\\"\\\\One\\n\",\"protocol\":800,\"version\":\"1.21.0\",\"level\":\"Snowman ☃\\t\",\"gameType\":1,\"players\":3,\"maxPlayers\":20}",
+        json,
+    );
+
+    try std.testing.expectError(error.InvalidServerStatus, encodeStatus(.{
+        .name = "server",
+        .protocol = 800,
+        .version = "1.21.0",
+        .level = "level",
+        .players = 21,
+        .max_players = 20,
+        .game_type = 0,
+    }, &output));
+
+    var tiny: [1]u8 = undefined;
+    try std.testing.expectError(error.WriteFailed, encodeStatus(.{
+        .name = "server",
+        .protocol = 800,
+        .version = "1.21.0",
+        .level = "level",
+        .players = 0,
+        .max_players = 20,
+        .game_type = 0,
+    }, &tiny));
+}

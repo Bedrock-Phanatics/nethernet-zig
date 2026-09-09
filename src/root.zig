@@ -31,4 +31,6 @@ pub const dialLan = @import("lan.zig").dial;
 
 pub const EndpointListener = @import("endpoint_listener.zig").Listener;
 pub const EndpointListenerOptions = @import("endpoint_listener.zig").Options;
+pub const EndpointServerStatus = @import("endpoint_listener.zig").ServerStatus;
+pub const EndpointStatusProvider = @import("endpoint_listener.zig").StatusProvider;
 pub const dialEndpoint = @import("endpoint.zig").dial;

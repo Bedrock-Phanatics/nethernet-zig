@@ -3,6 +3,24 @@ const Peer = @import("../src/peer.zig").Peer;
 const wake = @import("../src/wakeup.zig");
 const framing = @import("../src/framing.zig");
 
+const TestStatusProvider = struct {
+    fail: bool = false,
+
+    fn get(context: ?*anyopaque) !@import("../src/endpoint_listener.zig").ServerStatus {
+        const self: *TestStatusProvider = @ptrCast(@alignCast(context.?));
+        if (self.fail) return error.StatusUnavailable;
+        return .{
+            .name = "Nether \"Server\"\\One",
+            .protocol = 800,
+            .version = "1.21.0",
+            .level = "Snowman ☃",
+            .players = 3,
+            .max_players = 20,
+            .game_type = 1,
+        };
+    }
+};
+
 test "native peers negotiate and exchange both channel types" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
@@ -147,6 +165,54 @@ test "HTTP endpoint listener and dialer transfer ownership and shut down" {
     try std.testing.expectEqualStrings("survives listener close", message.data);
 }
 
+test "HTTP endpoint status is optional and provider errors are safe" {
+    const endpoint_listener = @import("../src/endpoint_listener.zig");
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var state: TestStatusProvider = .{};
+    const listener = try endpoint_listener.Listener.listen(
+        a,
+        io,
+        try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0"),
+        .{
+            .maximum_negotiations = 2,
+            .status_provider = .{
+                .context = &state,
+                .get = TestStatusProvider.get,
+            },
+        },
+    );
+    defer listener.destroy();
+
+    const url = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/v1/join", .{
+        listener.server.socket.address.getPort(),
+    });
+    defer a.free(url);
+
+    var client: std.http.Client = .{ .allocator = a, .io = io };
+    defer client.deinit();
+
+    var output: [endpoint_listener.maximum_status_response_size]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&output);
+    const result = try client.fetch(.{
+        .location = .{ .url = url },
+        .response_writer = &writer,
+    });
+    try std.testing.expectEqual(std.http.Status.ok, result.status);
+    try std.testing.expectEqualStrings(
+        "{\"name\":\"Nether \\\"Server\\\"\\\\One\",\"protocol\":800,\"version\":\"1.21.0\",\"level\":\"Snowman ☃\",\"gameType\":1,\"players\":3,\"maxPlayers\":20}",
+        writer.buffered(),
+    );
+
+    state.fail = true;
+    writer = std.Io.Writer.fixed(&output);
+    const failed = try client.fetch(.{
+        .location = .{ .url = url },
+        .response_writer = &writer,
+    });
+    try std.testing.expectEqual(std.http.Status.service_unavailable, failed.status);
+    try std.testing.expectEqual(@as(usize, 0), writer.buffered().len);
+}
 test "LAN discovery signaling negotiates WebRTC with trickle ICE" {
     const Discovery = @import("../src/discovery.zig").Discovery;
     const lan = @import("../src/lan.zig");
@@ -212,6 +278,7 @@ test "HTTP rejects invalid routes, network IDs, empty SDP and oversized bodies" 
     defer listener.destroy();
 
     const cases = [_]struct { request: []const u8, status: []const u8 }{
+        .{ .request = "GET /v1/join HTTP/1.1\r\nHost: localhost\r\n\r\n", .status = "200" },
         .{ .request = "GET /bad HTTP/1.1\r\nHost: localhost\r\n\r\n", .status = "404" },
         .{ .request = "POST /v1/join/nope HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n", .status = "400" },
         .{ .request = "POST /v1/join/1 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n", .status = "400" },
