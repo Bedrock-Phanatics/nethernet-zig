@@ -361,7 +361,8 @@ pub const Listener = struct {
             try connection.wait(true);
         }
 
-        if (try self.accepted.put(self.io, &.{connection}, 0) == 0) unreachable;
+        if (try self.accepted.put(self.io, &.{connection}, 0) == 0)
+            return error.ConnectionClosed;
         transferred = true;
         accept_reserved = false;
     }
