@@ -30,7 +30,7 @@ Unknown or duplicate DataChannels are closed immediately and fail the peer. Sign
 
 ## Identity and signaling
 
-Servers create short-lived ES384 identities unless one is supplied. Clients bind the signed identity to the SDP DTLS fingerprint. Keep `allow_anonymous` disabled for authenticated deployments and use `verify_client` to apply issuer or account policy.
+Servers create short-lived ES384 identities unless one is supplied. Clients bind the signed identity to the SDP DTLS fingerprint. A self-signed server identity proves key possession, not that the endpoint is the expected server; configure `verify_server` with a pinned key or trusted issuer policy for that guarantee. Keep `allow_anonymous` disabled for authenticated deployments and use `verify_client` to apply client issuer or account policy. Existing clients that set `verify_client` for server verification continue to work, but `verify_server` takes precedence.
 
 LAN discovery encryption is protocol compatibility, not authentication. Treat discovery metadata and endpoints as untrusted.
 

@@ -53,8 +53,20 @@ pub const Options = struct {
     maximum_remote_candidates: usize = 32,
     allow_anonymous: bool = false,
     identity: ?auth.Identity = null,
+    /// Required to authenticate the expected remote server. Without it, the
+    /// built-in check proves key possession and SDP binding only.
+    verify_server: ?auth.Verifier = null,
+    /// Verifies remote clients. Kept as a fallback for clients using the
+    /// historical verifier option to check servers.
     verify_client: ?auth.Verifier = null,
 };
+
+fn verifierForRole(options: Options, role: Role) ?auth.Verifier {
+    return if (role == .client)
+        options.verify_server orelse options.verify_client
+    else
+        options.verify_client;
+}
 
 fn validateOptions(options: Options) !void {
     if (options.maximum_message_size == 0 or
@@ -367,7 +379,7 @@ pub const Connection = struct {
             signal.data,
             std.Io.Clock.real.now(self.io).toSeconds(),
             identity_kind,
-            self.options.verify_client,
+            verifierForRole(self.options, self.role),
         );
 
         if (self.role == .server and key == null and !self.options.allow_anonymous) {
@@ -592,6 +604,25 @@ test "reassembly growth and every allocation failure preserve ownership" {
         assemblyAllocationScenario,
         .{},
     );
+}
+
+test "remote identity verifiers are selected by connection role" {
+    const Verifiers = struct {
+        fn server(_: ?*anyopaque, _: []const u8) anyerror!?auth.Key {
+            return null;
+        }
+        fn client(_: ?*anyopaque, _: []const u8) anyerror!?auth.Key {
+            return null;
+        }
+    };
+
+    const options: Options = .{
+        .verify_server = .{ .verify = Verifiers.server },
+        .verify_client = .{ .verify = Verifiers.client },
+    };
+    try std.testing.expect(verifierForRole(options, .client).?.verify == Verifiers.server);
+    try std.testing.expect(verifierForRole(options, .server).?.verify == Verifiers.client);
+    try std.testing.expect(verifierForRole(.{ .verify_client = .{ .verify = Verifiers.client } }, .client).?.verify == Verifiers.client);
 }
 
 fn connectionCreationFailureScenario(allocator: std.mem.Allocator) !void {
