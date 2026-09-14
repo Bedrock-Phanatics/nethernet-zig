@@ -13,7 +13,7 @@ The main entry points are:
 
 ## Shutdown
 
-`close()` aborts immediately and is idempotent. `closeGracefully()` stops new sends and waits for libdatachannel's outgoing buffered amount to reach zero. It force-closes on cancellation, native failure, or `graceful_shutdown_timeout_ms`, which defaults to two seconds. Call `destroy()` exactly once after use.
+`close()` aborts immediately and is idempotent. `closeGracefully()` stops new sends, waits for libdatachannel's channel send buffer to reach zero, then closes. That buffer excludes data already accepted by the SCTP transport, so a successful return does not confirm remote delivery. When delivery must be certain, have the receiver acknowledge the message at the application level and wait for that acknowledgement before closing. `closeGracefully()` force-closes on cancellation, native failure, or `graceful_shutdown_timeout_ms`, which defaults to two seconds. Call `destroy()` exactly once after use.
 
 ## Important limits
 

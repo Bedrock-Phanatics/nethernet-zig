@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const framing = @import("framing.zig");
 const wake = @import("wakeup.zig");
@@ -105,12 +106,18 @@ pub const Peer = struct {
     id: c_int = -1,
     channels: [2]c_int = .{ -1, -1 },
     mutex: std.Io.Mutex = .init,
+    native_condition: std.Io.Condition = .init,
+    active_native_queries: usize = 0,
+    native_delete_complete: bool = false,
+    queue_pop_test_hook: if (builtin.is_test) ?*const fn (*Peer) void else void =
+        if (builtin.is_test) null else {},
 
     wakeup: Wakeup = .{},
     subscriber: ?*Wakeup = null,
 
     state: State = .new,
     stopping: bool = false,
+    drain_queued_on_close: bool = false,
     send_stopped: bool = false,
     gathered: bool = false,
     ice_state: IceState = .new,
@@ -179,6 +186,8 @@ pub const Peer = struct {
         self.mutex.lockUncancelable(self.io);
 
         if (self.stopping) {
+            while (!self.native_delete_complete)
+                self.native_condition.waitUncancelable(self.io, &self.mutex);
             self.mutex.unlock(self.io);
             return;
         }
@@ -186,11 +195,16 @@ pub const Peer = struct {
         self.stopping = true;
         self.send_stopped = true;
         self.state = .closed;
+        self.drain_queued_on_close = false;
+        self.notify();
+        // Query leases hold native IDs stable. Waiting releases the callback
+        // mutex, so a native operation may still run its callbacks.
+        while (self.active_native_queries != 0)
+            self.native_condition.waitUncancelable(self.io, &self.mutex);
         const id = self.id;
         const channels = self.channels;
         self.id = -1;
         self.channels = .{ -1, -1 };
-        self.notify();
         self.mutex.unlock(self.io);
 
         // Never wait for native callbacks while holding their mutex.
@@ -198,8 +212,14 @@ pub const Peer = struct {
         for (channels) |channel| {
             if (channel >= 0) _ = c.rtcDeleteDataChannel(channel);
         }
+
+        self.mutex.lockUncancelable(self.io);
+        self.native_delete_complete = true;
+        self.native_condition.broadcast(self.io);
+        self.mutex.unlock(self.io);
     }
 
+    /// transport-level data may still be in flight when this returns
     pub fn closeGracefully(self: *Peer, timeout_ms: u32) !void {
         if (timeout_ms == 0) return error.InvalidConfiguration;
         return gracefulDrain(Peer, self, self.io, timeout_ms);
@@ -290,14 +310,45 @@ pub const Peer = struct {
 
     pub fn diagnostics(self: *Peer) Diagnostics {
         self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
+        const ice_state = self.ice_state;
+        const gathering_state = self.gathering_state;
+        self.mutex.unlock(self.io);
+
+        const handles = self.acquireNativeHandles() orelse return .{
+            .ice_state = ice_state,
+            .gathering_state = gathering_state,
+            .reliable = channelDiagnostics(-1),
+            .unreliable = channelDiagnostics(-1),
+        };
+        defer self.releaseNativeHandles();
 
         return .{
-            .ice_state = self.ice_state,
-            .gathering_state = self.gathering_state,
-            .reliable = channelDiagnostics(self.channels[0]),
-            .unreliable = channelDiagnostics(self.channels[1]),
+            .ice_state = ice_state,
+            .gathering_state = gathering_state,
+            .reliable = channelDiagnostics(handles.channels[0]),
+            .unreliable = channelDiagnostics(handles.channels[1]),
         };
+    }
+
+    const NativeHandles = struct {
+        id: c_int,
+        channels: [2]c_int,
+    };
+
+    fn acquireNativeHandles(self: *Peer) ?NativeHandles {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.stopping or self.id < 0) return null;
+        self.active_native_queries += 1;
+        return .{ .id = self.id, .channels = self.channels };
+    }
+
+    fn releaseNativeHandles(self: *Peer) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        std.debug.assert(self.active_native_queries != 0);
+        self.active_native_queries -= 1;
+        if (self.active_native_queries == 0) self.native_condition.broadcast(self.io);
     }
 
     fn channelDiagnostics(channel: c_int) ChannelDiagnostics {
@@ -334,12 +385,11 @@ pub const Peer = struct {
             return error.InvalidConfiguration;
         }
 
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.id < 0) return null;
+        const handles = self.acquireNativeHandles() orelse return null;
+        defer self.releaseNativeHandles();
 
         const local_length = c.rtcGetLocalAddress(
-            self.id,
+            handles.id,
             local_buffer.ptr,
             @intCast(local_buffer.len),
         );
@@ -348,7 +398,7 @@ pub const Peer = struct {
         try check(local_length);
 
         const remote_length = c.rtcGetRemoteAddress(
-            self.id,
+            handles.id,
             remote_buffer.ptr,
             @intCast(remote_buffer.len),
         );
@@ -488,13 +538,17 @@ pub const Peer = struct {
     ) !?Event {
         self.mutex.lockUncancelable(self.io);
 
-        if (self.stopping or self.state == .closed or self.state == .failed or self.state == .disconnected) {
+        if (!self.canPollLocked(signals_only)) {
             self.mutex.unlock(self.io);
             return error.ConnectionClosed;
         }
 
         const gathered = self.gathered;
         self.mutex.unlock(self.io);
+
+        if (builtin.is_test) {
+            if (self.queue_pop_test_hook) |hook| hook(self);
+        }
 
         if (self.options.disable_trickle and
             gathered and
@@ -530,6 +584,8 @@ pub const Peer = struct {
 
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+        // A callback may have invalidated draining while the mutex was free.
+        if (!self.canPollLocked(signals_only)) return error.ConnectionClosed;
 
         const entry = (if (signals_only)
             try self.queue.popFirstTagBelow(3, output)
@@ -544,6 +600,15 @@ pub const Peer = struct {
             4 => .{ .unreliable_fragment = entry.data },
             else => unreachable,
         };
+    }
+
+    /// Caller holds the callback mutex.
+    fn canPollLocked(self: *Peer, signals_only: bool) bool {
+        const closed = self.stopping or self.state == .closed or
+            self.state == .failed or self.state == .disconnected;
+        if (!closed) return true;
+        return !self.stopping and !signals_only and
+            self.drain_queued_on_close and self.queue.count != 0;
     }
 
     /// A partial native send closes the peer so later frames cannot be corrupted.
@@ -678,6 +743,7 @@ pub const Peer = struct {
         } else {
             self.queue.push(tag, data) catch {
                 self.state = .failed;
+                self.drain_queued_on_close = false;
             };
         }
         self.notify();
@@ -722,7 +788,11 @@ pub const Peer = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
-        if (!self.stopping and self.state != .failed) {
+        if (self.stopping) return;
+        if (state == c.RTC_FAILED or state == c.RTC_DISCONNECTED) {
+            self.drain_queued_on_close = false;
+        }
+        if (self.state != .failed) {
             self.state = switch (state) {
                 c.RTC_NEW => .new,
                 c.RTC_CONNECTING => .connecting,
@@ -784,7 +854,13 @@ pub const Peer = struct {
         const self = from(ptr);
 
         self.attach(channel) catch {
-            onClosed(channel, ptr);
+            self.mutex.lockUncancelable(self.io);
+            if (!self.stopping) {
+                self.state = .failed;
+                self.drain_queued_on_close = false;
+                self.notify();
+            }
+            self.mutex.unlock(self.io);
         };
     }
 
@@ -799,13 +875,22 @@ pub const Peer = struct {
         const self = from(ptr);
 
         self.mutex.lockUncancelable(self.io);
-        const reliable = self.channels[0] == channel;
+        const tag: u8 = if (self.channels[0] == channel)
+            3
+        else if (self.channels[1] == channel)
+            4
+        else blk: {
+            if (!self.stopping) {
+                self.state = .failed;
+                self.drain_queued_on_close = false;
+                self.notify();
+            }
+            break :blk 0;
+        };
         self.mutex.unlock(self.io);
 
-        self.enqueue(
-            if (reliable) 3 else 4,
-            data[0..@intCast(size)],
-        );
+        if (tag == 0) return;
+        self.enqueue(tag, data[0..@intCast(size)]);
     }
 
     fn onBufferedAmountLow(_: c_int, ptr: ?*anyopaque) callconv(.c) void {
@@ -821,24 +906,38 @@ pub const Peer = struct {
         self.notify();
     }
 
-    fn onClosed(_: c_int, ptr: ?*anyopaque) callconv(.c) void {
+    fn onClosed(channel: c_int, ptr: ?*anyopaque) callconv(.c) void {
         const self = from(ptr);
 
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
-        if (!self.stopping) {
+        if (self.stopping) return;
+
+        const known_channel = self.channels[0] == channel or self.channels[1] == channel;
+        if (!known_channel) {
             self.state = .failed;
+            self.drain_queued_on_close = false;
+            self.notify();
+        } else if (self.state != .failed and self.state != .disconnected) {
+            self.state = .failed;
+            self.drain_queued_on_close = true;
             self.notify();
         }
     }
 
     fn onError(
-        id: c_int,
+        _: c_int,
         _: [*c]const u8,
         ptr: ?*anyopaque,
     ) callconv(.c) void {
-        onClosed(id, ptr);
+        const self = from(ptr);
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.stopping) return;
+        self.state = .failed;
+        self.drain_queued_on_close = false;
+        self.notify();
     }
 };
 
@@ -980,6 +1079,12 @@ fn testDataChannel(peer: *Peer, label: [:0]const u8) !c_int {
     return channel;
 }
 
+fn testAttachedChannel(peer: *Peer) !c_int {
+    const channel = try testDataChannel(peer, "ReliableDataChannel");
+    try peer.attach(channel);
+    return channel;
+}
+
 fn expectChannelDeleted(channel: c_int) !void {
     var label: [64]u8 = undefined;
     try std.testing.expect(c.rtcGetDataChannelLabel(channel, &label, label.len) < 0);
@@ -993,6 +1098,235 @@ test "unknown remote data channel is deleted and fails the peer" {
     try expectChannelDeleted(channel);
     try std.testing.expectEqual(State.failed, peer.getState());
     try std.testing.expectEqualSlices(c_int, &.{ -1, -1 }, &peer.channels);
+}
+
+test "message callback rejects an unregistered channel" {
+    const peer = try Peer.create(std.testing.allocator, std.testing.io, .{});
+    defer peer.destroy();
+
+    const fragment = [_]u8{ 0, 42 };
+    Peer.onMessage(123456, &fragment, fragment.len, peer);
+
+    try std.testing.expectEqual(State.failed, peer.getState());
+    try std.testing.expectEqual(@as(usize, 0), peer.queue.count);
+}
+
+test "queued fragments remain readable after a channel closes" {
+    const peer = try Peer.create(std.testing.allocator, std.testing.io, .{});
+    defer peer.destroy();
+    const channel = try testAttachedChannel(peer);
+
+    peer.enqueue(3, &.{ 0, 42 });
+    Peer.onClosed(channel, peer);
+
+    var output: [2]u8 = undefined;
+    const event = (try peer.poll(&output)).?;
+    try std.testing.expectEqualSlices(u8, &.{ 0, 42 }, event.reliable_fragment);
+    try std.testing.expectError(error.ConnectionClosed, peer.poll(&output));
+}
+
+test "local close stops draining queued fragments" {
+    const peer = try Peer.create(std.testing.allocator, std.testing.io, .{});
+    defer peer.destroy();
+    const channel = try testAttachedChannel(peer);
+
+    peer.enqueue(3, &.{ 0, 42 });
+    Peer.onClosed(channel, peer);
+    peer.close();
+
+    var output: [2]u8 = undefined;
+    try std.testing.expectError(error.ConnectionClosed, peer.poll(&output));
+}
+
+test "channel close does not permit draining after queue failure" {
+    const peer = try Peer.create(std.testing.allocator, std.testing.io, .{
+        .queue_entries = 2,
+    });
+    defer peer.destroy();
+    const channel = try testAttachedChannel(peer);
+
+    peer.enqueue(3, &.{ 0, 42 });
+    peer.enqueue(3, &.{ 0, 43 });
+    peer.enqueue(3, &.{ 0, 44 });
+    Peer.onClosed(channel, peer);
+
+    var output: [2]u8 = undefined;
+    try std.testing.expectError(error.ConnectionClosed, peer.poll(&output));
+}
+
+test "unknown channel after closure invalidates pending drain" {
+    const peer = try Peer.create(std.testing.allocator, std.testing.io, .{});
+    defer peer.destroy();
+    const channel = try testAttachedChannel(peer);
+
+    peer.enqueue(3, &.{ 0, 42 });
+    Peer.onClosed(channel, peer);
+    const fragment = [_]u8{ 0, 43 };
+    Peer.onMessage(123456, &fragment, fragment.len, peer);
+
+    var output: [2]u8 = undefined;
+    try std.testing.expectError(error.ConnectionClosed, peer.poll(&output));
+}
+
+test "state failure before channel close forbids draining" {
+    const peer = try Peer.create(std.testing.allocator, std.testing.io, .{});
+    defer peer.destroy();
+    const channel = try testAttachedChannel(peer);
+
+    peer.enqueue(3, &.{ 0, 42 });
+    Peer.onState(peer.id, c.RTC_FAILED, peer);
+    Peer.onClosed(channel, peer);
+
+    var output: [2]u8 = undefined;
+    try std.testing.expectError(error.ConnectionClosed, peer.poll(&output));
+}
+
+test "state failure after channel close revokes queued drain" {
+    const peer = try Peer.create(std.testing.allocator, std.testing.io, .{});
+    defer peer.destroy();
+    const channel = try testAttachedChannel(peer);
+
+    peer.enqueue(3, &.{ 0, 42 });
+    Peer.onClosed(channel, peer);
+    Peer.onState(peer.id, c.RTC_FAILED, peer);
+
+    var output: [2]u8 = undefined;
+    try std.testing.expectError(error.ConnectionClosed, peer.poll(&output));
+}
+
+test "disconnection before channel close forbids draining" {
+    const peer = try Peer.create(std.testing.allocator, std.testing.io, .{});
+    defer peer.destroy();
+    const channel = try testAttachedChannel(peer);
+
+    peer.enqueue(3, &.{ 0, 42 });
+    Peer.onState(peer.id, c.RTC_DISCONNECTED, peer);
+    Peer.onClosed(channel, peer);
+
+    var output: [2]u8 = undefined;
+    try std.testing.expectError(error.ConnectionClosed, peer.poll(&output));
+}
+
+test "channel error before or after close forbids queued drain" {
+    inline for (.{ true, false }) |error_first| {
+        const peer = try Peer.create(std.testing.allocator, std.testing.io, .{});
+        defer peer.destroy();
+        const channel = try testAttachedChannel(peer);
+
+        peer.enqueue(3, &.{ 0, 42 });
+        if (error_first) {
+            Peer.onError(channel, null, peer);
+            Peer.onClosed(channel, peer);
+        } else {
+            Peer.onClosed(channel, peer);
+            Peer.onError(channel, null, peer);
+        }
+
+        var output: [2]u8 = undefined;
+        try std.testing.expectError(error.ConnectionClosed, peer.poll(&output));
+    }
+}
+
+test "late callbacks cannot revive or extend a closed channel drain" {
+    const peer = try Peer.create(std.testing.allocator, std.testing.io, .{});
+    defer peer.destroy();
+    const channel = try testDataChannel(peer, "ReliableDataChannel");
+    try peer.attach(channel);
+
+    peer.enqueue(3, &.{ 0, 42 });
+    Peer.onClosed(channel, peer);
+    Peer.onState(peer.id, c.RTC_CONNECTED, peer);
+    const late = [_]u8{ 0, 43 };
+    Peer.onMessage(channel, &late, late.len, peer);
+
+    var output: [2]u8 = undefined;
+    const event = (try peer.poll(&output)).?;
+    try std.testing.expectEqualSlices(u8, &.{ 0, 42 }, event.reliable_fragment);
+    try std.testing.expectEqual(State.failed, peer.getState());
+    try std.testing.expectError(error.ConnectionClosed, peer.poll(&output));
+}
+
+test "callback failure between poll checks prevents queued drain" {
+    const peer = try Peer.create(std.testing.allocator, std.testing.io, .{});
+    defer peer.destroy();
+    const channel = try testAttachedChannel(peer);
+    peer.enqueue(3, &.{ 0, 42 });
+    Peer.onClosed(channel, peer);
+
+    peer.queue_pop_test_hook = struct {
+        fn invalidate(target: *Peer) void {
+            const fragment = [_]u8{ 0, 43 };
+            Peer.onMessage(123456, &fragment, fragment.len, target);
+        }
+    }.invalidate;
+
+    var output: [2]u8 = undefined;
+    try std.testing.expectError(error.ConnectionClosed, peer.poll(&output));
+    try std.testing.expectEqual(@as(usize, 1), peer.queue.count);
+}
+
+test "rejected remote channel cannot enable queued drain" {
+    const peer = try Peer.create(std.testing.allocator, std.testing.io, .{});
+    defer peer.destroy();
+    peer.enqueue(3, &.{ 0, 42 });
+
+    const channel = try testDataChannel(peer, "UnknownDataChannel");
+    Peer.onChannel(peer.id, channel, peer);
+    try expectChannelDeleted(channel);
+
+    var output: [2]u8 = undefined;
+    try std.testing.expectError(error.ConnectionClosed, peer.poll(&output));
+}
+
+test "unknown close callback cannot enable queued drain" {
+    const peer = try Peer.create(std.testing.allocator, std.testing.io, .{});
+    defer peer.destroy();
+    peer.enqueue(3, &.{ 0, 42 });
+
+    Peer.onClosed(123456, peer);
+
+    var output: [2]u8 = undefined;
+    try std.testing.expectError(error.ConnectionClosed, peer.poll(&output));
+}
+
+test "native handle lease keeps handles live until close can delete them" {
+    const io = std.testing.io;
+    const peer = try Peer.create(std.testing.allocator, io, .{});
+    defer peer.destroy();
+
+    const handles = peer.acquireNativeHandles().?;
+    var released = false;
+    peer.wakeup.prepare();
+    var closing = try io.concurrent(Peer.close, .{peer});
+    var closing_done = false;
+    defer if (!closing_done) {
+        if (!released) peer.releaseNativeHandles();
+        closing.await(io);
+    };
+
+    try peer.wakeup.wait(io, wake.deadline(std.Io.Clock.awake.now(io), 1000));
+    try std.testing.expectEqual(State.closed, peer.getState());
+    try std.testing.expectEqual(handles.id, peer.id);
+
+    peer.releaseNativeHandles();
+    released = true;
+    closing.await(io);
+    closing_done = true;
+    try std.testing.expectEqual(@as(c_int, -1), peer.id);
+}
+
+test "native queries report unavailable after close" {
+    const peer = try Peer.create(std.testing.allocator, std.testing.io, .{});
+    defer peer.destroy();
+    peer.close();
+
+    const diagnostics = peer.diagnostics();
+    try std.testing.expectEqual(ChannelState.unavailable, diagnostics.reliable.state);
+    try std.testing.expectEqual(ChannelState.unavailable, diagnostics.unreliable.state);
+
+    var local: [128]u8 = undefined;
+    var remote: [128]u8 = undefined;
+    try std.testing.expect((try peer.selectedIceAddresses(&local, &remote)) == null);
 }
 
 test "duplicate remote data channel is deleted and fails the peer" {
