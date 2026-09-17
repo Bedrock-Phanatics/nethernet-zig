@@ -161,12 +161,18 @@ pub fn verify(
 
     var lines = std.mem.tokenizeAny(u8, sdp, "\r\n");
 
+    var media_started = false;
     var encoded: ?[]const u8 = null;
     while (lines.next()) |line| {
-        if (std.mem.startsWith(u8, line, "a=identity:")) {
-            if (encoded != null) return error.InvalidIdentity;
-            encoded = line[11..];
+        if (std.mem.startsWith(u8, line, "m=")) {
+            media_started = true;
+            continue;
         }
+
+        if (!std.mem.startsWith(u8, line, "a=identity:")) continue;
+        if (media_started or encoded != null) return error.InvalidIdentity;
+
+        encoded = line[11..];
     }
 
     const assertion_text = encoded orelse return null;
@@ -270,6 +276,31 @@ test "duplicate SDP identity assertions are rejected" {
     defer allocator.free(duplicated);
 
     try std.testing.expectError(error.InvalidIdentity, verify(allocator, duplicated, 1000, .server, null));
+}
+
+test "SDP identity assertions must be session level" {
+    const allocator = std.testing.allocator;
+    const key = try jwt.Scheme.KeyPair.generateDeterministic(.{6} ** 48);
+    const token = try jwt.serverToken(allocator, key, 1000);
+    defer allocator.free(token);
+
+    const source =
+        "v=0\r\n" ++
+        "a=fingerprint:sha-256 00:11\r\n" ++
+        "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n";
+    const signed = try add(allocator, source, .{ .key = key, .token = token });
+    defer allocator.free(signed);
+
+    const identity_start = std.mem.indexOf(u8, signed, "a=identity:").?;
+    const identity_end = std.mem.indexOfPos(u8, signed, identity_start, "\r\n").? + 2;
+    const media_level = try std.fmt.allocPrint(allocator, "{s}{s}{s}", .{
+        signed[0..identity_start],
+        signed[identity_end..],
+        signed[identity_start..identity_end],
+    });
+    defer allocator.free(media_level);
+
+    try std.testing.expectError(error.InvalidIdentity, verify(allocator, media_level, 1000, .server, null));
 }
 
 test "SDP identity nesting, fingerprint deduplication and proof binding" {

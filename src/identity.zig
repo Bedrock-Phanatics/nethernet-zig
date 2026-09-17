@@ -410,11 +410,19 @@ test "server identity, expiry, detached signatures, and tampering" {
 
 test "identity JSON nesting is bounded and quoted brackets are ignored" {
     const allocator = std.testing.allocator;
+
+    const maximum = [_]u8{'['} ** 64 ++ [_]u8{'0'} ++ [_]u8{']'} ** 64;
+    const accepted = try parse(allocator, &maximum);
+    defer accepted.deinit();
+
     const nested = [_]u8{'['} ** 65 ++ [_]u8{'0'} ++ [_]u8{']'} ** 65;
     try std.testing.expectError(error.IdentityTooDeep, parse(allocator, &nested));
 
     const quoted = try parse(allocator, "{\"value\":\"[[[{{{\"}");
     defer quoted.deinit();
+
+    const escaped_quote = try parse(allocator, "{\"value\":\"\\\"[[{{\"}");
+    defer escaped_quote.deinit();
 }
 
 fn testPublicKey(key: Scheme.KeyPair, output: *[160]u8) []const u8 {
