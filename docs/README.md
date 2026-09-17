@@ -13,7 +13,7 @@ The main entry points are:
 
 ## Shutdown
 
-`close()` aborts immediately and is idempotent. `closeGracefully()` stops new sends and waits for libdatachannel's outgoing buffered amount to reach zero. It force-closes on cancellation, native failure, or `graceful_shutdown_timeout_ms`, which defaults to two seconds. Call `destroy()` exactly once after use.
+`close()` aborts immediately and is idempotent. `closeGracefully()` stops new sends, waits for libdatachannel's channel send buffer to reach zero, then closes. That buffer excludes data already accepted by the SCTP transport, so a successful return does not confirm remote delivery. When delivery must be certain, have the receiver acknowledge the message at the application level and wait for that acknowledgement before closing. `closeGracefully()` force-closes on cancellation, native failure, or `graceful_shutdown_timeout_ms`, which defaults to two seconds. Call `destroy()` exactly once after use.
 
 ## Important limits
 
@@ -46,4 +46,4 @@ zig build stress -Doptimize=ReleaseSafe -- --connections 100 --duration-ms 60000
 
 Use `--profile rollover` for the manual single-association SCTP rollover run. On Linux, `sh tools/stress-diagnostics.sh asan`, `tsan`, or `valgrind` rebuilds or runs the native diagnostics as appropriate.
 
-Heavy stress testing is never scheduled automatically. The GitHub `transport stress` workflow runs only when manually dispatched.
+The GitHub `transport stress` workflow runs weekly and can also be dispatched manually. It includes a long transport run and short ASAN and TSAN runs with instrumented native dependencies.

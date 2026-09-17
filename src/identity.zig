@@ -10,6 +10,7 @@ const public_key_prefix = [_]u8{
 };
 
 pub const maximum_size = 1024 * 1024;
+pub const maximum_json_nesting = 64;
 pub const server_iat_clock_skew_seconds: i64 = 60;
 
 pub const IdentityKind = enum {
@@ -76,6 +77,34 @@ pub fn parse(
     data: []const u8,
 ) !std.json.Parsed(std.json.Value) {
     if (data.len > maximum_size) return error.IdentityTooLarge;
+
+    var depth: usize = 0;
+    var in_string = false;
+    var escaped = false;
+    for (data) |byte| {
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+            } else if (byte == '\\') {
+                escaped = true;
+            } else if (byte == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+
+        switch (byte) {
+            '"' => in_string = true,
+            '[', '{' => {
+                depth += 1;
+                if (depth > maximum_json_nesting) return error.IdentityTooDeep;
+            },
+            ']', '}' => if (depth > 0) {
+                depth -= 1;
+            },
+            else => {},
+        }
+    }
 
     return std.json.parseFromSlice(
         std.json.Value,
@@ -377,6 +406,23 @@ test "server identity, expiry, detached signatures, and tampering" {
     if (verify(allocator, signature, public_key, "tampered")) |_| {
         return error.TamperingAccepted;
     } else |_| {}
+}
+
+test "identity JSON nesting is bounded and quoted brackets are ignored" {
+    const allocator = std.testing.allocator;
+
+    const maximum = [_]u8{'['} ** 64 ++ [_]u8{'0'} ++ [_]u8{']'} ** 64;
+    const accepted = try parse(allocator, &maximum);
+    defer accepted.deinit();
+
+    const nested = [_]u8{'['} ** 65 ++ [_]u8{'0'} ++ [_]u8{']'} ** 65;
+    try std.testing.expectError(error.IdentityTooDeep, parse(allocator, &nested));
+
+    const quoted = try parse(allocator, "{\"value\":\"[[[{{{\"}");
+    defer quoted.deinit();
+
+    const escaped_quote = try parse(allocator, "{\"value\":\"\\\"[[{{\"}");
+    defer escaped_quote.deinit();
 }
 
 fn testPublicKey(key: Scheme.KeyPair, output: *[160]u8) []const u8 {
