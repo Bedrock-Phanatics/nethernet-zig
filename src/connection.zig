@@ -274,6 +274,8 @@ pub const Connection = struct {
         self.peer.close();
     }
 
+    /// Stops new sends, waits for libdatachannel's channel buffer to empty,
+    /// then closes. Remote delivery requires an application acknowledgement.
     pub fn closeGracefully(self: *Connection) !void {
         try self.peer.closeGracefully(self.options.graceful_shutdown_timeout_ms);
     }

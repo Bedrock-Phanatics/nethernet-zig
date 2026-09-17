@@ -149,10 +149,19 @@ test "connections verify identities, reassemble large messages, and reconnect" {
             _ = draining_receive.cancel(io) catch {};
         };
         try client.send(payload, .reliable);
-        try client.closeGracefully();
         const drained = try draining_receive.await(io);
         receive_taken = true;
         try std.testing.expectEqualSlices(u8, payload, drained.data);
+        try std.testing.expectEqual(@as(u64, payload.len * 2), server.received_bytes);
+
+        // a receiver acknowledgement proves delivery
+        // a empty native send buffer alone does not include data still held by sctp
+        const receipt = "large-message-received";
+        try server.send(receipt, .reliable);
+        const acknowledged = try client.receive();
+        try std.testing.expectEqualSlices(u8, receipt, acknowledged.data);
+
+        try client.closeGracefully();
         try std.testing.expectError(error.InvalidState, client.send("late", .reliable));
         client.close();
         client.close();

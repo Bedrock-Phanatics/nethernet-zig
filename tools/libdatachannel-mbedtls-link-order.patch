@@ -1,0 +1,15 @@
+diff --git a/cmake/Modules/FindMbedTLS.cmake b/cmake/Modules/FindMbedTLS.cmake
+index 0b11208..bcb1f3d 100644
+--- a/cmake/Modules/FindMbedTLS.cmake
++++ b/cmake/Modules/FindMbedTLS.cmake
+@@ -199,8 +199,8 @@ if(MbedTLS_FOUND)
+     set(MbedTLS_LIBRARIES ${MbedTLS_LIBRARY})
+     set(MBEDTLS_INCLUDE_DIRS ${MbedTLS_INCLUDE_DIR})
+   else()
+-    set(MbedTLS_LIBRARIES ${MbedTLS_LIBRARY} ${MbedCrypto_LIBRARY} ${MbedX509_LIBRARY})
+-    set_property(TARGET MbedTLS::MbedTLS PROPERTY INTERFACE_LINK_LIBRARIES MbedTLS::MbedCrypto MbedTLS::MbedX509)
++    set(MbedTLS_LIBRARIES ${MbedTLS_LIBRARY} ${MbedX509_LIBRARY} ${MbedCrypto_LIBRARY})
++    set_property(TARGET MbedTLS::MbedTLS PROPERTY INTERFACE_LINK_LIBRARIES MbedTLS::MbedX509 MbedTLS::MbedCrypto)
+     set(MBEDTLS_INCLUDE_DIRS ${MbedTLS_INCLUDE_DIR})
+   endif()
+ endif()
