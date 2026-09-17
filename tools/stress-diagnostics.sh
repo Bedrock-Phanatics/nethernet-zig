@@ -13,12 +13,12 @@ case "$mode" in
       NETHERNET_MBEDTLS_BUILD=".deps/mbedtls-build-$mode" \
       NETHERNET_RTC_BUILD=".deps/rtc-build-$mode" \
       NETHERNET_SANITIZER_FLAGS="$flag -fno-omit-frame-pointer" \
-      tools/setup-native.sh
+      sh tools/setup-native.sh
     zig build stress -Doptimize=ReleaseSafe -Dnative-prefix="$prefix" \
       -Dnative-sanitizer="$sanitizer" -- "$@"
     ;;
   valgrind)
-    zig build -Doptimize=ReleaseSafe
+    zig build stress-install -Doptimize=ReleaseSafe
     LD_LIBRARY_PATH="$(pwd)/.deps/native/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
       valgrind --error-exitcode=1 --leak-check=full \
       --show-leak-kinds=definite,indirect zig-out/bin/transport-stress "$@"

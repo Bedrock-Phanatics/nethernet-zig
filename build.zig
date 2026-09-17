@@ -115,7 +115,9 @@ pub fn build(b: *std.Build) void {
         .thread => "tsan",
     }, .{});
     const stress = b.addExecutable(.{ .name = "transport-stress", .root_module = stress_module });
-    b.installArtifact(stress);
+    const install_stress = b.addInstallArtifact(stress, .{});
+    b.getInstallStep().dependOn(&install_stress.step);
+    b.step("stress-install", "Install the transport stress executable without running tests").dependOn(&install_stress.step);
     const run_stress = b.addRunArtifact(stress);
     run_stress.addPathDir(b.pathJoin(&.{ native_prefix, "bin" }));
     run_stress.setEnvironmentVariable(

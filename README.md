@@ -1,6 +1,9 @@
 # nethernet-zig
 
 A bounded Minecraft Bedrock NetherNet transport library for Zig 0.16.
+<p align="center">
+    Join our <a href="https://discord.gg/Yv9qPRQNc3">Discord</a>!
+</p>
 
 It provides LAN discovery, HTTP signaling, authenticated SDP exchange, and reliable or unreliable WebRTC DataChannels through libdatachannel. Queues, message sizes, ICE candidates, listeners, and negotiation work are explicitly bounded.
 

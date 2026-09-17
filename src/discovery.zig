@@ -273,13 +273,7 @@ pub const Discovery = struct {
             },
 
             .response => |data| {
-                const copy = try self.allocator.dupe(u8, data);
-
-                if (entry.value_ptr.response) |old| {
-                    self.allocator.free(old);
-                }
-
-                entry.value_ptr.response = copy;
+                try replaceResponse(self.allocator, entry.value_ptr, data);
             },
 
             .message => |packet| {
@@ -436,6 +430,16 @@ pub const Discovery = struct {
     }
 };
 
+fn replaceResponse(allocator: std.mem.Allocator, known: *Known, data: []const u8) !void {
+    if (known.response) |old| {
+        if (std.mem.eql(u8, old, data)) return;
+    }
+
+    const copy = try allocator.dupe(u8, data);
+    if (known.response) |old| allocator.free(old);
+    known.response = copy;
+}
+
 test "UDP discovery and addressed signaling over loopback" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
@@ -488,6 +492,18 @@ test "UDP discovery and addressed signaling over loopback" {
 
     server.close();
     server.close();
+}
+
+test "identical discovery responses do not allocate again" {
+    var known: Known = .{
+        .endpoint = try std.Io.net.IpAddress.parseLiteral("127.0.0.1:7551"),
+        .last_seen = std.Io.Clock.awake.now(std.testing.io),
+        .response = try std.testing.allocator.dupe(u8, "same"),
+    };
+    defer std.testing.allocator.free(known.response.?);
+
+    try replaceResponse(std.testing.failing_allocator, &known, "same");
+    try std.testing.expectEqualStrings("same", known.response.?);
 }
 
 fn creationFailureScenario(allocator: std.mem.Allocator) !void {
