@@ -8,8 +8,12 @@ test -d .deps/mbedtls/.git || git clone --branch mbedtls-3.6.7 --depth 1 --recur
 test "$(git -C .deps/libdatachannel rev-parse HEAD)" = 443f6934d9007eb7076ab7825ba330f355fcbead
 test "$(git -C .deps/mbedtls rev-parse HEAD)" = 068ff080b369adfac81509f9b57b2afabaf82dc5
 python3 .deps/mbedtls/scripts/config.py -f .deps/mbedtls/include/mbedtls/mbedtls_config.h set MBEDTLS_SSL_DTLS_SRTP
-patch="$(pwd)/tools/libdatachannel-bounds.patch"
-git -C .deps/libdatachannel apply --reverse --check "$patch" 2>/dev/null || git -C .deps/libdatachannel apply "$patch"
+apply_patch() {
+    patch="$1"
+    git -C .deps/libdatachannel apply --reverse --check "$patch" 2>/dev/null || git -C .deps/libdatachannel apply "$patch"
+}
+apply_patch "$(pwd)/tools/libdatachannel-bounds.patch"
+apply_patch "$(pwd)/tools/libdatachannel-mbedtls-link-order.patch"
 prefix="${NETHERNET_NATIVE_PREFIX:-$(pwd)/.deps/native}"
 mbedtls_build="${NETHERNET_MBEDTLS_BUILD:-.deps/mbedtls-build}"
 rtc_build="${NETHERNET_RTC_BUILD:-.deps/rtc-build}"

@@ -46,4 +46,4 @@ zig build stress -Doptimize=ReleaseSafe -- --connections 100 --duration-ms 60000
 
 Use `--profile rollover` for the manual single-association SCTP rollover run. On Linux, `sh tools/stress-diagnostics.sh asan`, `tsan`, or `valgrind` rebuilds or runs the native diagnostics as appropriate.
 
-Heavy stress testing is never scheduled automatically. The GitHub `transport stress` workflow runs only when manually dispatched.
+The GitHub `transport stress` workflow runs weekly and can also be dispatched manually. It includes a long transport run and short ASAN and TSAN runs with instrumented native dependencies.
