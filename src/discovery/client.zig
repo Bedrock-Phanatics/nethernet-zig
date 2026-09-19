@@ -1,11 +1,9 @@
-//! LAN discovery and addressed signaling transport.
-
 const std = @import("std");
 
+const wake = @import("../internal/wakeup.zig");
+const Signal = @import("../protocol/signal.zig").Signal;
 const codec = @import("codec.zig");
 const ServerData = @import("server_data.zig").ServerData;
-const Signal = @import("../protocol/signal.zig").Signal;
-const wake = @import("../internal/wakeup.zig");
 
 pub const default_port = 7551;
 

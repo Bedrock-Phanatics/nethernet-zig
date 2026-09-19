@@ -1,12 +1,10 @@
-//! LAN listener and dialer built on discovery signaling.
-
 const std = @import("std");
 
 const auth = @import("../auth/sdp.zig");
-const conn = @import("../transport/connection.zig");
 const Discovery = @import("../discovery/client.zig").Discovery;
-const Signal = @import("../protocol/signal.zig").Signal;
 const wake = @import("../internal/wakeup.zig");
+const Signal = @import("../protocol/signal.zig").Signal;
+const conn = @import("../transport/connection.zig");
 
 pub const Options = struct {
     connection: conn.Options = .{},

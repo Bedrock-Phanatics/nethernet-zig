@@ -1,10 +1,10 @@
-//! Authenticated, message-oriented connection over a native peer.
-
 const std = @import("std");
 
 const auth = @import("../auth/sdp.zig");
-const framing = @import("framing.zig");
 const jwt = @import("../auth/token.zig");
+const wake = @import("../internal/wakeup.zig");
+const Signal = @import("../protocol/signal.zig").Signal;
+const framing = @import("framing.zig");
 const native = @import("peer.zig");
 pub const CallbackStats = native.CallbackStats;
 pub const IceState = native.IceState;
@@ -12,8 +12,6 @@ pub const IceGatheringState = native.GatheringState;
 pub const ChannelState = native.ChannelState;
 pub const ChannelDiagnostics = native.ChannelDiagnostics;
 pub const SelectedIceAddresses = native.SelectedIceAddresses;
-const Signal = @import("../protocol/signal.zig").Signal;
-const wake = @import("../internal/wakeup.zig");
 
 const maximum_network_id_length = 4096;
 const maximum_signal_size = 1024 * 1024;

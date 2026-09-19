@@ -1,5 +1,3 @@
-//! Edge-safe wakeups and timeout helpers.
-
 const std = @import("std");
 
 pub const Wakeup = struct {

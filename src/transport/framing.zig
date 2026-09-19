@@ -1,5 +1,3 @@
-//! Reliable and unreliable DataChannel message framing.
-
 const std = @import("std");
 
 pub const maximum_segment_payload: usize = 262143;

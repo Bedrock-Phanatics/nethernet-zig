@@ -1,7 +1,4 @@
-//! Authenticated LAN discovery datagram codec.
-
 const std = @import("std");
-
 const Hmac = std.crypto.auth.hmac.sha2.HmacSha256;
 const Aes = std.crypto.core.aes.Aes256;
 

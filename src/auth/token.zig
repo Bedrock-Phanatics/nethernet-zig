@@ -1,5 +1,3 @@
-//! Signed client and server identity tokens.
-
 const std = @import("std");
 pub const Scheme = std.crypto.sign.ecdsa.EcdsaP384Sha384;
 const base64_url = std.base64.url_safe_no_pad;

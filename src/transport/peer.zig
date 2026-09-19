@@ -1,12 +1,10 @@
-//! Memory-safe wrapper around the libdatachannel C API.
-
 const std = @import("std");
 const builtin = @import("builtin");
 
-const framing = @import("framing.zig");
 const Queue = @import("../internal/queue.zig").Queue;
 const wake = @import("../internal/wakeup.zig");
 const Wakeup = wake.Wakeup;
+const framing = @import("framing.zig");
 
 const c = @cImport({
     @cDefine("RTC_ENABLE_MEDIA", "0");

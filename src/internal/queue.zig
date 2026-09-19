@@ -1,5 +1,3 @@
-//! Bounded priority queue used by native callbacks.
-
 const std = @import("std");
 
 pub const Queue = struct {

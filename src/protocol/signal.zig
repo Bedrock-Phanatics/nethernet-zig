@@ -1,5 +1,3 @@
-//! WebRTC signaling message representation and JSON codec.
-
 const std = @import("std");
 
 pub const Signal = struct {

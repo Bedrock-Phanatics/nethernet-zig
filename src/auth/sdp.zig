@@ -1,5 +1,3 @@
-//! SDP identity assertion creation and verification.
-
 const std = @import("std");
 
 const jwt = @import("token.zig");

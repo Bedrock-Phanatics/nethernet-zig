@@ -1,9 +1,7 @@
-//! HTTP signaling client and endpoint dialing.
-
 const std = @import("std");
 
-const connection = @import("../transport/connection.zig");
 const Signal = @import("../protocol/signal.zig").Signal;
+const connection = @import("../transport/connection.zig");
 
 pub const maximum_sdp_size = 1024 * 1024;
 

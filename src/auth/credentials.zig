@@ -1,5 +1,3 @@
-//! ICE server credential construction and validation.
-
 const std = @import("std");
 
 const maximum_urls = 64;

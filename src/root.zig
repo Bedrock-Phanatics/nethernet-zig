@@ -1,7 +1,4 @@
-//! Public NetherNet API.
-
 const core = @import("core.zig");
-
 pub const credentials = core.credentials;
 pub const identity = core.identity;
 pub const framing = core.framing;
@@ -13,7 +10,17 @@ pub const Identity = core.Identity;
 pub const IdentityKeyPair = core.IdentityKeyPair;
 pub const Discovery = core.Discovery;
 pub const DiscoveryOptions = core.DiscoveryOptions;
-
+const endpoint = @import("endpoint/client.zig");
+pub const dialEndpoint = endpoint.dial;
+const lan = @import("endpoint/lan.zig");
+pub const LanListener = lan.Listener;
+pub const LanListenerOptions = lan.Options;
+pub const dialLan = lan.dial;
+const endpoint_listener = @import("endpoint/listener.zig");
+pub const EndpointListener = endpoint_listener.Listener;
+pub const EndpointListenerOptions = endpoint_listener.Options;
+pub const EndpointServerStatus = endpoint_listener.ServerStatus;
+pub const EndpointStatusProvider = endpoint_listener.StatusProvider;
 const connection = @import("transport/connection.zig");
 pub const Connection = connection.Connection;
 pub const ConnectionOptions = connection.Options;
@@ -26,21 +33,7 @@ pub const ChannelDiagnostics = connection.ChannelDiagnostics;
 pub const SelectedIceAddresses = connection.SelectedIceAddresses;
 pub const Address = connection.Address;
 pub const Message = connection.Message;
-
 const peer = @import("transport/peer.zig");
 pub const Peer = peer.Peer;
 pub const State = peer.State;
 
-const endpoint = @import("endpoint/client.zig");
-pub const dialEndpoint = endpoint.dial;
-
-const endpoint_listener = @import("endpoint/listener.zig");
-pub const EndpointListener = endpoint_listener.Listener;
-pub const EndpointListenerOptions = endpoint_listener.Options;
-pub const EndpointServerStatus = endpoint_listener.ServerStatus;
-pub const EndpointStatusProvider = endpoint_listener.StatusProvider;
-
-const lan = @import("endpoint/lan.zig");
-pub const LanListener = lan.Listener;
-pub const LanListenerOptions = lan.Options;
-pub const dialLan = lan.dial;

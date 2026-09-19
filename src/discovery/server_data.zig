@@ -1,5 +1,3 @@
-//! Minecraft Bedrock server advertisement encoding.
-
 const std = @import("std");
 
 const Error = error{

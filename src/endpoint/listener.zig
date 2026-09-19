@@ -1,11 +1,9 @@
-//! HTTP signaling listener and status endpoint.
-
 const std = @import("std");
 
 const auth = @import("../auth/sdp.zig");
+const Signal = @import("../protocol/signal.zig").Signal;
 const conn = @import("../transport/connection.zig");
 const maximum_sdp_size = @import("client.zig").maximum_sdp_size;
-const Signal = @import("../protocol/signal.zig").Signal;
 
 pub const maximum_status_response_size = 16 * 1024;
 
