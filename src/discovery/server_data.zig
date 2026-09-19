@@ -1,3 +1,5 @@
+//! Minecraft Bedrock server advertisement encoding.
+
 const std = @import("std");
 
 const Error = error{
@@ -115,7 +117,6 @@ const Writer = struct {
     }
 };
 
-/// Decoded strings use the input buffer. Signed values preserve unknown variants.
 pub const ServerData = struct {
     server_name: []const u8 = "",
     level_name: []const u8 = "",

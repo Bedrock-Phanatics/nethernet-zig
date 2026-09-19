@@ -1,36 +1,30 @@
-//! Native-free NetherNet protocol and utility components.
+//! Native-free protocol surface used by unit tests and fuzz targets.
 
-pub const credentials = @import("credentials.zig");
-pub const discovery = @import("discovery.zig");
-pub const discovery_codec = @import("discovery_codec.zig");
-pub const framing = @import("framing.zig");
-pub const identity = @import("identity.zig");
-pub const queue = @import("queue.zig");
-pub const sdp_identity = @import("sdp_identity.zig");
-pub const server_data = @import("server_data.zig");
-pub const signal = @import("signal.zig");
-pub const wakeup = @import("wakeup.zig");
+const std = @import("std");
 
-pub const Reliability = framing.Reliability;
-pub const Signal = signal.Signal;
-pub const ServerData = server_data.ServerData;
-pub const ErrorCode = @import("error_codes.zig").ErrorCode;
-
+pub const credentials = @import("auth/credentials.zig");
+pub const identity = @import("auth/token.zig");
+pub const sdp_identity = @import("auth/sdp.zig");
 pub const Identity = sdp_identity.Identity;
 pub const IdentityKeyPair = sdp_identity.KeyPair;
 
+pub const discovery = @import("discovery/client.zig");
+pub const discovery_codec = @import("discovery/codec.zig");
+pub const server_data = @import("discovery/server_data.zig");
 pub const Discovery = discovery.Discovery;
 pub const DiscoveryOptions = discovery.Options;
+pub const ServerData = server_data.ServerData;
+
+pub const ErrorCode = @import("protocol/error_code.zig").ErrorCode;
+pub const signal = @import("protocol/signal.zig");
+pub const Signal = signal.Signal;
+
+pub const framing = @import("transport/framing.zig");
+pub const Reliability = framing.Reliability;
+
+pub const queue = @import("internal/queue.zig");
+pub const wakeup = @import("internal/wakeup.zig");
 
 test {
-    _ = credentials;
-    _ = discovery;
-    _ = discovery_codec;
-    _ = framing;
-    _ = identity;
-    _ = queue;
-    _ = sdp_identity;
-    _ = server_data;
-    _ = signal;
-    _ = wakeup;
+    std.testing.refAllDecls(@This());
 }

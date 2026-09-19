@@ -1,3 +1,5 @@
+//! ICE server credential construction and validation.
+
 const std = @import("std");
 
 const maximum_urls = 64;
@@ -15,7 +17,6 @@ pub const Credentials = struct {
     ice_servers: []const IceServer = &.{},
 };
 
-/// Stores the encoded ICE URLs passed to libdatachannel.
 pub const Urls = struct {
     allocator: std.mem.Allocator,
     values: [][*:0]const u8,

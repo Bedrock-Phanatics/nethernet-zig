@@ -1,10 +1,12 @@
+//! LAN listener and dialer built on discovery signaling.
+
 const std = @import("std");
 
-const wake = @import("wakeup.zig");
-const Discovery = @import("discovery.zig").Discovery;
-const conn = @import("connection.zig");
-const auth = @import("sdp_identity.zig");
-const Signal = @import("signal.zig").Signal;
+const auth = @import("../auth/sdp.zig");
+const conn = @import("../transport/connection.zig");
+const Discovery = @import("../discovery/client.zig").Discovery;
+const Signal = @import("../protocol/signal.zig").Signal;
+const wake = @import("../internal/wakeup.zig");
 
 pub const Options = struct {
     connection: conn.Options = .{},
@@ -12,7 +14,6 @@ pub const Options = struct {
     maximum_negotiations_per_peer: usize = 4,
 };
 
-/// Discovery must outlive the listener. The caller owns accepted connections.
 pub const Listener = struct {
     allocator: std.mem.Allocator,
     discovery: *Discovery,

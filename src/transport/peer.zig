@@ -1,10 +1,12 @@
+//! Memory-safe wrapper around the libdatachannel C API.
+
 const std = @import("std");
 const builtin = @import("builtin");
 
 const framing = @import("framing.zig");
-const wake = @import("wakeup.zig");
+const Queue = @import("../internal/queue.zig").Queue;
+const wake = @import("../internal/wakeup.zig");
 const Wakeup = wake.Wakeup;
-const Queue = @import("queue.zig").Queue;
 
 const c = @cImport({
     @cDefine("RTC_ENABLE_MEDIA", "0");
@@ -70,7 +72,6 @@ pub const Diagnostics = struct {
 };
 
 pub const SelectedIceAddresses = struct {
-    /// Slices borrow the caller-provided buffers until those buffers are reused.
     local: []const u8,
     remote: []const u8,
 };
@@ -84,21 +85,17 @@ pub const Event = union(enum) {
 };
 
 pub const Options = struct {
-    /// Aggregate callback storage for two maximum-sized fragments.
     queue_bytes: usize = maximum_signal_size,
     queue_entries: usize = 512,
     maximum_buffered_send: usize = 16 * 1024 * 1024 + 255,
     maximum_message_size: usize = framing.default_maximum_message_size,
     ice_servers: []const [*:0]const u8 = &.{},
     disable_trickle: bool = false,
-    /// Opt-in until queue-pressure benchmarks justify changing the default.
     drop_unreliable_on_pressure: bool = false,
     unreliable_reserve_bytes: usize = framing.maximum_segment_payload + 1,
     unreliable_reserve_entries: usize = 1,
 };
 
-/// Use the WebRTC peer from one owner. Callbacks write to a bounded queue.
-/// The allocator and I/O context must outlive it.
 pub const Peer = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -197,8 +194,6 @@ pub const Peer = struct {
         self.state = .closed;
         self.drain_queued_on_close = false;
         self.notify();
-        // Query leases hold native IDs stable. Waiting releases the callback
-        // mutex, so a native operation may still run its callbacks.
         while (self.active_native_queries != 0)
             self.native_condition.waitUncancelable(self.io, &self.mutex);
         const id = self.id;
@@ -207,7 +202,6 @@ pub const Peer = struct {
         self.channels = .{ -1, -1 };
         self.mutex.unlock(self.io);
 
-        // Never wait for native callbacks while holding their mutex.
         if (id >= 0) _ = c.rtcDeletePeerConnection(id);
         for (channels) |channel| {
             if (channel >= 0) _ = c.rtcDeleteDataChannel(channel);
@@ -219,7 +213,6 @@ pub const Peer = struct {
         self.mutex.unlock(self.io);
     }
 
-    /// transport-level data may still be in flight when this returns
     pub fn closeGracefully(self: *Peer, timeout_ms: u32) !void {
         if (timeout_ms == 0) return error.InvalidConfiguration;
         return gracefulDrain(Peer, self, self.io, timeout_ms);
@@ -258,7 +251,6 @@ pub const Peer = struct {
     fn forceClose(self: *Peer) void {
         self.close();
     }
-    /// Call this once when the owner is finished with the peer.
     pub fn destroy(self: *Peer) void {
         self.close();
 
@@ -268,7 +260,6 @@ pub const Peer = struct {
         allocator.destroy(self);
     }
 
-    /// Owner only. Detach before freeing the wakeup.
     pub fn subscribe(self: *Peer, wakeup: ?*Wakeup) void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -276,7 +267,6 @@ pub const Peer = struct {
         self.notify();
     }
 
-    // Caller holds the mutex.
     fn notify(self: *Peer) void {
         self.wakeup.signal(self.io);
         if (self.subscriber) |wakeup| wakeup.signal(self.io);
@@ -288,7 +278,6 @@ pub const Peer = struct {
         return if (signals_only) self.queue.hasTagBelow(3) else self.queue.count != 0;
     }
 
-    /// Whether the next poll can produce negotiation data larger than a packet.
     pub fn needsNegotiationBuffer(self: *Peer) bool {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -386,7 +375,6 @@ pub const Peer = struct {
         };
     }
 
-    /// Copies the selected ICE addresses into caller-owned buffers.
     pub fn selectedIceAddresses(
         self: *Peer,
         local_buffer: []u8,
@@ -494,7 +482,6 @@ pub const Peer = struct {
         try check(c.rtcSetLocalDescription(handles.id, "offer"));
     }
 
-    /// Verify the SDP identity before setting the remote description.
     pub fn remoteDescription(
         self: *Peer,
         sdp: [:0]const u8,
@@ -612,7 +599,6 @@ pub const Peer = struct {
 
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        // A callback may have invalidated draining while the mutex was free.
         if (!self.canPollLocked(signals_only)) return error.ConnectionClosed;
 
         const entry = (if (signals_only)
@@ -630,7 +616,6 @@ pub const Peer = struct {
         };
     }
 
-    /// Caller holds the callback mutex.
     fn canPollLocked(self: *Peer, signals_only: bool) bool {
         const closed = self.stopping or self.state == .closed or
             self.state == .failed or self.state == .disconnected;
@@ -639,7 +624,6 @@ pub const Peer = struct {
             self.drain_queued_on_close and self.queue.count != 0;
     }
 
-    /// A partial native send closes the peer so later frames cannot be corrupted.
     pub fn send(
         self: *Peer,
         data: []const u8,
@@ -701,8 +685,6 @@ pub const Peer = struct {
         }
     }
 
-    // Reject channels as soon as libdatachannel exposes them. Only the two
-    // protocol channels are kept; everything else is deleted below.
     fn attach(self: *Peer, channel: c_int) !void {
         var transferred = false;
         errdefer if (!transferred) {
@@ -743,7 +725,6 @@ pub const Peer = struct {
         transferred = true;
         self.mutex.unlock(self.io);
 
-        // The peer owns this channel from this point on.
         c.rtcSetUserPointer(channel, self);
 
         try check(c.rtcSetOpenCallback(channel, onOpen));
@@ -752,7 +733,6 @@ pub const Peer = struct {
         try check(c.rtcSetErrorCallback(channel, onError));
         try check(c.rtcSetBufferedAmountLowThreshold(channel, 0));
         try check(c.rtcSetBufferedAmountLowCallback(channel, onBufferedAmountLow));
-        // onOpen is not called for channels that are already open.
         self.mutex.lockUncancelable(self.io);
         self.notify();
         self.mutex.unlock(self.io);
@@ -1007,6 +987,7 @@ fn gracefulDrain(
         try target.wakeup.wait(io, timeout);
     }
 }
+
 fn check(result: c_int) error{WebRtcFailure}!void {
     if (result < 0) return error.WebRtcFailure;
 }
@@ -1103,6 +1084,7 @@ test "graceful drain force closes on native failure" {
     try failure.await(io);
     try std.testing.expect(harness.closed.load(.acquire));
 }
+
 test "graceful close handles an empty native buffer and repeated close" {
     const peer = try Peer.create(std.testing.allocator, std.testing.io, .{});
     defer peer.destroy();
@@ -1112,6 +1094,7 @@ test "graceful close handles an empty native buffer and repeated close" {
     peer.close();
     try std.testing.expectEqual(State.closed, peer.getState());
 }
+
 fn testDataChannel(peer: *Peer, label: [:0]const u8) !c_int {
     const channel = c.rtcCreateDataChannel(peer.id, label);
     try check(channel);
@@ -1392,6 +1375,7 @@ test "remote data channel flood retains no rejected C API handles" {
     try std.testing.expectEqual(State.failed, peer.getState());
     try std.testing.expectEqualSlices(c_int, &.{ -1, -1 }, &peer.channels);
 }
+
 test "native callback queue exhaustion fails closed with bounded storage" {
     const peer = try Peer.create(
         std.testing.allocator,

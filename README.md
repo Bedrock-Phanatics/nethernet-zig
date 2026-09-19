@@ -11,6 +11,26 @@ unreliable WebRTC DataChannels through libdatachannel.
 - Bounded queues, signaling, candidates, and message sizes.
 - Native WebRTC integration with pinned libdatachannel and Mbed TLS versions.
 
+## Source layout
+
+The library is organized by responsibility. Public consumers import only
+`src/root.zig`; `src/core.zig` is the native-free entry point used by protocol
+tests and fuzzing.
+
+```text
+src/
+├── auth/       identity tokens, SDP assertions, and ICE credentials
+├── discovery/  LAN discovery codec, client, and server advertisements
+├── endpoint/   HTTP and LAN connection flows
+├── internal/   private queue and wakeup primitives
+├── protocol/   signaling values and stable wire error codes
+└── transport/  connection state, framing, and libdatachannel ownership
+```
+
+Files under `internal/` are implementation details and are not part of the
+compatibility surface. Tests are split into native-free protocol tests,
+integration tests backed by real WebRTC peers, fuzz targets, and benchmarks.
+
 ## Build
 
 Requires **Zig 0.16.0**, Git, CMake, and a C/C++ toolchain.

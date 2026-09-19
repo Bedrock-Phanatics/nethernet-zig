@@ -1,3 +1,5 @@
+//! Authenticated LAN discovery datagram codec.
+
 const std = @import("std");
 
 const Hmac = std.crypto.auth.hmac.sha2.HmacSha256;
@@ -21,7 +23,6 @@ pub const Decoded = struct {
     packet: Packet,
 };
 
-/// The caller provides separate buffers that the codec can reuse.
 pub const Codec = struct {
     key: [32]u8,
     enc: std.crypto.core.aes.AesEncryptCtx(Aes),
@@ -132,7 +133,6 @@ pub const Codec = struct {
         return output[0 .. padded + 32];
     }
 
-    /// The result uses the scratch buffer. Failed authentication never exposes plaintext.
     pub fn decode(
         self: *const Codec,
         datagram: []const u8,
@@ -192,7 +192,6 @@ pub const Codec = struct {
     }
 };
 
-/// Decodes authenticated payloads in the provided buffer.
 pub fn decodePayload(payload: []u8) !Decoded {
     if (payload.len < 20 or payload.len > maximum_payload) {
         return error.MalformedPacket;
@@ -236,7 +235,6 @@ pub fn decodePayload(payload: []u8) !Decoded {
                 return error.MalformedPacket;
             }
 
-            // Bedrock accepts trailing bytes after the declared string.
             break :blk .{
                 .message = .{
                     .recipient_id = std.mem.readInt(

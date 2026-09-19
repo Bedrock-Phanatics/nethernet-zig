@@ -1,6 +1,7 @@
+//! Bounded priority queue used by native callbacks.
+
 const std = @import("std");
 
-/// A single owner uses this ring with storage provided by the caller.
 pub const Queue = struct {
     pub const Entry = struct {
         tag: u8,
@@ -116,7 +117,6 @@ pub const Queue = struct {
         return false;
     }
 
-    /// Removes the first matching entry while preserving all other entry order.
     pub fn popFirstTagBelow(
         self: *Queue,
         limit: u8,

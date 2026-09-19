@@ -183,11 +183,11 @@ pub fn build(b: *std.Build) void {
     );
     wake_bench_module.addImport(
         "wakeup",
-        createModule(b, "src/wakeup.zig", target, .ReleaseFast),
+        createModule(b, "src/internal/wakeup.zig", target, .ReleaseFast),
     );
     wake_bench_module.addImport(
         "queue",
-        createModule(b, "src/queue.zig", target, .ReleaseFast),
+        createModule(b, "src/internal/queue.zig", target, .ReleaseFast),
     );
     const wake_bench = b.addExecutable(.{
         .name = "wakeup-benchmark",
@@ -207,15 +207,15 @@ pub fn build(b: *std.Build) void {
     );
     benchmark_module.addImport(
         "discovery_codec",
-        createModule(b, "src/discovery_codec.zig", target, .ReleaseFast),
+        createModule(b, "src/discovery/codec.zig", target, .ReleaseFast),
     );
     benchmark_module.addImport(
         "framing",
-        createModule(b, "src/framing.zig", target, .ReleaseFast),
+        createModule(b, "src/transport/framing.zig", target, .ReleaseFast),
     );
     benchmark_module.addImport(
         "queue",
-        createModule(b, "src/queue.zig", target, .ReleaseFast),
+        createModule(b, "src/internal/queue.zig", target, .ReleaseFast),
     );
     const benchmark = b.addExecutable(.{
         .name = "nethernet-benchmark",
@@ -235,11 +235,11 @@ pub fn build(b: *std.Build) void {
     );
     memory_module.addImport(
         "framing",
-        createModule(b, "src/framing.zig", target, .ReleaseFast),
+        createModule(b, "src/transport/framing.zig", target, .ReleaseFast),
     );
     memory_module.addImport(
         "queue",
-        createModule(b, "src/queue.zig", target, .ReleaseFast),
+        createModule(b, "src/internal/queue.zig", target, .ReleaseFast),
     );
     const memory_bench = b.addExecutable(.{
         .name = "memory-benchmark",

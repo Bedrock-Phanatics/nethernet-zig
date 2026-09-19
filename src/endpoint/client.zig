@@ -1,12 +1,12 @@
+//! HTTP signaling client and endpoint dialing.
+
 const std = @import("std");
 
-const connection = @import("connection.zig");
-const Signal = @import("signal.zig").Signal;
+const connection = @import("../transport/connection.zig");
+const Signal = @import("../protocol/signal.zig").Signal;
 
 pub const maximum_sdp_size = 1024 * 1024;
 
-/// Sends a complete SDP offer over HTTP or HTTPS. The origin must include a port.
-/// The returned answer uses the output buffer.
 pub fn exchange(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -128,7 +128,6 @@ pub fn validateOrigin(origin: []const u8) !void {
     }
 }
 
-/// Returns a ready connection owned by the caller.
 pub fn dial(
     allocator: std.mem.Allocator,
     io: std.Io,

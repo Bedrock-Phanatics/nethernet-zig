@@ -1,23 +1,24 @@
+//! Authenticated, message-oriented connection over a native peer.
+
 const std = @import("std");
 
-const wake = @import("wakeup.zig");
-const native = @import("peer.zig");
+const auth = @import("../auth/sdp.zig");
 const framing = @import("framing.zig");
-const auth = @import("sdp_identity.zig");
-const jwt = @import("identity.zig");
-const Signal = @import("signal.zig").Signal;
-
-const maximum_network_id_length = 4096;
-const maximum_signal_size = 1024 * 1024;
-
-pub const Role = enum { client, server };
+const jwt = @import("../auth/token.zig");
+const native = @import("peer.zig");
 pub const CallbackStats = native.CallbackStats;
 pub const IceState = native.IceState;
 pub const IceGatheringState = native.GatheringState;
 pub const ChannelState = native.ChannelState;
 pub const ChannelDiagnostics = native.ChannelDiagnostics;
 pub const SelectedIceAddresses = native.SelectedIceAddresses;
+const Signal = @import("../protocol/signal.zig").Signal;
+const wake = @import("../internal/wakeup.zig");
 
+const maximum_network_id_length = 4096;
+const maximum_signal_size = 1024 * 1024;
+
+pub const Role = enum { client, server };
 pub const Diagnostics = struct {
     ice_state: IceState,
     ice_gathering_state: IceGatheringState,
@@ -53,15 +54,9 @@ pub const Options = struct {
     maximum_remote_candidates: usize = 32,
     allow_anonymous: bool = false,
     identity: ?auth.Identity = null,
-    /// Reuse this key across server connections while issuing a fresh token for
-    /// every connection. Persist it across restarts for stable TOFU identity.
     server_identity_key: ?auth.KeyPair = null,
     server_identity_domain: []const u8 = "self",
-    /// When set, the remote server must present an identity accepted by this
-    /// verifier. Without it, the built-in check proves key possession only.
     verify_server: ?auth.Verifier = null,
-    /// Verifies remote clients. Kept as a fallback for clients using the
-    /// historical verifier option to check servers.
     verify_client: ?auth.Verifier = null,
 };
 
@@ -142,7 +137,6 @@ const Assembly = struct {
             return error.MessageTooLarge;
         }
 
-        // The peer poll buffer already has the required borrowed lifetime.
         if (self.decoder.used == 0) {
             if (self.decoder.failed) return error.ConnectionClosed;
             if (try framing.singleFragmentPayload(data, self.decoder.reliability)) |payload| {
@@ -172,7 +166,6 @@ const Assembly = struct {
     }
 };
 
-/// Use the connection from one owner. Event data lasts until the next poll.
 pub const Connection = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -304,8 +297,6 @@ pub const Connection = struct {
         self.peer.close();
     }
 
-    /// Stops new sends, waits for libdatachannel's channel buffer to empty,
-    /// then closes. Remote delivery requires an application acknowledgement.
     pub fn closeGracefully(self: *Connection) !void {
         try self.peer.closeGracefully(self.options.graceful_shutdown_timeout_ms);
     }
@@ -321,7 +312,6 @@ pub const Connection = struct {
         return self.peer.getState();
     }
 
-    /// Returns a point-in-time snapshot without borrowing native state.
     pub fn diagnostics(self: *Connection) Diagnostics {
         const transport = self.peer.diagnostics();
         return .{
@@ -337,7 +327,6 @@ pub const Connection = struct {
         return self.remote_candidate_count.load(.acquire);
     }
 
-    /// Returned slices borrow the supplied buffers until they are reused.
     pub fn selectedIceAddresses(
         self: *Connection,
         local_buffer: []u8,
@@ -419,7 +408,6 @@ pub const Connection = struct {
         return self.pollInternal(false);
     }
 
-    /// Lets dialers and listeners leave early messages in the queue.
     pub fn pollNegotiation(self: *Connection) !?Event {
         return self.pollInternal(true);
     }
@@ -538,7 +526,6 @@ pub const Connection = struct {
         };
     }
 
-    /// Wakeups do not extend the deadline.
     pub fn waitDeadline(self: *Connection) std.Io.Timeout {
         var result: std.Io.Timeout = .none;
         if (!self.established) {
@@ -557,7 +544,6 @@ pub const Connection = struct {
         return result;
     }
 
-    /// Call before polling to avoid missing a wakeup.
     pub fn prepareWait(self: *Connection) void {
         self.peer.wakeup.prepare();
     }
@@ -569,7 +555,6 @@ pub const Connection = struct {
         try self.peer.wakeup.wait(self.io, self.waitDeadline());
     }
 
-    /// Waits for either channel. Use poll when handling signaling yourself.
     pub fn receive(self: *Connection) !Message {
         while (true) {
             self.prepareWait();
@@ -862,6 +847,7 @@ test "bundled and trickled remote ICE candidates share one limit" {
     );
     try std.testing.expectEqual(@as(usize, 3), candidates.count);
 }
+
 test "diagnostics total buffered bytes handles unavailable channels" {
     const diagnostics: Diagnostics = .{
         .ice_state = .new,

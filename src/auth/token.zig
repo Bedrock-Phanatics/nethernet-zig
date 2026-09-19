@@ -1,8 +1,9 @@
+//! Signed client and server identity tokens.
+
 const std = @import("std");
-
 pub const Scheme = std.crypto.sign.ecdsa.EcdsaP384Sha384;
-
 const base64_url = std.base64.url_safe_no_pad;
+
 const public_key_prefix = [_]u8{
     0x30, 0x76, 0x30, 0x10, 0x06, 0x07, 0x2a, 0x86,
     0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x05, 0x2b,
@@ -114,8 +115,6 @@ pub fn parse(
     );
 }
 
-/// The caller owns the returned JWS. Detached signatures use the encoded payload,
-/// matching jose-jwt without RFC 7797 options.
 pub fn sign(
     allocator: std.mem.Allocator,
     key: Scheme.KeyPair,
@@ -208,7 +207,6 @@ pub fn verify(
     try Scheme.Signature.fromBytes(signature[0..96].*).verify(input, key);
 }
 
-/// JWT timestamps use Unix time. Connection deadlines use a monotonic clock.
 pub fn serverToken(
     allocator: std.mem.Allocator,
     key: Scheme.KeyPair,
@@ -251,8 +249,6 @@ pub fn serverToken(
     return sign(allocator, key, header, claims, false);
 }
 
-/// Client tokens use standard time checks. Bedrock server tokens skip exp and nbf,
-/// but still require a bounded iat and a valid ES384 self-signature.
 pub fn claimPublicKey(
     allocator: std.mem.Allocator,
     token: []const u8,

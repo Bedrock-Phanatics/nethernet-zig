@@ -1,7 +1,8 @@
+//! SDP identity assertion creation and verification.
+
 const std = @import("std");
 
-const jwt = @import("identity.zig");
-
+const jwt = @import("token.zig");
 pub const Key = jwt.Scheme.PublicKey;
 pub const KeyPair = jwt.Scheme.KeyPair;
 pub const IdentityKind = jwt.IdentityKind;
@@ -16,7 +17,6 @@ pub const Verifier = struct {
     verify: *const fn (?*anyopaque, []const u8) anyerror!?Key,
 };
 
-/// The token and domain are borrowed. The caller keeps the token alive.
 pub const Identity = struct {
     key: jwt.Scheme.KeyPair,
     token: []const u8,
@@ -76,7 +76,6 @@ pub fn fingerprintPayload(
     );
 }
 
-/// Returns owned SDP with the identity assertion before the first media section.
 pub fn add(
     allocator: std.mem.Allocator,
     sdp: []const u8,
@@ -150,7 +149,6 @@ pub fn add(
     );
 }
 
-/// Returns null when no identity is present. Otherwise it verifies key possession.
 pub fn verify(
     allocator: std.mem.Allocator,
     sdp: []const u8,
@@ -214,7 +212,6 @@ pub fn verify(
     const payload = try fingerprintPayload(allocator, sdp);
     defer allocator.free(payload);
 
-    // Prove key possession before asking the application to trust the identity.
     try jwt.verify(allocator, signature, key, payload);
 
     if (verifier) |application_verifier| {

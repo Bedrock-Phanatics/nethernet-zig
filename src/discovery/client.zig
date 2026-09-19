@@ -1,9 +1,11 @@
+//! LAN discovery and addressed signaling transport.
+
 const std = @import("std");
 
-const wake = @import("wakeup.zig");
-const codec = @import("discovery_codec.zig");
-const Signal = @import("signal.zig").Signal;
+const codec = @import("codec.zig");
 const ServerData = @import("server_data.zig").ServerData;
+const Signal = @import("../protocol/signal.zig").Signal;
+const wake = @import("../internal/wakeup.zig");
 
 pub const default_port = 7551;
 
@@ -19,7 +21,6 @@ pub const Known = struct {
     response: ?[]u8 = null,
 };
 
-/// Call poll from one owner. Returned responses and signals use internal storage.
 pub const Discovery = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -32,7 +33,6 @@ pub const Discovery = struct {
     buffers: []u8,
     advertisement: ?[]u8 = null,
 
-    // One packet at a time. The reader waits until decoding finishes.
     wakeup: wake.Wakeup = .{},
     consumed: std.Io.Event = .unset,
     receive_group: std.Io.Group = .init,
@@ -198,7 +198,6 @@ pub const Discovery = struct {
 
         self.last_tick = now;
 
-        // Removing the current entry keeps this iterator valid.
         var iterator = self.servers.iterator();
 
         while (iterator.next()) |entry| {

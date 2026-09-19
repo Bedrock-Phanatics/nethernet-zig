@@ -1,3 +1,5 @@
+//! Reliable and unreliable DataChannel message framing.
+
 const std = @import("std");
 
 pub const maximum_segment_payload: usize = 262143;
@@ -15,7 +17,6 @@ pub fn validateFragmentSize(size: usize) !void {
     if (size - 1 > maximum_segment_payload) return error.MessageTooLarge;
 }
 
-/// Returns a borrowed payload only when the frame is a complete message.
 pub fn singleFragmentPayload(fragment: []const u8, reliability: Reliability) !?[]const u8 {
     try validateFragmentSize(fragment.len);
     if (fragment[0] != 0) {
@@ -34,7 +35,6 @@ pub fn validateMessageSize(size: usize, reliability: Reliability, limit: usize) 
     }
 }
 
-/// The message stays borrowed while the caller reuses the output buffer.
 pub const Encoder = struct {
     data: []const u8,
     offset: usize = 0,
@@ -70,8 +70,6 @@ pub const Encoder = struct {
     }
 };
 
-/// Reassembles WebRTC messages in storage provided by the caller.
-/// Results remain valid until the next push or reset.
 pub const Reassembler = struct {
     storage: []u8,
     reliability: Reliability,

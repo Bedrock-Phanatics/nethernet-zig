@@ -1,9 +1,11 @@
+//! HTTP signaling listener and status endpoint.
+
 const std = @import("std");
 
-const conn = @import("connection.zig");
-const auth = @import("sdp_identity.zig");
-const Signal = @import("signal.zig").Signal;
-const maximum_sdp_size = @import("endpoint.zig").maximum_sdp_size;
+const auth = @import("../auth/sdp.zig");
+const conn = @import("../transport/connection.zig");
+const maximum_sdp_size = @import("client.zig").maximum_sdp_size;
+const Signal = @import("../protocol/signal.zig").Signal;
 
 pub const maximum_status_response_size = 16 * 1024;
 
@@ -28,13 +30,9 @@ pub const Options = struct {
     maximum_http_workers: usize = 32,
     maximum_pending_accepts: usize = 64,
     request_timeout_ms: u32 = 15000,
-    /// Called concurrently by HTTP workers. Returned strings must remain valid
-    /// while the listener is running.
     status_provider: ?StatusProvider = null,
 };
 
-/// Uses a fixed worker pool. The allocator and verifier must support concurrent calls.
-/// HTTPS must be handled by an upstream proxy.
 pub const Listener = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -114,7 +112,6 @@ pub const Listener = struct {
         return self;
     }
 
-    /// The caller owns the returned connection, even after the listener closes.
     pub fn accept(self: *Listener) !*conn.Connection {
         const connection = try self.accepted.getOne(self.io);
         self.releaseAccept();
@@ -408,6 +405,7 @@ pub const Listener = struct {
         accept_reserved = false;
     }
 };
+
 fn encodeStatus(status: ServerStatus, output: []u8) ![]const u8 {
     if (!std.unicode.utf8ValidateSlice(status.name) or
         !std.unicode.utf8ValidateSlice(status.version) or

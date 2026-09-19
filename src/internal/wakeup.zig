@@ -1,8 +1,7 @@
+//! Edge-safe wakeups and timeout helpers.
+
 const std = @import("std");
 
-/// One waiter, many senders. Prepare, check for work, then wait.
-/// Signal after publishing work. Never prepare during a wait.
-/// Keep wakeups alive until all senders and waiters finish.
 pub const Wakeup = struct {
     event: std.Io.Event = .unset,
 
@@ -14,7 +13,6 @@ pub const Wakeup = struct {
         self.event.set(io);
     }
 
-    /// Recheck state and deadlines after waking.
     pub fn wait(self: *Wakeup, io: std.Io, timeout: std.Io.Timeout) std.Io.Cancelable!void {
         try io.checkCancel();
         self.event.waitTimeout(io, timeout) catch |err| switch (err) {

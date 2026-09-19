@@ -1,6 +1,7 @@
+//! WebRTC signaling message representation and JSON codec.
+
 const std = @import("std");
 
-/// Parsed strings remain tied to the source buffer.
 pub const Signal = struct {
     kind: []const u8,
     connection_id: u64,

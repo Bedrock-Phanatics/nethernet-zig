@@ -1,4 +1,5 @@
-/// NetherNet signaling error codes.
+//! Stable protocol error codes sent to remote peers.
+
 pub const ErrorCode = enum(u8) {
     none = 0,
 
