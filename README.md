@@ -1,42 +1,29 @@
 # NetherNet
 
-NetherNet is a Minecraft Bedrock transport library for Zig 0.16. It provides
-LAN discovery, HTTP signaling, authenticated SDP exchange, and reliable or
-unreliable WebRTC DataChannels through libdatachannel.
+NetherNet is a Zig transport library for Minecraft Bedrock networking. It
+provides authenticated WebRTC connections over HTTP or LAN signaling, with
+reliable and unreliable message delivery through libdatachannel.
 
 ## Features
 
-- Endpoint and LAN connection flows.
-- Reliable and unreliable message transport.
-- Bounded queues, signaling, candidates, and message sizes.
-- Native WebRTC integration with pinned libdatachannel and Mbed TLS versions.
+- HTTP endpoint and LAN discovery connection flows
+- Reliable and unreliable DataChannel messages
+- Authenticated SDP exchange and configurable identity verification
+- Bounded queues, message sizes, candidates, and signaling payloads
+- Graceful shutdown, connection diagnostics, and transport statistics
 
-## Source layout
+## Requirements
 
-The library is organized by responsibility. Public consumers import only
-`src/root.zig`; `src/core.zig` is the native-free entry point used by protocol
-tests and fuzzing.
-
-```text
-src/
-├── auth/       identity tokens, SDP assertions, and ICE credentials
-├── discovery/  LAN discovery codec, client, and server advertisements
-├── endpoint/   HTTP and LAN connection flows
-├── internal/   private queue and wakeup primitives
-├── protocol/   signaling values and stable wire error codes
-└── transport/  connection state, framing, and libdatachannel ownership
-```
-
-Files under `internal/` are implementation details and are not part of the
-compatibility surface. Tests are split into native-free protocol tests,
-integration tests backed by real WebRTC peers, fuzz targets, and benchmarks.
+- Zig 0.16.0
+- Git and CMake
+- A C/C++ toolchain supported by libdatachannel
 
 ## Build
 
-Requires **Zig 0.16.0**, Git, CMake, and a C/C++ toolchain.
+Set up the pinned native dependencies, then build in `ReleaseSafe` mode:
 
 ```sh
-# Linux/macOS
+# Linux and macOS
 sh tools/setup-native.sh
 zig build -Doptimize=ReleaseSafe
 ```
@@ -47,18 +34,10 @@ powershell -ExecutionPolicy Bypass -File tools/setup-native.ps1
 zig build -Doptimize=ReleaseSafe
 ```
 
-Use `-Dnative-prefix=/path/to/prefix` to provide an existing patched native
-installation.
+An existing patched libdatachannel installation can be selected with
+`-Dnative-prefix=/path/to/prefix`.
 
-## API
-
-| API | Purpose |
-| --- | --- |
-| `dialEndpoint` | Connect through HTTP signaling. |
-| `EndpointListener` | Accept HTTP-signaled connections. |
-| `dialLan` | Connect through LAN discovery/signaling. |
-| `LanListener` | Accept LAN connections. |
-| `Connection` | Send, receive, inspect, and close a connection. |
+## Quick start
 
 ```zig
 const std = @import("std");
@@ -75,13 +54,30 @@ pub fn main(init: std.process.Init) !void {
     defer connection.destroy();
 
     try connection.send("hello", .reliable);
+
     const message = try connection.receive();
-    std.debug.print("{s}\n", .{message.data});
+    std.debug.print("received: {s}\n", .{message.data});
 }
 ```
 
-See [`examples/client.zig`](examples/client.zig) and
-[`examples/server.zig`](examples/server.zig) for complete examples.
+Complete client and server programs are available in
+[`examples/client.zig`](examples/client.zig) and
+[`examples/server.zig`](examples/server.zig).
+
+## API overview
+
+| API | Use |
+| --- | --- |
+| `dialEndpoint` | Connect to a server through HTTP signaling. |
+| `EndpointListener` | Listen for HTTP-signaled connections. |
+| `dialLan` | Discover and connect to a server on the local network. |
+| `LanListener` | Advertise and accept connections on the local network. |
+| `Connection` | Send and receive messages, inspect state, and close a connection. |
+| `ConnectionOptions` | Configure timeouts, limits, ICE servers, and identity policy. |
+| `Identity` / `IdentityKeyPair` | Configure authenticated SDP identities. |
+
+The supported public surface is exposed by `@import("nethernet")`. Everything
+under `src/internal` is private implementation detail.
 
 ## Verification
 
@@ -93,8 +89,6 @@ zig build test-integration -Doptimize=ReleaseSafe
 zig build stress-smoke -Doptimize=ReleaseSafe
 ```
 
-Coverage-guided fuzzing is run on Linux CI with Zig's `--fuzz` mode.
-
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+Licensed under Apache-2.0. See [LICENSE](LICENSE).
