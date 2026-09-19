@@ -53,6 +53,10 @@ pub const Options = struct {
     maximum_remote_candidates: usize = 32,
     allow_anonymous: bool = false,
     identity: ?auth.Identity = null,
+    /// Reuse this key across server connections while issuing a fresh token for
+    /// every connection. Persist it across restarts for stable TOFU identity.
+    server_identity_key: ?auth.KeyPair = null,
+    server_identity_domain: []const u8 = "self",
     /// When set, the remote server must present an identity accepted by this
     /// verifier. Without it, the built-in check proves key possession only.
     verify_server: ?auth.Verifier = null,
@@ -81,7 +85,9 @@ fn validateOptions(options: Options) !void {
         options.negotiation_timeout_ms == 0 or
         options.connection_timeout_ms == 0 or
         options.reassembly_timeout_ms == 0 or
-        options.graceful_shutdown_timeout_ms == 0)
+        options.graceful_shutdown_timeout_ms == 0 or
+        options.server_identity_domain.len == 0 or
+        options.server_identity_domain.len > 255)
     {
         return error.InvalidConfiguration;
     }
@@ -260,12 +266,17 @@ pub const Connection = struct {
         };
 
         if (role == .server and self.options.identity == null) {
-            const key = jwt.Scheme.KeyPair.generate(io);
+            const key = self.options.server_identity_key orelse
+                jwt.Scheme.KeyPair.generate(io);
             const timestamp = std.Io.Clock.real.now(io).toSeconds();
             const token = try jwt.serverToken(allocator, key, timestamp);
 
             self.owned_token = token;
-            self.options.identity = .{ .key = key, .token = token };
+            self.options.identity = .{
+                .key = key,
+                .token = token,
+                .domain = self.options.server_identity_domain,
+            };
         }
 
         return self;
@@ -531,7 +542,12 @@ pub const Connection = struct {
     pub fn waitDeadline(self: *Connection) std.Io.Timeout {
         var result: std.Io.Timeout = .none;
         if (!self.established) {
-            result = wake.deadline(self.answered orelse self.started, if (self.answered != null) self.options.connection_timeout_ms else self.options.negotiation_timeout_ms);
+            const started = self.answered orelse self.started;
+            const timeout_ms = if (self.answered != null)
+                self.options.connection_timeout_ms
+            else
+                self.options.negotiation_timeout_ms;
+            result = wake.deadline(started, timeout_ms);
         }
         for (&self.assemblies) |*assembly| {
             if (assembly.started) |started| {
@@ -631,7 +647,12 @@ test "remote identity verifiers are selected by connection role" {
     };
     try std.testing.expect(verifierForRole(options, .client).?.verify == Verifiers.server);
     try std.testing.expect(verifierForRole(options, .server).?.verify == Verifiers.client);
-    try std.testing.expect(verifierForRole(.{ .verify_client = .{ .verify = Verifiers.client } }, .client).?.verify == Verifiers.client);
+    try std.testing.expect(
+        verifierForRole(
+            .{ .verify_client = .{ .verify = Verifiers.client } },
+            .client,
+        ).?.verify == Verifiers.client,
+    );
 
     try std.testing.expect(remoteIdentityRequired(options, .client));
     try std.testing.expect(remoteIdentityRequired(.{

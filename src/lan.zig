@@ -3,11 +3,13 @@ const std = @import("std");
 const wake = @import("wakeup.zig");
 const Discovery = @import("discovery.zig").Discovery;
 const conn = @import("connection.zig");
+const auth = @import("sdp_identity.zig");
 const Signal = @import("signal.zig").Signal;
 
 pub const Options = struct {
     connection: conn.Options = .{},
     maximum_negotiations: usize = 64,
+    maximum_negotiations_per_peer: usize = 4,
 };
 
 /// Discovery must outlive the listener. The caller owns accepted connections.
@@ -18,13 +20,17 @@ pub const Listener = struct {
     pending: []?*conn.Connection,
     closed: bool = false,
     wakeup: wake.Wakeup = .{},
+    rejected_negotiations: u64 = 0,
 
     pub fn listen(
         allocator: std.mem.Allocator,
         discovery: *Discovery,
         options: Options,
     ) !*Listener {
-        if (options.maximum_negotiations == 0) {
+        if (options.maximum_negotiations == 0 or
+            options.maximum_negotiations_per_peer == 0 or
+            options.maximum_negotiations_per_peer > options.maximum_negotiations)
+        {
             return error.InvalidConfiguration;
         }
 
@@ -37,10 +43,18 @@ pub const Listener = struct {
         );
         @memset(pending, null);
 
+        var actual_options = options;
+        if (actual_options.connection.identity == null and
+            actual_options.connection.server_identity_key == null)
+        {
+            actual_options.connection.server_identity_key =
+                auth.KeyPair.generate(discovery.io);
+        }
+
         self.* = .{
             .allocator = allocator,
             .discovery = discovery,
-            .options = options,
+            .options = actual_options,
             .pending = pending,
         };
 
@@ -93,6 +107,10 @@ pub const Listener = struct {
         return self.pollAcceptOwned();
     }
 
+    pub fn rejectedNegotiations(self: *const Listener) u64 {
+        return self.rejected_negotiations;
+    }
+
     fn pollAcceptOwned(self: *Listener) !?*conn.Connection {
         if (self.closed) return error.ConnectionClosed;
 
@@ -140,9 +158,13 @@ pub const Listener = struct {
 
     fn handle(self: *Listener, signal: Signal) !void {
         var free_slot: ?*?*conn.Connection = null;
+        var peer_pending: usize = 0;
 
         for (self.pending) |*slot| {
             if (slot.*) |connection| {
+                if (std.mem.eql(u8, connection.remote_id, signal.network_id))
+                    peer_pending += 1;
+
                 const matches_connection =
                     connection.id == signal.connection_id and
                     std.mem.eql(u8, connection.remote_id, signal.network_id);
@@ -167,7 +189,15 @@ pub const Listener = struct {
 
         if (!std.mem.eql(u8, signal.kind, Signal.offer)) return;
 
-        const slot = free_slot orelse return;
+        if (peer_pending >= self.options.maximum_negotiations_per_peer) {
+            self.rejected_negotiations +|= 1;
+            return;
+        }
+
+        const slot = free_slot orelse {
+            self.rejected_negotiations +|= 1;
+            return;
+        };
 
         var connection_options = self.options.connection;
 

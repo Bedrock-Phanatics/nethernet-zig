@@ -1,9 +1,12 @@
 const std = @import("std");
 const build_options = @import("build_options");
-const discovery = @import("../src/discovery_codec.zig");
-const framing = @import("../src/framing.zig");
-const Signal = @import("../src/signal.zig").Signal;
-const ServerData = @import("../src/server_data.zig").ServerData;
+const core = @import("nethernet_core");
+const discovery = core.discovery_codec;
+const framing = core.framing;
+const Signal = core.Signal;
+const ServerData = core.ServerData;
+const identity = core.identity;
+const sdp_identity = core.sdp_identity;
 
 pub fn exercise(input: []u8) void {
     var scratch: [4096]u8 = undefined;
@@ -19,6 +22,19 @@ pub fn exercise(input: []u8) void {
         offset += len;
     }
     _ = discovery.decodePayload(input) catch {};
+
+    const allocator = std.testing.allocator;
+    if (identity.decode64(allocator, input)) |decoded| {
+        allocator.free(decoded);
+    } else |_| {}
+
+    if (identity.parse(allocator, input)) |parsed| {
+        parsed.deinit();
+    } else |_| {}
+
+    if (sdp_identity.fingerprintPayload(allocator, input)) |payload| {
+        allocator.free(payload);
+    } else |_| {}
 }
 
 fn fuzzOne(_: void, smith: *std.testing.Smith) !void {

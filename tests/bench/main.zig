@@ -31,7 +31,12 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(storage);
 
     var checksum: usize = 0;
-    std.debug.print("operation,bytes,iterations,ns_per_op,MiB_per_s,receive_bytes_copied_per_op,hot_path_allocations,dropped_unreliable,peer_failures\n", .{});
+    std.debug.print(
+        "operation,bytes,iterations,ns_per_op,MiB_per_s," ++
+            "receive_bytes_copied_per_op,hot_path_allocations," ++
+            "dropped_unreliable,peer_failures\n",
+        .{},
+    );
 
     const codec = discovery.Codec.init();
     for ([_]usize{ 32, 64, 128, 256, 512, 1024, 1400, 8192 }) |size| {
@@ -73,7 +78,14 @@ pub fn main(init: std.process.Init) !void {
                 }
             }
         }
-        report(io, start, "frame_reassemble", size, iterations, if (size <= framing.maximum_segment_payload) 0 else size);
+        report(
+            io,
+            start,
+            "frame_reassemble",
+            size,
+            iterations,
+            if (size <= framing.maximum_segment_payload) 0 else size,
+        );
     }
 
     // Receive-only measurements use preframed input so encoder copies are not timed.
@@ -149,7 +161,10 @@ fn report(io: std.Io, start: std.Io.Timestamp, operation: []const u8, bytes: usi
     const elapsed: f64 = @floatFromInt(start.durationTo(std.Io.Clock.awake.now(io)).nanoseconds);
     const nanoseconds_per_operation = elapsed / @as(f64, @floatFromInt(count));
     const mebibytes_per_second = @as(f64, @floatFromInt(bytes)) / nanoseconds_per_operation * 1e9 / (1024 * 1024);
-    std.debug.print("{s},{d},{d},{d:.1},{d:.1},{d},0,0,0\n", .{ operation, bytes, count, nanoseconds_per_operation, mebibytes_per_second, copied });
+    std.debug.print(
+        "{s},{d},{d},{d:.1},{d:.1},{d},0,0,0\n",
+        .{ operation, bytes, count, nanoseconds_per_operation, mebibytes_per_second, copied },
+    );
 }
 
 fn pressureBenchmark(io: std.Io, drop_unreliable: bool) !void {

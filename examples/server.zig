@@ -16,7 +16,7 @@ pub fn main(init: std.process.Init) !void {
     );
     defer listener.destroy();
 
-    std.debug.print("Echo listener on http://127.0.0.1:18750\n", .{});
+    std.debug.print("NetherNet server on http://127.0.0.1:18750\n", .{});
 
     const connection = try listener.accept();
     defer connection.destroy();

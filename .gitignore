@@ -1,23 +1,26 @@
-# Build output and local native dependencies
+# Build output
 .zig-cache/
 zig-out/
 .deps/
 artifacts/
 
-# Editor state
-.idea/
-.vscode/
-
-# Local files
+# Local documentation and diagnostics
+/docs/
 *.log
 *.tmp
 *.pid
+
+# Local configuration
 .env
 .env.*
 !.env.example
 *.key
 *.pfx
 *.p12
+
+# Editors and operating systems
+.idea/
+.vscode/
 .DS_Store
 Thumbs.db
 Desktop.ini

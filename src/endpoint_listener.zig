@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const conn = @import("connection.zig");
+const auth = @import("sdp_identity.zig");
 const Signal = @import("signal.zig").Signal;
 const maximum_sdp_size = @import("endpoint.zig").maximum_sdp_size;
 
@@ -24,6 +25,7 @@ pub const StatusProvider = struct {
 pub const Options = struct {
     connection: conn.Options = .{},
     maximum_negotiations: usize = 8,
+    maximum_http_workers: usize = 32,
     maximum_pending_accepts: usize = 64,
     request_timeout_ms: u32 = 15000,
     /// Called concurrently by HTTP workers. Returned strings must remain valid
@@ -44,6 +46,7 @@ pub const Listener = struct {
     slots: []*conn.Connection,
     accept_mutex: std.Io.Mutex = .init,
     reserved_accepts: usize = 0,
+    active_negotiations: usize = 0,
     closed: bool = false,
 
     pub fn listen(
@@ -54,6 +57,8 @@ pub const Listener = struct {
     ) !*Listener {
         if (options.maximum_negotiations == 0 or
             options.maximum_negotiations > 1024 or
+            options.maximum_http_workers == 0 or
+            options.maximum_http_workers > 4096 or
             options.maximum_pending_accepts == 0 or
             options.request_timeout_ms == 0)
         {
@@ -72,11 +77,19 @@ pub const Listener = struct {
         var server = try address.listen(io, .{});
         errdefer server.deinit(io);
 
+        var actual_options = options;
+        if (actual_options.connection.identity == null and
+            actual_options.connection.server_identity_key == null)
+        {
+            actual_options.connection.server_identity_key =
+                auth.KeyPair.generate(io);
+        }
+
         self.* = .{
             .allocator = allocator,
             .io = io,
             .server = server,
-            .options = options,
+            .options = actual_options,
             .slots = slots,
             .accepted = .init(slots),
         };
@@ -90,7 +103,11 @@ pub const Listener = struct {
             } else |_| {}
         }
 
-        for (0..options.maximum_negotiations) |_| {
+        const worker_count = @max(
+            actual_options.maximum_http_workers,
+            actual_options.maximum_negotiations,
+        );
+        for (0..worker_count) |_| {
             try self.group.concurrent(io, worker, .{self});
         }
 
@@ -117,6 +134,22 @@ pub const Listener = struct {
         defer self.accept_mutex.unlock(self.io);
         std.debug.assert(self.reserved_accepts != 0);
         self.reserved_accepts -= 1;
+    }
+
+    fn reserveNegotiation(self: *Listener) bool {
+        self.accept_mutex.lockUncancelable(self.io);
+        defer self.accept_mutex.unlock(self.io);
+        if (self.active_negotiations >= self.options.maximum_negotiations)
+            return false;
+        self.active_negotiations += 1;
+        return true;
+    }
+
+    fn releaseNegotiation(self: *Listener) void {
+        self.accept_mutex.lockUncancelable(self.io);
+        defer self.accept_mutex.unlock(self.io);
+        std.debug.assert(self.active_negotiations != 0);
+        self.active_negotiations -= 1;
     }
 
     pub fn close(self: *Listener) void {
@@ -303,6 +336,14 @@ pub const Listener = struct {
         var accept_reserved = true;
         defer if (accept_reserved) self.releaseAccept();
 
+        if (!self.reserveNegotiation()) {
+            return request.respond("Negotiation capacity reached", .{
+                .status = .service_unavailable,
+                .keep_alive = false,
+            });
+        }
+        defer self.releaseNegotiation();
+
         var connection_options = self.options.connection;
         connection_options.native.disable_trickle = true;
 
@@ -419,10 +460,12 @@ test "server status JSON is bounded and escaped" {
         .game_type = 1,
     }, &output);
 
-    try std.testing.expectEqualStrings(
-        "{\"name\":\"Nether \\\"Server\\\"\\\\One\\n\",\"protocol\":800,\"version\":\"1.21.0\",\"level\":\"Snowman ☃\\t\",\"gameType\":1,\"players\":3,\"maxPlayers\":20}",
-        json,
-    );
+    const expected =
+        "{\"name\":\"Nether \\\"Server\\\"\\\\One\\n\"," ++
+        "\"protocol\":800,\"version\":\"1.21.0\"," ++
+        "\"level\":\"Snowman ☃\\t\",\"gameType\":1," ++
+        "\"players\":3,\"maxPlayers\":20}";
+    try std.testing.expectEqualStrings(expected, json);
 
     try std.testing.expectError(error.InvalidServerStatus, encodeStatus(.{
         .name = "server",

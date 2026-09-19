@@ -289,8 +289,12 @@ test "reliable message-size boundaries match 255 segment representation" {
         validateMessageSize(maximum_reliable_message_size + 1, .reliable, maximum_reliable_message_size + 1),
     );
 
-    const exact_segments = (maximum_reliable_message_size + maximum_segment_payload - 1) / maximum_segment_payload;
-    const overflow_segments = (maximum_reliable_message_size + 1 + maximum_segment_payload - 1) / maximum_segment_payload;
+    const exact_segments =
+        (maximum_reliable_message_size + maximum_segment_payload - 1) /
+        maximum_segment_payload;
+    const overflow_segments =
+        (maximum_reliable_message_size + 1 + maximum_segment_payload - 1) /
+        maximum_segment_payload;
     try std.testing.expectEqual(@as(usize, maximum_segments), exact_segments);
     try std.testing.expectEqual(@as(usize, maximum_segments + 1), overflow_segments);
 }

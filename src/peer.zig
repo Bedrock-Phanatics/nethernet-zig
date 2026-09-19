@@ -241,12 +241,12 @@ pub const Peer = struct {
     }
 
     fn bufferedAmount(self: *Peer) !usize {
-        self.mutex.lockUncancelable(self.io);
-        const channels = self.channels;
-        self.mutex.unlock(self.io);
+        const handles = self.acquireNativeHandles() orelse
+            return error.ConnectionClosed;
+        defer self.releaseNativeHandles();
 
         var total: usize = 0;
-        for (channels) |channel| {
+        for (handles.channels) |channel| {
             if (channel < 0) continue;
             const amount = c.rtcGetBufferedAmount(channel);
             try check(amount);
@@ -343,6 +343,20 @@ pub const Peer = struct {
         return .{ .id = self.id, .channels = self.channels };
     }
 
+    fn acquireReadyChannels(self: *Peer) ?[2]c_int {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+
+        if (self.stopping or self.send_stopped or
+            self.state != .connected or self.id < 0)
+        {
+            return null;
+        }
+
+        self.active_native_queries += 1;
+        return self.channels;
+    }
+
     fn releaseNativeHandles(self: *Peer) void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -427,15 +441,10 @@ pub const Peer = struct {
     }
 
     pub fn ready(self: *Peer) bool {
-        self.mutex.lockUncancelable(self.io);
+        const channels = self.acquireReadyChannels() orelse return false;
+        defer self.releaseNativeHandles();
 
-        const channels = self.channels;
-        const connected = self.state == .connected and !self.stopping and !self.send_stopped;
-
-        self.mutex.unlock(self.io);
-
-        return connected and
-            channels[0] >= 0 and
+        return channels[0] >= 0 and
             channels[1] >= 0 and
             c.rtcIsOpen(channels[0]) and
             c.rtcIsOpen(channels[1]);
@@ -443,6 +452,11 @@ pub const Peer = struct {
 
     pub fn offer(self: *Peer) !void {
         if (self.getState() != .new) return error.InvalidState;
+
+        const handles = self.acquireNativeHandles() orelse
+            return error.ConnectionClosed;
+        var handles_acquired = true;
+        defer if (handles_acquired) self.releaseNativeHandles();
 
         for ([_][:0]const u8{
             "ReliableDataChannel",
@@ -453,14 +467,18 @@ pub const Peer = struct {
             init.reliability.unreliable = index == 1;
             init.reliability.maxRetransmits = 0;
 
-            const channel = c.rtcCreateDataChannelEx(self.id, label, &init);
+            const channel = c.rtcCreateDataChannelEx(handles.id, label, &init);
 
             if (channel < 0) {
+                self.releaseNativeHandles();
+                handles_acquired = false;
                 self.close();
                 return error.WebRtcFailure;
             }
 
             self.attach(channel) catch |err| {
+                self.releaseNativeHandles();
+                handles_acquired = false;
                 self.close();
                 return err;
             };
@@ -473,7 +491,7 @@ pub const Peer = struct {
         self.notify();
         self.mutex.unlock(self.io);
 
-        try check(c.rtcSetLocalDescription(self.id, "offer"));
+        try check(c.rtcSetLocalDescription(handles.id, "offer"));
     }
 
     /// Verify the SDP identity before setting the remote description.
@@ -497,8 +515,12 @@ pub const Peer = struct {
             return error.MalformedSignal;
         }
 
+        const handles = self.acquireNativeHandles() orelse
+            return error.ConnectionClosed;
+        defer self.releaseNativeHandles();
+
         try check(c.rtcSetRemoteDescription(
-            self.id,
+            handles.id,
             sdp,
             if (kind == .offer) "offer" else "answer",
         ));
@@ -511,20 +533,22 @@ pub const Peer = struct {
             self.notify();
             self.mutex.unlock(self.io);
 
-            try check(c.rtcSetLocalDescription(self.id, "answer"));
+            try check(c.rtcSetLocalDescription(handles.id, "answer"));
         }
     }
 
     pub fn remoteCandidate(self: *Peer, candidate: [:0]const u8) !void {
-        if (self.id < 0) return error.ConnectionClosed;
-
         if (candidate.len > 16384 or
             std.mem.indexOfScalar(u8, candidate, 0) != null)
         {
             return error.MalformedSignal;
         }
 
-        try check(c.rtcAddRemoteCandidate(self.id, candidate, "0"));
+        const handles = self.acquireNativeHandles() orelse
+            return error.ConnectionClosed;
+        defer self.releaseNativeHandles();
+
+        try check(c.rtcAddRemoteCandidate(handles.id, candidate, "0"));
     }
 
     pub fn poll(self: *Peer, output: []u8) !?Event {
@@ -558,8 +582,12 @@ pub const Peer = struct {
                 return error.InvalidConfiguration;
             }
 
+            const handles = self.acquireNativeHandles() orelse
+                return error.ConnectionClosed;
+            defer self.releaseNativeHandles();
+
             const result = c.rtcGetLocalDescription(
-                self.id,
+                handles.id,
                 output.ptr,
                 @intCast(output.len),
             );
@@ -624,9 +652,18 @@ pub const Peer = struct {
             self.options.maximum_message_size,
         );
 
-        if (!self.ready()) return error.InvalidState;
+        const channels = self.acquireReadyChannels() orelse
+            return error.InvalidState;
+        var handles_acquired = true;
+        defer if (handles_acquired) self.releaseNativeHandles();
 
-        const channel = self.channels[@intFromEnum(reliability)];
+        if (channels[0] < 0 or channels[1] < 0 or
+            !c.rtcIsOpen(channels[0]) or !c.rtcIsOpen(channels[1]))
+        {
+            return error.InvalidState;
+        }
+
+        const channel = channels[@intFromEnum(reliability)];
         const buffered = c.rtcGetBufferedAmount(channel);
         try check(buffered);
 
@@ -656,6 +693,8 @@ pub const Peer = struct {
                 fragment.ptr,
                 @intCast(fragment.len),
             )) catch |err| {
+                self.releaseNativeHandles();
+                handles_acquired = false;
                 self.close();
                 return err;
             };

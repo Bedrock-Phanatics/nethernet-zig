@@ -3,6 +3,7 @@ const std = @import("std");
 const jwt = @import("identity.zig");
 
 pub const Key = jwt.Scheme.PublicKey;
+pub const KeyPair = jwt.Scheme.KeyPair;
 pub const IdentityKind = jwt.IdentityKind;
 
 pub const Fingerprint = struct {
@@ -243,9 +244,16 @@ test "SDP identity requires a valid fingerprint and explicit verifier acceptance
     const key = try jwt.Scheme.KeyPair.generateDeterministic(.{3} ** 48);
     const token = try jwt.serverToken(allocator, key, 1000);
     defer allocator.free(token);
-    const signed = try add(allocator, "v=0\r\na=fingerprint:sha-256 00:11\r\n", .{ .key = key, .token = token });
+    const signed = try add(
+        allocator,
+        "v=0\r\na=fingerprint:sha-256 00:11\r\n",
+        .{ .key = key, .token = token },
+    );
     defer allocator.free(signed);
-    try std.testing.expectError(error.InvalidIdentity, verify(allocator, signed, 1000, .server, .{ .verify = Rejector.reject }));
+    try std.testing.expectError(
+        error.InvalidIdentity,
+        verify(allocator, signed, 1000, .server, .{ .verify = Rejector.reject }),
+    );
 }
 
 test "identity insertion ignores m equals inside attribute values" {
@@ -253,11 +261,18 @@ test "identity insertion ignores m equals inside attribute values" {
     const key = try jwt.Scheme.KeyPair.generateDeterministic(.{4} ** 48);
     const token = try jwt.serverToken(allocator, key, 1000);
     defer allocator.free(token);
-    const source = "v=0\r\na=x:term=value\r\na=fingerprint:sha-256 00:11\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n";
+    const source =
+        "v=0\r\n" ++
+        "a=x:term=value\r\n" ++
+        "a=fingerprint:sha-256 00:11\r\n" ++
+        "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n";
     const signed = try add(allocator, source, .{ .key = key, .token = token });
     defer allocator.free(signed);
     try std.testing.expect(std.mem.indexOf(u8, signed, "a=x:term=value\r\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, signed, "a=identity:").? < std.mem.indexOf(u8, signed, "m=application").?);
+    try std.testing.expect(
+        std.mem.indexOf(u8, signed, "a=identity:").? <
+            std.mem.indexOf(u8, signed, "m=application").?,
+    );
 }
 
 test "duplicate SDP identity assertions are rejected" {
