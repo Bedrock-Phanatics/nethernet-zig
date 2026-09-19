@@ -1,40 +1,60 @@
 name: ci
+
 on:
   push:
   pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
-  test:
+  core:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.16.0
-      - run: zig version
-      - run: zig fmt --check build.zig build.zig.zon tests.zig native_tests.zig src tests bench examples
-      - run: sh tools/setup-native.sh
-      - run: zig build
-      - run: zig build test-native --summary all
+      - run: git diff --check
+      - run: zig fmt --check build.zig build.zig.zon src tests examples
       - run: zig build test
+      - run: zig build test -Doptimize=ReleaseSafe
       - run: zig build fuzz -Dfuzz-iterations=100000
-      - run: zig build -Doptimize=ReleaseSafe test
-      - run: zig build test-native -Doptimize=ReleaseSafe
-      - run: zig build stress-smoke -Doptimize=ReleaseSafe
+      - run: zig build fuzz --fuzz=100K -Dfuzz-iterations=1000
       - run: zig build bench
+      - run: zig build bench-memory
+      - run: zig build bench-wakeup
 
-  windows-native:
+  linux-integration:
+    needs: core
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.16.0
+      - run: sh tools/setup-native.sh
+      - run: zig build -Doptimize=ReleaseSafe
+      - run: zig build test-integration --summary all
+      - run: zig build test-integration -Doptimize=ReleaseSafe
+      - run: zig build stress-smoke -Doptimize=ReleaseSafe
+
+  windows:
+    needs: core
     runs-on: windows-2022
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.16.0
       - run: powershell -ExecutionPolicy Bypass -File tools/setup-native.ps1
-      - run: zig fmt --check build.zig build.zig.zon tests.zig native_tests.zig src tests bench examples
-      - run: zig build
-      - run: zig build test-native -Doptimize=ReleaseSafe
+      - run: zig build -Doptimize=ReleaseSafe
+      - run: zig build test-integration -Doptimize=ReleaseSafe
       - run: zig build stress-smoke -Doptimize=ReleaseSafe

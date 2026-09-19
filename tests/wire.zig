@@ -1,9 +1,14 @@
 const std = @import("std");
-const discovery = @import("../src/discovery_codec.zig");
+const discovery = @import("nethernet_core").discovery_codec;
 
 test "discovery packets match encrypted wire fixtures" {
     const Vector = struct { kind: []const u8, payload: []const u8, wire: []const u8 };
-    const vectors = try std.json.parseFromSlice([]Vector, std.testing.allocator, @embedFile("fixtures/discovery.json"), .{});
+    const vectors = try std.json.parseFromSlice(
+        []Vector,
+        std.testing.allocator,
+        @embedFile("fixtures/discovery.json"),
+        .{},
+    );
     defer vectors.deinit();
 
     const allocator = std.testing.allocator;
@@ -22,7 +27,9 @@ test "discovery packets match encrypted wire fixtures" {
     const codec = discovery.Codec.init();
     for (vectors.value) |vector| {
         const expected = try std.fmt.hexToBytes(wire, vector.wire);
-        const packet: discovery.Packet = if (std.mem.eql(u8, vector.kind, "request")) .request else if (std.mem.eql(u8, vector.kind, "response"))
+        const packet: discovery.Packet = if (std.mem.eql(u8, vector.kind, "request"))
+            .request
+        else if (std.mem.eql(u8, vector.kind, "response"))
             .{ .response = try std.fmt.hexToBytes(payload, vector.payload) }
         else
             .{ .message = .{ .recipient_id = 9, .data = vector.payload } };

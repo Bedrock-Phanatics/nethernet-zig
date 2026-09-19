@@ -1,42 +1,46 @@
-//! NetherNet networking for Zig 0.16.
-//! API details are in `docs/README.md`.
+//! Public NetherNet API.
 
-pub const framing = @import("framing.zig");
-pub const identity = @import("identity.zig");
-pub const credentials = @import("credentials.zig");
+const core = @import("core.zig");
 
-pub const Reliability = framing.Reliability;
+pub const credentials = core.credentials;
+pub const identity = core.identity;
+pub const framing = core.framing;
+pub const Reliability = core.Reliability;
+pub const Signal = core.Signal;
+pub const ServerData = core.ServerData;
+pub const ErrorCode = core.ErrorCode;
+pub const Identity = core.Identity;
+pub const IdentityKeyPair = core.IdentityKeyPair;
+pub const Discovery = core.Discovery;
+pub const DiscoveryOptions = core.DiscoveryOptions;
 
-pub const Signal = @import("signal.zig").Signal;
-pub const ServerData = @import("server_data.zig").ServerData;
-pub const ErrorCode = @import("error_codes.zig").ErrorCode;
+const connection = @import("transport/connection.zig");
+pub const Connection = connection.Connection;
+pub const ConnectionOptions = connection.Options;
+pub const CallbackStats = connection.CallbackStats;
+pub const ConnectionDiagnostics = connection.Diagnostics;
+pub const IceState = connection.IceState;
+pub const IceGatheringState = connection.IceGatheringState;
+pub const ChannelState = connection.ChannelState;
+pub const ChannelDiagnostics = connection.ChannelDiagnostics;
+pub const SelectedIceAddresses = connection.SelectedIceAddresses;
+pub const Address = connection.Address;
+pub const Message = connection.Message;
 
-pub const Connection = @import("connection.zig").Connection;
-pub const ConnectionOptions = @import("connection.zig").Options;
-pub const CallbackStats = @import("connection.zig").CallbackStats;
-pub const ConnectionDiagnostics = @import("connection.zig").Diagnostics;
-pub const IceState = @import("connection.zig").IceState;
-pub const IceGatheringState = @import("connection.zig").IceGatheringState;
-pub const ChannelState = @import("connection.zig").ChannelState;
-pub const ChannelDiagnostics = @import("connection.zig").ChannelDiagnostics;
-pub const SelectedIceAddresses = @import("connection.zig").SelectedIceAddresses;
-pub const Address = @import("connection.zig").Address;
-pub const Message = @import("connection.zig").Message;
+const peer = @import("transport/peer.zig");
+pub const Peer = peer.Peer;
+pub const State = peer.State;
 
-pub const Peer = @import("peer.zig").Peer;
-pub const State = @import("peer.zig").State;
+const endpoint = @import("endpoint/client.zig");
+pub const dialEndpoint = endpoint.dial;
 
-pub const Identity = @import("sdp_identity.zig").Identity;
+const endpoint_listener = @import("endpoint/listener.zig");
+pub const EndpointListener = endpoint_listener.Listener;
+pub const EndpointListenerOptions = endpoint_listener.Options;
+pub const EndpointServerStatus = endpoint_listener.ServerStatus;
+pub const EndpointStatusProvider = endpoint_listener.StatusProvider;
 
-pub const Discovery = @import("discovery.zig").Discovery;
-pub const DiscoveryOptions = @import("discovery.zig").Options;
-
-pub const LanListener = @import("lan.zig").Listener;
-pub const LanListenerOptions = @import("lan.zig").Options;
-pub const dialLan = @import("lan.zig").dial;
-
-pub const EndpointListener = @import("endpoint_listener.zig").Listener;
-pub const EndpointListenerOptions = @import("endpoint_listener.zig").Options;
-pub const EndpointServerStatus = @import("endpoint_listener.zig").ServerStatus;
-pub const EndpointStatusProvider = @import("endpoint_listener.zig").StatusProvider;
-pub const dialEndpoint = @import("endpoint.zig").dial;
+const lan = @import("endpoint/lan.zig");
+pub const LanListener = lan.Listener;
+pub const LanListenerOptions = lan.Options;
+pub const dialLan = lan.dial;

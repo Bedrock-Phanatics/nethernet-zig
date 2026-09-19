@@ -1,0 +1,16 @@
+NetherNet
+Copyright contributors to the NetherNet project.
+
+NetherNet uses native components under their respective licenses:
+
+- libdatachannel v0.24.5 — MPL-2.0
+- Mbed TLS 3.6.7 — Apache-2.0 OR GPL-2.0-or-later
+- libjuice — MPL-2.0
+- usrsctp — BSD-3-Clause
+- plog — MIT
+
+The exact libdatachannel and Mbed TLS revisions are pinned by tools/setup-native.*.
+Media and WebSocket support are disabled. The repository patches
+libdatachannel's SCTP receive bounds handling; when distributing native
+binaries, retain applicable upstream notices and satisfy the source-disclosure
+requirements of MPL-2.0 for modified MPL-covered files.
