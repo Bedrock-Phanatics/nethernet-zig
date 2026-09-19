@@ -119,7 +119,12 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_unit_tests.step);
     test_step.dependOn(&run_wire_tests.step);
 
-    const fuzz_module = createModule(b, "tests/fuzz.zig", target, optimize);
+    const fuzz_module = b.createModule(.{
+        .root_source_file = b.path("tests/fuzz.zig"),
+        .error_tracing = false,
+        .target = target,
+        .optimize = optimize,
+    });
     fuzz_module.addImport("nethernet_core", core);
     fuzz_module.addOptions("build_options", build_options);
     const fuzz_tests = b.addTest(.{
