@@ -12,6 +12,21 @@ reliable and unreliable message delivery through libdatachannel.
 - Bounded queues, message sizes, candidates, and signaling payloads
 - Graceful shutdown, connection diagnostics, and transport statistics
 
+## Ports
+
+| Port | Protocol | Use |
+| --- | --- | --- |
+| 19132 | TCP | Direct HTTP signaling (`/v1/join`) |
+| negotiated | UDP | ICE, DTLS and SCTP traffic |
+| 7551 | UDP | LAN discovery |
+
+Signaling only carries the SDP exchange; gameplay moves onto the negotiated UDP
+ports, so both are required. Pin the UDP range with
+`.native = .{ .port_range_begin = 30000, .port_range_end = 30010 }`.
+
+LAN discovery is separate. `127.0.0.1:7551` does not work in the Add Server
+screen, which needs the signaling port `127.0.0.1:19132`.
+
 ## Requirements
 
 - Zig 0.16.0
@@ -64,6 +79,28 @@ Complete client and server programs are available in
 [`examples/client.zig`](examples/client.zig) and
 [`examples/server.zig`](examples/server.zig).
 
+## Minecraft smoke test
+
+[`examples/minecraft.zig`](examples/minecraft.zig) binds `0.0.0.0:19132` and
+reports each transport stage up to the first Bedrock payload, which it hands
+back undecoded. It is a transport test, not a Minecraft server.
+
+```sh
+./zig-out/bin/minecraft   # then Add Server -> 127.0.0.1:19132
+```
+
+Its identity is persisted to `nethernet-identity.der` (`--identity` to choose).
+Clients pin the server key on first connection over plain HTTP, so a key that
+changes on restart re-prompts every player. An existing P-384 key works if it is
+PKCS#8:
+
+```sh
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-384 |
+    openssl pkcs8 -topk8 -nocrypt -outform DER -out nethernet-identity.der
+```
+
+Clients must present an identity unless `--offline` is passed.
+
 ## API overview
 
 | API | Use |
@@ -75,6 +112,7 @@ Complete client and server programs are available in
 | `Connection` | Send and receive messages, inspect state, and close a connection. |
 | `ConnectionOptions` | Configure timeouts, limits, ICE servers, and identity policy. |
 | `Identity` / `IdentityKeyPair` | Configure authenticated SDP identities. |
+| `identity_file` | Load or create a persistent PKCS#8 P-384 server identity. |
 
 The supported public surface is exposed by `@import("nethernet")`. Everything
 under `src/internal` is private implementation detail.

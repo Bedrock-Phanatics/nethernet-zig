@@ -161,6 +161,7 @@ pub fn build(b: *std.Build) void {
     inline for (.{
         .{ "client", "examples/client.zig" },
         .{ "server", "examples/server.zig" },
+        .{ "minecraft", "examples/minecraft.zig" },
     }) |example| {
         const example_module = createModule(b, example[1], target, optimize);
         example_module.addImport("nethernet", nethernet);
