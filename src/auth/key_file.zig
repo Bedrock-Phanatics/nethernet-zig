@@ -72,7 +72,8 @@ pub fn decode(bytes: []const u8) !KeyPair {
 pub fn loadOrCreate(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !KeyPair {
     const cwd: std.Io.Dir = .cwd();
 
-    while (true) {
+    // Bounded: a file repeatedly created and removed must not spin forever.
+    for (0..8) |_| {
         if (cwd.readFileAlloc(io, path, allocator, .limited(maximum_size))) |bytes| {
             defer {
                 std.crypto.secureZero(u8, bytes);
@@ -100,6 +101,8 @@ pub fn loadOrCreate(io: std.Io, allocator: std.mem.Allocator, path: []const u8) 
 
         return key;
     }
+
+    return error.IdentityRaceLost;
 }
 
 const private_permissions: std.Io.File.Permissions =
