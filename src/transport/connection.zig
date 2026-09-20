@@ -13,7 +13,7 @@ pub const ChannelState = native.ChannelState;
 pub const ChannelDiagnostics = native.ChannelDiagnostics;
 pub const SelectedIceAddresses = native.SelectedIceAddresses;
 
-const maximum_network_id_length = 4096;
+pub const maximum_network_id_length = 4096;
 const maximum_signal_size = 1024 * 1024;
 
 pub const Role = enum { client, server };

@@ -129,14 +129,23 @@ test "HTTP rejects invalid routes, network IDs, empty SDP and oversized bodies" 
     const cases = [_]Case{
         .{
             .request = "GET /v1/join HTTP/1.1\r\nHost: localhost\r\n\r\n",
-            .status = "200",
+            .status = "503",
         },
         .{
             .request = "GET /bad HTTP/1.1\r\nHost: localhost\r\n\r\n",
             .status = "404",
         },
+        // Opaque IDs are valid, so this reaches the SDP check and fails there.
         .{
             .request = "POST /v1/join/nope HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+            .status = "400",
+        },
+        .{
+            .request = "POST /v1/join/ HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+            .status = "400",
+        },
+        .{
+            .request = "POST /v1/join/one/two HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
             .status = "400",
         },
         .{

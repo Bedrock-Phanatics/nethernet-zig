@@ -146,10 +146,15 @@ pub fn build(b: *std.Build) void {
     const run_integration = b.addRunArtifact(integration_tests);
     addNativeRuntime(b, run_integration, target, native_prefix);
 
+    const library_tests = b.addTest(.{ .root_module = nethernet });
+    const run_library_tests = b.addRunArtifact(library_tests);
+    addNativeRuntime(b, run_library_tests, target, native_prefix);
+
     const integration_step = b.step(
         "test-integration",
         "Run real WebRTC, endpoint, LAN, and network integration tests",
     );
+    integration_step.dependOn(&run_library_tests.step);
     integration_step.dependOn(&run_integration.step);
     b.step("test-native", "Alias for test-integration").dependOn(integration_step);
 

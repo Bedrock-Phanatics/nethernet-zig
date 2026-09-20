@@ -7,6 +7,7 @@ const Signal = core.Signal;
 const ServerData = core.ServerData;
 const identity = core.identity;
 const sdp_identity = core.sdp_identity;
+const identity_file = core.identity_file;
 
 pub fn exercise(input: []u8) void {
     var scratch: [4096]u8 = undefined;
@@ -35,6 +36,8 @@ pub fn exercise(input: []u8) void {
     if (sdp_identity.fingerprintPayload(allocator, input)) |payload| {
         allocator.free(payload);
     } else |_| {}
+
+    _ = identity_file.decode(input) catch {};
 }
 
 fn fuzzOne(_: void, smith: *std.testing.Smith) !void {

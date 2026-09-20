@@ -88,6 +88,10 @@ pub const Options = struct {
     maximum_buffered_send: usize = 16 * 1024 * 1024 + 255,
     maximum_message_size: usize = framing.default_maximum_message_size,
     ice_servers: []const [*:0]const u8 = &.{},
+    bind_address: ?[:0]const u8 = null,
+    port_range_begin: u16 = 0,
+    port_range_end: u16 = 0,
+    enable_ice_udp_mux: bool = false,
     disable_trickle: bool = false,
     drop_unreliable_on_pressure: bool = false,
     unreliable_reserve_bytes: usize = framing.maximum_segment_payload + 1,
@@ -129,6 +133,9 @@ pub const Peer = struct {
             options.queue_entries < 2 or
             options.maximum_buffered_send == 0 or
             options.ice_servers.len > 64 or
+            (options.port_range_begin == 0) != (options.port_range_end == 0) or
+            options.port_range_begin > options.port_range_end or
+            (options.bind_address != null and options.bind_address.?.len == 0) or
             (options.drop_unreliable_on_pressure and
                 (options.unreliable_reserve_bytes > options.queue_bytes or
                     options.unreliable_reserve_entries >= options.queue_entries)))
@@ -160,6 +167,10 @@ pub const Peer = struct {
         config.maxMessageSize = framing.maximum_segment_payload + 1;
         config.iceServers = @ptrCast(@constCast(options.ice_servers.ptr));
         config.iceServersCount = @intCast(options.ice_servers.len);
+        config.portRangeBegin = options.port_range_begin;
+        config.portRangeEnd = options.port_range_end;
+        config.enableIceUdpMux = options.enable_ice_udp_mux;
+        if (options.bind_address) |address| config.bindAddress = address.ptr;
 
         self.id = c.rtcCreatePeerConnection(&config);
         if (self.id < 0) return error.WebRtcFailure;
@@ -1462,4 +1473,29 @@ test "default callback queue accepts a maximum-sized signaling event" {
     peer.enqueue(0, signal);
     try std.testing.expectEqual(State.new, peer.getState());
     try std.testing.expectEqual(maximum_signal_size, peer.queue.used_bytes);
+}
+
+test "ICE port ranges and bind addresses are validated" {
+    const allocator = std.testing.allocator;
+
+    try std.testing.expectError(error.InvalidConfiguration, Peer.create(
+        allocator,
+        undefined,
+        .{ .port_range_begin = 30000 },
+    ));
+    try std.testing.expectError(error.InvalidConfiguration, Peer.create(
+        allocator,
+        undefined,
+        .{ .port_range_end = 30000 },
+    ));
+    try std.testing.expectError(error.InvalidConfiguration, Peer.create(
+        allocator,
+        undefined,
+        .{ .port_range_begin = 30010, .port_range_end = 30000 },
+    ));
+    try std.testing.expectError(error.InvalidConfiguration, Peer.create(
+        allocator,
+        undefined,
+        .{ .bind_address = "" },
+    ));
 }
