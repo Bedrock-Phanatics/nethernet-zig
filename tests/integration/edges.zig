@@ -330,3 +330,129 @@ test "status response carries exactly the fields Bedrock expects" {
     try std.testing.expectEqualStrings("1.26.51", parsed.value.object.get("version").?.string);
     try std.testing.expectEqual(@as(i64, 10), parsed.value.object.get("maxPlayers").?.integer);
 }
+
+test "listener destroyed while a negotiation is in flight" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    for (0..8) |_| {
+        const listener = try Listener.listen(
+            allocator,
+            io,
+            try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0"),
+            .{ .connection = .{ .allow_anonymous = true }, .maximum_negotiations = 2 },
+        );
+
+        const stream = try listener.server.socket.address.connect(io, .{ .mode = .stream });
+
+        var buffer: [512]u8 = undefined;
+        var writer = stream.writer(io, &buffer);
+        writer.interface.writeAll(
+            "POST /v1/join/1 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 64\r\n\r\nv=0\r\n",
+        ) catch {};
+        writer.interface.flush() catch {};
+
+        listener.destroy();
+        stream.close(io);
+    }
+}
+
+// Canceling a pending accept makes Zig 0.16 print an INVALID_PARAMETER
+// diagnostic on Windows. It is swallowed, and handle counts stay flat.
+test "repeated listener create and destroy does not leak handles" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    for (0..12) |_| {
+        const listener = try Listener.listen(
+            allocator,
+            io,
+            try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0"),
+            .{ .maximum_http_workers = 2, .maximum_negotiations = 1 },
+        );
+        listener.close();
+        listener.close();
+        listener.destroy();
+    }
+}
+
+test "an exhausted UDP port range fails instead of hanging" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    const listener = try Listener.listen(
+        allocator,
+        io,
+        try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0"),
+        .{
+            .connection = .{
+                .allow_anonymous = true,
+                .native = .{ .port_range_begin = 31301, .port_range_end = 31301 },
+            },
+            .maximum_negotiations = 2,
+            .request_timeout_ms = 2000,
+        },
+    );
+    defer listener.destroy();
+
+    const url = try origin(allocator, listener, "127.0.0.1");
+    defer allocator.free(url);
+
+    var connections: [2]?*nethernet.Connection = .{ null, null };
+    defer for (connections) |maybe| {
+        if (maybe) |connection| connection.destroy();
+    };
+
+    for (&connections, 0..) |*slot, i| {
+        slot.* = nethernet.dialEndpoint(allocator, io, url, @intCast(i + 1), .{
+            .negotiation_timeout_ms = 3000,
+            .connection_timeout_ms = 3000,
+        }) catch null;
+        if (slot.* != null) {
+            const accepted = listener.accept() catch continue;
+            accepted.destroy();
+        }
+    }
+}
+
+test "network IDs at and beyond the limit are handled over real HTTP" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const listener = try Listener.listen(
+        allocator,
+        io,
+        try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0"),
+        .{ .maximum_negotiations = 2 },
+    );
+    defer listener.destroy();
+
+    const port = listener.server.socket.address.getPort();
+
+    for ([_]usize{ 1, 4095, 4096, 4097, 8192 }) |length| {
+        const id = try allocator.alloc(u8, length);
+        defer allocator.free(id);
+        @memset(id, 'a');
+
+        const request = try std.fmt.allocPrint(
+            allocator,
+            "POST /v1/join/{s} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+            .{id},
+        );
+        defer allocator.free(request);
+
+        const stream = try listener.server.socket.address.connect(io, .{ .mode = .stream });
+        defer stream.close(io);
+
+        var write_buffer: [16384]u8 = undefined;
+        var writer = stream.writer(io, &write_buffer);
+        writer.interface.writeAll(request) catch continue;
+        writer.interface.flush() catch continue;
+
+        var read_buffer: [1024]u8 = undefined;
+        var reader = stream.reader(io, &read_buffer);
+        const prefix = reader.interface.take(12) catch continue;
+        try std.testing.expect(std.mem.startsWith(u8, prefix[9..12], "4"));
+    }
+
+    _ = port;
+}
