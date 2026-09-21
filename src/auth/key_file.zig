@@ -47,6 +47,7 @@ pub fn decode(bytes: []const u8) !KeyPair {
     const algorithm = try sequence(bytes, try expectInteger(bytes, info.start, 0));
     const key_oid = try oid(bytes, algorithm.start);
     const curve_oid = try oid(bytes, key_oid.end);
+    if (curve_oid.end != algorithm.end) return error.InvalidKeyFile;
 
     if (!std.mem.eql(u8, key_oid.contents, &ec_public_key_oid) or
         !std.mem.eql(u8, curve_oid.contents, &secp384r1_oid))
@@ -253,6 +254,28 @@ test "malformed PKCS#8 identities are rejected without panicking" {
     @memcpy(trailing[0..encoded_size], &encoded);
     trailing[encoded_size] = 0;
     try std.testing.expectError(error.InvalidKeyFile, decode(&trailing));
+
+    const info = try sequence(&encoded, 0);
+    const algorithm_index = try expectInteger(&encoded, info.start, 0);
+    const algorithm_element = try sequence(&encoded, algorithm_index);
+
+    var extra_algorithm_data: [encoded_size + 2]u8 = undefined;
+    @memcpy(
+        extra_algorithm_data[0..algorithm_element.end],
+        encoded[0..algorithm_element.end],
+    );
+    extra_algorithm_data[algorithm_element.end] = 0x05; // NULL
+    extra_algorithm_data[algorithm_element.end + 1] = 0x00;
+    @memcpy(
+        extra_algorithm_data[algorithm_element.end + 2 ..],
+        encoded[algorithm_element.end..],
+    );
+    extra_algorithm_data[2] += 2;
+    extra_algorithm_data[algorithm_index + 1] += 2;
+    try std.testing.expectError(
+        error.InvalidKeyFile,
+        decode(&extra_algorithm_data),
+    );
 
     var damaged = encoded;
 
