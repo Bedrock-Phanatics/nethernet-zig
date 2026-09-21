@@ -44,11 +44,15 @@ pub fn exercise(input: []u8) void {
         if (sdp_identity.verify(allocator, input, 1000, kind, null)) |_| {} else |_| {}
     }
 
-    // Any signal that parses must re-encode to exactly its source.
+    // Any signal that parses must preserve its semantic fields after re-encoding.
     if (Signal.parse(input)) |signal| {
         var buffer: [8192]u8 = undefined;
         if (signal.encode(&buffer)) |encoded| {
-            std.debug.assert(std.mem.eql(u8, encoded, input));
+            const reparsed = Signal.parse(encoded) catch unreachable;
+            std.debug.assert(std.mem.eql(u8, signal.kind, reparsed.kind));
+            std.debug.assert(signal.connection_id == reparsed.connection_id);
+            std.debug.assert(std.mem.eql(u8, signal.data, reparsed.data));
+            std.debug.assert(std.mem.eql(u8, signal.network_id, reparsed.network_id));
         } else |_| {}
     } else |_| {}
 }

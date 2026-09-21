@@ -401,21 +401,20 @@ test "an exhausted UDP port range fails instead of hanging" {
     const url = try origin(allocator, listener, "127.0.0.1");
     defer allocator.free(url);
 
-    var connections: [2]?*nethernet.Connection = .{ null, null };
-    defer for (connections) |maybe| {
-        if (maybe) |connection| connection.destroy();
-    };
+    const first = try nethernet.dialEndpoint(allocator, io, url, 1, .{
+        .negotiation_timeout_ms = 3000,
+        .connection_timeout_ms = 3000,
+    });
+    defer first.destroy();
 
-    for (&connections, 0..) |*slot, i| {
-        slot.* = nethernet.dialEndpoint(allocator, io, url, @intCast(i + 1), .{
-            .negotiation_timeout_ms = 3000,
-            .connection_timeout_ms = 3000,
-        }) catch null;
-        if (slot.* != null) {
-            const accepted = listener.accept() catch continue;
-            accepted.destroy();
-        }
-    }
+    const accepted = try listener.accept();
+    defer accepted.destroy();
+
+    _ = nethernet.dialEndpoint(allocator, io, url, 2, .{
+        .negotiation_timeout_ms = 3000,
+        .connection_timeout_ms = 3000,
+    }) catch return;
+    return error.ExpectedPortRangeExhaustion;
 }
 
 test "network IDs at and beyond the limit are handled over real HTTP" {
@@ -448,12 +447,12 @@ test "network IDs at and beyond the limit are handled over real HTTP" {
 
         var write_buffer: [16384]u8 = undefined;
         var writer = stream.writer(io, &write_buffer);
-        writer.interface.writeAll(request) catch continue;
-        writer.interface.flush() catch continue;
+        try writer.interface.writeAll(request);
+        try writer.interface.flush();
 
         var read_buffer: [1024]u8 = undefined;
         var reader = stream.reader(io, &read_buffer);
-        const prefix = reader.interface.take(12) catch continue;
+        const prefix = try reader.interface.take(12);
         try std.testing.expect(std.mem.startsWith(u8, prefix[9..12], "4"));
     }
 
