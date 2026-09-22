@@ -350,7 +350,22 @@ test "the local description matches current vanilla WebRTC configuration" {
         try std.Io.sleep(io, .fromMilliseconds(1), .awake);
     };
 
-    try std.testing.expect(std.mem.indexOf(u8, sdp, "a=max-message-size:262144") != null);
+    try std.testing.expect(std.mem.startsWith(u8, sdp, "v=0\r\n"));
+    const media_start = std.mem.indexOf(u8, sdp, "\r\nm=").? + 2;
+    const session = sdp[0..media_start];
+    const media_sdp = sdp[media_start..];
+    try std.testing.expect(std.mem.indexOf(u8, session, "\r\no=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, session, "\r\ns=-\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, session, "\r\nt=0 0\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, session, "a=group:BUNDLE 0\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, media_sdp, "a=mid:0\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, media_sdp, "a=setup:actpass\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, media_sdp, "a=ice-ufrag:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, media_sdp, "a=ice-pwd:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, media_sdp, "a=sctp-port:5000\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, media_sdp, "a=max-message-size:262144\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, media_sdp, "a=end-of-candidates\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sdp, "a=identity:") == null);
 
     const payload = try auth.fingerprintPayload(allocator, sdp);
     defer allocator.free(payload);
@@ -376,13 +391,25 @@ test "the local description matches current vanilla WebRTC configuration" {
     } else |_| {}
 
     var media: usize = 0;
+    var connection_count: usize = 0;
     var fingerprint_count: usize = 0;
     var candidates: usize = 0;
     var lines = std.mem.tokenizeAny(u8, sdp, "\r\n");
     while (lines.next()) |line| {
         if (std.mem.startsWith(u8, line, "m=")) {
             media += 1;
-            try std.testing.expect(std.mem.startsWith(u8, line, "m=application "));
+            var fields = std.mem.tokenizeScalar(u8, line, ' ');
+            try std.testing.expectEqualStrings("m=application", fields.next().?);
+            try std.testing.expect((try std.fmt.parseInt(u16, fields.next().?, 10)) > 0);
+            try std.testing.expectEqualStrings("UDP/DTLS/SCTP", fields.next().?);
+            try std.testing.expectEqualStrings("webrtc-datachannel", fields.next().?);
+            try std.testing.expect(fields.next() == null);
+        }
+        if (std.mem.startsWith(u8, line, "c=")) {
+            connection_count += 1;
+            try std.testing.expect(std.mem.startsWith(u8, line, "c=IN IP4 ") or
+                std.mem.startsWith(u8, line, "c=IN IP6 "));
+            try std.testing.expect(line.len > "c=IN IP4 ".len);
         }
         if (std.mem.startsWith(u8, line, "a=fingerprint:")) {
             fingerprint_count += 1;
@@ -412,6 +439,7 @@ test "the local description matches current vanilla WebRTC configuration" {
     }
 
     try std.testing.expectEqual(@as(usize, 1), media);
+    try std.testing.expectEqual(@as(usize, 1), connection_count);
     try std.testing.expect(fingerprint_count > 0);
     try std.testing.expect(candidates > 0);
 }

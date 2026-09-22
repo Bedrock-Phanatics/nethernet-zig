@@ -286,6 +286,14 @@ test "HTTP signaling uses application/sdp and an opaque network ID" {
     const answer = writer.buffered();
     try std.testing.expect(std.mem.startsWith(u8, answer, "v=0"));
     try std.testing.expect(std.mem.indexOf(u8, answer, "a=candidate:") != null);
+    const media_start = std.mem.indexOf(u8, answer, "\r\nm=").? + 2;
+    const identity_start = std.mem.indexOf(u8, answer, "a=identity:").?;
+    try std.testing.expect(identity_start < media_start);
+    try std.testing.expect(std.mem.indexOf(u8, answer, "a=group:BUNDLE 0\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, answer[media_start..], "a=setup:active\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, answer[media_start..], "a=sctp-port:5000\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, answer[media_start..], "a=max-message-size:262144\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, answer[media_start..], "a=end-of-candidates\r\n") != null);
 
     const fingerprint_start = std.mem.indexOf(u8, answer, "a=fingerprint:").?;
     const digest_start = std.mem.indexOfScalarPos(u8, answer, fingerprint_start, ' ').? + 1;
