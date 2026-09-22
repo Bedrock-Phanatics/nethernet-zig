@@ -276,8 +276,8 @@ test "status response carries exactly the fields Bedrock expects" {
         fn get(_: ?*anyopaque) !nethernet.EndpointServerStatus {
             return .{
                 .name = "srv",
-                .protocol = 2193,
-                .version = "1.26.51",
+                .protocol = 2211,
+                .version = "1.26.60.24",
                 .level = "world",
                 .players = 0,
                 .max_players = 10,
@@ -328,8 +328,8 @@ test "status response carries exactly the fields Bedrock expects" {
     }
     try std.testing.expectEqual(bds_status_fields.len, parsed.value.object.count());
 
-    try std.testing.expectEqual(@as(i64, 2193), parsed.value.object.get("protocol").?.integer);
-    try std.testing.expectEqualStrings("1.26.51", parsed.value.object.get("version").?.string);
+    try std.testing.expectEqual(@as(i64, 2211), parsed.value.object.get("protocol").?.integer);
+    try std.testing.expectEqualStrings("1.26.60.24", parsed.value.object.get("version").?.string);
     try std.testing.expectEqual(@as(i64, 10), parsed.value.object.get("maxPlayers").?.integer);
 }
 

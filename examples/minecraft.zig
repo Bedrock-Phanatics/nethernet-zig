@@ -3,15 +3,18 @@ const nethernet = @import("nethernet");
 
 /// Advertised on `GET /v1/join`; bump these as Bedrock moves on.
 const protocol_version = 2193;
-const game_version = "1.26.51";
+const default_protocol: u32 = 2211;
+const default_version = "1.26.60.24";
 
 const usage =
-    \\usage: minecraft [address] [--identity <path>] [--offline] [--trace]
+    \\usage: minecraft [address] [--identity <path>] [--offline] [--trace] [--protocol <number>] [--version <string>]
     \\
     \\  address           TCP signaling address, default 0.0.0.0:19132
     \\  --identity <path> PKCS#8 P-384 identity, default nethernet-identity.der
     \\  --offline         accept clients that present no identity
     \\  --trace           print safe HTTP and WebRTC negotiation stages
+    \\  --protocol <number> advertised Bedrock protocol, default 2211
+    \\  --version <string>  advertised Bedrock version, default 1.26.60.24
     \\
 ;
 
@@ -30,6 +33,8 @@ const banner =
 
 const Status = struct {
     queries: std.atomic.Value(usize) = .init(0),
+    protocol: u32 = default_protocol,
+    version: []const u8 = default_version,
 
     fn get(context: ?*anyopaque) !nethernet.EndpointServerStatus {
         const self: *Status = @ptrCast(@alignCast(context.?));
@@ -37,8 +42,8 @@ const Status = struct {
 
         return .{
             .name = "NetherNet-Zig transport smoke test",
-            .protocol = protocol_version,
-            .version = game_version,
+            .protocol = self.protocol,
+            .version = self.version,
             .level = "nethernet-zig",
             .players = 0,
             .max_players = 1,
@@ -54,6 +59,7 @@ pub fn main(init: std.process.Init) !void {
     var identity_path: []const u8 = "nethernet-identity.der";
     var offline = false;
     var trace = false;
+    var status: Status = .{};
 
     var index: usize = 1;
     while (index < args.len) : (index += 1) {
@@ -68,6 +74,26 @@ pub fn main(init: std.process.Init) !void {
                 return error.MissingIdentityPath;
             }
             identity_path = args[index];
+        } else if (std.mem.eql(u8, args[index], "--protocol")) {
+            index += 1;
+            if (index == args.len) {
+                std.debug.print("{s}", .{usage});
+                return error.MissingProtocol;
+            }
+            status.protocol = std.fmt.parseInt(u32, args[index], 10) catch {
+                std.debug.print("{s}", .{usage});
+                return error.InvalidProtocol;
+            };
+            if (status.protocol == 0) return error.InvalidProtocol;
+        } else if (std.mem.eql(u8, args[index], "--version")) {
+            index += 1;
+            if (index == args.len) {
+                std.debug.print("{s}", .{usage});
+                return error.MissingVersion;
+            }
+            if (args[index].len == 0 or args[index][0] == '-' or !std.unicode.utf8ValidateSlice(args[index]))
+                return error.InvalidVersion;
+            status.version = args[index];
         } else if (std.mem.startsWith(u8, args[index], "-")) {
             std.debug.print("{s}", .{usage});
             return error.UnknownOption;
@@ -89,7 +115,6 @@ pub fn main(init: std.process.Init) !void {
         .{},
     );
 
-    var status: Status = .{};
     const listener = try nethernet.EndpointListener.listen(
         init.gpa,
         init.io,
