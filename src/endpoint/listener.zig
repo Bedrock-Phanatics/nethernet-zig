@@ -266,7 +266,7 @@ pub const Listener = struct {
 
         const network_name = request.head.target[9..];
 
-        if (!validNetworkId(network_name)) {
+        if (!conn.validNetworkId(network_name)) {
             return request.respond("Invalid network ID", .{
                 .status = .bad_request,
                 .keep_alive = false,
@@ -391,17 +391,6 @@ pub const Listener = struct {
     }
 };
 
-fn validNetworkId(name: []const u8) bool {
-    if (name.len == 0 or name.len > conn.maximum_network_id_length) return false;
-
-    for (name) |byte| {
-        if (byte < 0x21 or byte > 0x7e) return false;
-        if (byte == '/' or byte == '?' or byte == '#') return false;
-    }
-
-    return true;
-}
-
 fn encodeStatus(status: ServerStatus, output: []u8) ![]const u8 {
     if (!std.unicode.utf8ValidateSlice(status.name) or
         !std.unicode.utf8ValidateSlice(status.version) or
@@ -481,24 +470,4 @@ test "server status JSON is bounded and escaped" {
         .max_players = 20,
         .game_type = 0,
     }, &tiny));
-}
-
-test "network IDs are opaque but bounded to one path segment" {
-    try std.testing.expect(validNetworkId("1"));
-    try std.testing.expect(validNetworkId("18446744073709551615"));
-    try std.testing.expect(validNetworkId("18446744073709551616"));
-    try std.testing.expect(validNetworkId("a3f0-9c11"));
-    try std.testing.expect(validNetworkId("%7B1%7D"));
-
-    try std.testing.expect(!validNetworkId(""));
-    try std.testing.expect(!validNetworkId("123/extra"));
-    try std.testing.expect(!validNetworkId("123?x=1"));
-    try std.testing.expect(!validNetworkId("123#f"));
-    try std.testing.expect(!validNetworkId("with space"));
-    try std.testing.expect(!validNetworkId("tab\there"));
-    try std.testing.expect(!validNetworkId(&.{ '1', 0 }));
-    try std.testing.expect(!validNetworkId("\xff\xfe"));
-
-    try std.testing.expect(validNetworkId("a" ** conn.maximum_network_id_length));
-    try std.testing.expect(!validNetworkId("a" ** (conn.maximum_network_id_length + 1)));
 }

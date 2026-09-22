@@ -10,7 +10,7 @@ const public_key_prefix = [_]u8{
 
 pub const maximum_size = 1024 * 1024;
 pub const maximum_json_nesting = 64;
-pub const server_iat_clock_skew_seconds: i64 = 60;
+pub const clock_skew_seconds: i64 = 60;
 
 pub const IdentityKind = enum {
     client,
@@ -223,12 +223,22 @@ pub fn serverToken(
         &der,
     );
 
+    const sec1 = key.public_key.toUncompressedSec1();
+
+    var x_buffer: [base64_url.Encoder.calcSize(48)]u8 = undefined;
+    var y_buffer: [base64_url.Encoder.calcSize(48)]u8 = undefined;
+
     const claims = try std.json.Stringify.valueAlloc(
         allocator,
         .{
             .exp = try std.math.add(i64, now, 60),
             .iat = now,
-            .cpk = encoded_key,
+            .cpk = .{
+                .kty = "EC",
+                .crv = "P-384",
+                .x = base64_url.Encoder.encode(&x_buffer, sec1[1..49]),
+                .y = base64_url.Encoder.encode(&y_buffer, sec1[49..97]),
+            },
         },
         .{},
     );
@@ -283,13 +293,15 @@ pub fn claimPublicKey(
         .client => {
             const expiration = try integer(try field(claims.value, "exp"));
 
-            if (@as(i128, expiration) < @as(i128, now) - 60) {
+            if (@as(i128, expiration) < @as(i128, now) - clock_skew_seconds) {
                 return error.ExpiredIdentity;
             }
 
             for ([_][]const u8{ "nbf", "iat" }) |name| {
                 if (claims.value.object.get(name)) |value| {
-                    if (@as(i128, try integer(value)) > @as(i128, now) + 60) {
+                    if (@as(i128, try integer(value)) >
+                        @as(i128, now) + clock_skew_seconds)
+                    {
                         return error.InvalidIdentity;
                     }
                 }
@@ -297,13 +309,16 @@ pub fn claimPublicKey(
         },
 
         .server => {
-            const issued_at = try integer(try field(claims.value, "iat"));
-            const delta = @as(i128, issued_at) - @as(i128, now);
+            if (claims.value.object.get("exp")) |value| {
+                if (@as(i128, try integer(value)) <
+                    @as(i128, now) - clock_skew_seconds)
+                {
+                    return error.ExpiredIdentity;
+                }
+            }
 
-            if (delta < -server_iat_clock_skew_seconds or
-                delta > server_iat_clock_skew_seconds)
-            {
-                return error.InvalidIdentity;
+            for ([_][]const u8{ "nbf", "iat" }) |name| {
+                if (claims.value.object.get(name)) |value| _ = try integer(value);
             }
         },
     }
@@ -381,8 +396,10 @@ test "server identity, expiry, detached signatures, and tampering" {
         .server,
     );
 
+    _ = try claimPublicKey(allocator, token, 500, .server);
+    _ = try claimPublicKey(allocator, token, 1120, .server);
     try std.testing.expectError(
-        error.InvalidIdentity,
+        error.ExpiredIdentity,
         claimPublicKey(allocator, token, 1121, .server),
     );
 
@@ -496,26 +513,21 @@ test "client and server identity validation policies" {
         claimPublicKey(allocator, future_client, 1000, .client),
     );
 
-    const expired_server_claims = try std.fmt.allocPrint(
+    const server_claims = try std.fmt.allocPrint(
         allocator,
-        "{{\"exp\":0,\"nbf\":2000,\"iat\":1000,\"cpk\":\"{s}\"}}",
+        "{{\"exp\":2000,\"nbf\":2000,\"iat\":1000,\"cpk\":\"{s}\"}}",
         .{encoded_key},
     );
-    defer allocator.free(expired_server_claims);
+    defer allocator.free(server_claims);
 
-    const expired_server = try testToken(
-        allocator,
-        key,
-        "ES384",
-        expired_server_claims,
-    );
-    defer allocator.free(expired_server);
+    const self_signed = try testToken(allocator, key, "ES384", server_claims);
+    defer allocator.free(self_signed);
 
-    _ = try claimPublicKey(allocator, expired_server, 1060, .server);
-
+    _ = try claimPublicKey(allocator, self_signed, 1060, .server);
+    _ = try claimPublicKey(allocator, self_signed, 2060, .server);
     try std.testing.expectError(
-        error.InvalidIdentity,
-        claimPublicKey(allocator, expired_server, 1061, .server),
+        error.ExpiredIdentity,
+        claimPublicKey(allocator, self_signed, 2061, .server),
     );
 
     const other_key = try Scheme.KeyPair.generateDeterministic(.{5} ** 48);
@@ -523,7 +535,7 @@ test "client and server identity validation policies" {
         allocator,
         other_key,
         "ES384",
-        expired_server_claims,
+        server_claims,
     );
     defer allocator.free(wrongly_signed);
 
@@ -535,7 +547,7 @@ test "client and server identity validation policies" {
         allocator,
         key,
         "RS256",
-        expired_server_claims,
+        server_claims,
     );
     defer allocator.free(wrong_algorithm);
 
@@ -548,7 +560,7 @@ test "client and server identity validation policies" {
         allocator,
         key,
         "ES384",
-        "{\"exp\":0,\"iat\":1000}",
+        "{\"exp\":2000,\"iat\":1000}",
     );
     defer allocator.free(missing_cpk);
 
@@ -561,7 +573,7 @@ test "client and server identity validation policies" {
         allocator,
         key,
         "ES384",
-        "{\"exp\":0,\"iat\":1000,\"cpk\":\"not-a-key\"}",
+        "{\"exp\":2000,\"iat\":1000,\"cpk\":\"not-a-key\"}",
     );
     defer allocator.free(malformed_cpk);
 
@@ -583,5 +595,193 @@ test "every identity allocation failure releases partial state" {
         std.testing.allocator,
         allocationScenario,
         .{},
+    );
+}
+
+test "generated server tokens carry a P-384 JWK cpk bound to the private key" {
+    const allocator = std.testing.allocator;
+    const key = try Scheme.KeyPair.generateDeterministic(.{10} ** 48);
+
+    const token = try serverToken(allocator, key, 1000);
+    defer allocator.free(token);
+
+    const parts = try split(token);
+
+    const decoded_header = try decode64(allocator, parts[0]);
+    defer allocator.free(decoded_header);
+    const header = try parse(allocator, decoded_header);
+    defer header.deinit();
+
+    try std.testing.expectEqualStrings("ES384", try string(try field(header.value, "alg")));
+    var der_buffer: [160]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        testPublicKey(key, &der_buffer),
+        try string(try field(header.value, "x5u")),
+    );
+
+    const decoded_claims = try decode64(allocator, parts[1]);
+    defer allocator.free(decoded_claims);
+    const claims = try parse(allocator, decoded_claims);
+    defer claims.deinit();
+
+    const cpk = try field(claims.value, "cpk");
+    try std.testing.expect(cpk == .object);
+    try std.testing.expectEqualStrings("EC", try string(try field(cpk, "kty")));
+    try std.testing.expectEqualStrings("P-384", try string(try field(cpk, "crv")));
+
+    const sec1 = key.public_key.toUncompressedSec1();
+    for ([_][2][]const u8{
+        .{ "x", sec1[1..49] },
+        .{ "y", sec1[49..97] },
+    }) |expected| {
+        const encoded = try string(try field(cpk, expected[0]));
+        try std.testing.expectEqual(@as(usize, 64), encoded.len);
+        const bytes = try decode64(allocator, encoded);
+        defer allocator.free(bytes);
+        try std.testing.expectEqualSlices(u8, expected[1], bytes);
+    }
+
+    const public_key = try claimPublicKey(allocator, token, 1000, .server);
+    try std.testing.expectEqualSlices(
+        u8,
+        &key.public_key.toUncompressedSec1(),
+        &public_key.toUncompressedSec1(),
+    );
+}
+
+test "cpk claims reject wrong key types, curves and malformed coordinates" {
+    const allocator = std.testing.allocator;
+    const key = try Scheme.KeyPair.generateDeterministic(.{11} ** 48);
+    const sec1 = key.public_key.toUncompressedSec1();
+
+    var x_buffer: [base64_url.Encoder.calcSize(48)]u8 = undefined;
+    var y_buffer: [base64_url.Encoder.calcSize(48)]u8 = undefined;
+    const y = base64_url.Encoder.encode(&y_buffer, sec1[49..97]);
+
+    const Case = struct { cpk: []const u8, expected: anyerror };
+    const cases = [_]Case{
+        .{ .cpk = "{\"kty\":\"RSA\",\"crv\":\"P-384\",\"x\":\"\",\"y\":\"\"}", .expected = error.UnsupportedKey },
+        .{ .cpk = "{\"kty\":\"EC\",\"crv\":\"P-256\",\"x\":\"\",\"y\":\"\"}", .expected = error.UnsupportedKey },
+        .{ .cpk = "{\"crv\":\"P-384\",\"x\":\"\",\"y\":\"\"}", .expected = error.InvalidIdentity },
+        .{ .cpk = "{\"kty\":\"EC\",\"crv\":\"P-384\",\"y\":\"\"}", .expected = error.InvalidIdentity },
+        .{ .cpk = "{\"kty\":\"EC\",\"crv\":\"P-384\",\"x\":\"AA\",\"y\":\"AA\"}", .expected = error.InvalidIdentity },
+        .{ .cpk = "{\"kty\":\"EC\",\"crv\":\"P-384\",\"x\":\"!!\",\"y\":\"!!\"}", .expected = error.InvalidCharacter },
+        .{ .cpk = "0", .expected = error.InvalidIdentity },
+    };
+
+    for (cases) |case| {
+        const claims = try std.fmt.allocPrint(
+            allocator,
+            "{{\"exp\":1060,\"iat\":1000,\"cpk\":{s}}}",
+            .{case.cpk},
+        );
+        defer allocator.free(claims);
+
+        const token = try testToken(allocator, key, "ES384", claims);
+        defer allocator.free(token);
+
+        try std.testing.expectError(
+            case.expected,
+            claimPublicKey(allocator, token, 1000, .server),
+        );
+    }
+
+    var flipped = sec1;
+    flipped[1] ^= 1;
+    const bad_x = base64_url.Encoder.encode(&x_buffer, flipped[1..49]);
+    const invalid = try std.fmt.allocPrint(
+        allocator,
+        "{{\"exp\":1060,\"iat\":1000,\"cpk\":{{\"kty\":\"EC\",\"crv\":\"P-384\",\"x\":\"{s}\",\"y\":\"{s}\"}}}}",
+        .{ bad_x, y },
+    );
+    defer allocator.free(invalid);
+    const invalid_token = try testToken(allocator, key, "ES384", invalid);
+    defer allocator.free(invalid_token);
+    if (claimPublicKey(allocator, invalid_token, 1000, .server)) |_| {
+        return error.OffCurveKeyAccepted;
+    } else |_| {}
+}
+
+test "base64 DER cpk claims from older peers still parse" {
+    const allocator = std.testing.allocator;
+    const key = try Scheme.KeyPair.generateDeterministic(.{12} ** 48);
+
+    var der_buffer: [160]u8 = undefined;
+    const claims = try std.fmt.allocPrint(
+        allocator,
+        "{{\"exp\":1060,\"iat\":1000,\"cpk\":\"{s}\"}}",
+        .{testPublicKey(key, &der_buffer)},
+    );
+    defer allocator.free(claims);
+
+    const token = try testToken(allocator, key, "ES384", claims);
+    defer allocator.free(token);
+
+    const public_key = try claimPublicKey(allocator, token, 1000, .server);
+    try std.testing.expectEqualSlices(
+        u8,
+        &key.public_key.toUncompressedSec1(),
+        &public_key.toUncompressedSec1(),
+    );
+}
+
+test "server token temporal claims are optional but must be well formed" {
+    const allocator = std.testing.allocator;
+    const key = try Scheme.KeyPair.generateDeterministic(.{14} ** 48);
+
+    var der_buffer: [160]u8 = undefined;
+    const encoded_key = testPublicKey(key, &der_buffer);
+
+    const Case = struct { temporal: []const u8, expected: ?anyerror };
+    const cases = [_]Case{
+        .{ .temporal = "", .expected = null },
+        .{ .temporal = "\"iat\":1,", .expected = null },
+        .{ .temporal = "\"iat\":4000000000,", .expected = null },
+        .{ .temporal = "\"exp\":2000,", .expected = null },
+        .{ .temporal = "\"exp\":900,", .expected = error.ExpiredIdentity },
+        .{ .temporal = "\"iat\":\"soon\",", .expected = error.InvalidIdentity },
+        .{ .temporal = "\"exp\":null,", .expected = error.InvalidIdentity },
+        .{ .temporal = "\"nbf\":[],", .expected = error.InvalidIdentity },
+    };
+
+    for (cases) |case| {
+        const claims = try std.fmt.allocPrint(
+            allocator,
+            "{{{s}\"cpk\":\"{s}\"}}",
+            .{ case.temporal, encoded_key },
+        );
+        defer allocator.free(claims);
+
+        const token = try testToken(allocator, key, "ES384", claims);
+        defer allocator.free(token);
+
+        if (case.expected) |expected| {
+            try std.testing.expectError(
+                expected,
+                claimPublicKey(allocator, token, 1000, .server),
+            );
+        } else {
+            _ = try claimPublicKey(allocator, token, 1000, .server);
+        }
+    }
+
+    const claims = try std.fmt.allocPrint(
+        allocator,
+        "{{\"cpk\":\"{s}\"}}",
+        .{encoded_key},
+    );
+    defer allocator.free(claims);
+
+    const foreign = try Scheme.KeyPair.generateDeterministic(.{15} ** 48);
+    const forged = try testToken(allocator, foreign, "ES384", claims);
+    defer allocator.free(forged);
+
+    if (claimPublicKey(allocator, forged, 1000, .server)) |_| {
+        return error.ForeignSignatureAccepted;
+    } else |_| {}
+
+    try std.testing.expectError(
+        error.InvalidIdentity,
+        claimPublicKey(allocator, forged, 1000, .client),
     );
 }

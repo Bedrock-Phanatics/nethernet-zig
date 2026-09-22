@@ -135,7 +135,6 @@ test "HTTP rejects invalid routes, network IDs, empty SDP and oversized bodies" 
             .request = "GET /bad HTTP/1.1\r\nHost: localhost\r\n\r\n",
             .status = "404",
         },
-        // Opaque IDs are valid, so this reaches the SDP check and fails there.
         .{
             .request = "POST /v1/join/nope HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
             .status = "400",
@@ -210,4 +209,80 @@ test "endpoint listener keeps one server identity key for its lifetime" {
     const first_key = first_client.public_key.?.toUncompressedSec1();
     const second_key = second_client.public_key.?.toUncompressedSec1();
     try std.testing.expectEqualSlices(u8, &first_key, &second_key);
+}
+
+test "HTTP signaling uses application/sdp and an opaque network ID" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    const listener = try Listener.listen(
+        allocator,
+        io,
+        try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0"),
+        .{
+            .connection = .{ .allow_anonymous = true },
+            .maximum_negotiations = 2,
+        },
+    );
+    defer listener.destroy();
+
+    const origin = try std.fmt.allocPrint(
+        allocator,
+        "http://127.0.0.1:{d}",
+        .{listener.server.socket.address.getPort()},
+    );
+    defer allocator.free(origin);
+
+    for ([_][]const u8{ "a3f0-9c11", "18446744073709551616" }) |network_id| {
+        const client = try nethernet.dialEndpoint(allocator, io, origin, network_id, .{});
+        defer client.destroy();
+
+        const server = try listener.accept();
+        defer server.destroy();
+
+        try std.testing.expectEqualStrings(network_id, server.remoteAddress().network_id);
+        try std.testing.expectEqualStrings(network_id, client.localAddress().network_id);
+
+        try client.send("opaque", .reliable);
+        try std.testing.expectEqualStrings("opaque", (try server.receive()).data);
+    }
+
+    const url = try std.fmt.allocPrint(allocator, "{s}/v1/join/7", .{origin});
+    defer allocator.free(url);
+
+    const offer = try nethernet.Peer.create(allocator, io, .{ .disable_trickle = true });
+    defer offer.destroy();
+    try offer.offer();
+
+    const buffer = try allocator.alloc(u8, 1024 * 1024);
+    defer allocator.free(buffer);
+
+    const started = std.Io.Clock.awake.now(io);
+    const sdp = while (true) {
+        if (started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds() > 15_000) {
+            return error.Timeout;
+        }
+        if (try offer.poll(buffer)) |event| switch (event) {
+            .offer => |data| break data,
+            else => return error.UnexpectedEvent,
+        };
+        try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    };
+
+    var client: std.http.Client = .{ .allocator = allocator, .io = io };
+    defer client.deinit();
+
+    var output: [1024 * 1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&output);
+    const result = try client.fetch(.{
+        .location = .{ .url = url },
+        .method = .POST,
+        .payload = sdp,
+        .response_writer = &writer,
+        .headers = .{ .content_type = .{ .override = "application/sdp" } },
+    });
+
+    try std.testing.expectEqual(std.http.Status.ok, result.status);
+    try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "v=0"));
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "a=candidate:") != null);
 }

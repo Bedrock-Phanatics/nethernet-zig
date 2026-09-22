@@ -5,6 +5,7 @@ pub const identity_file = core.identity_file;
 pub const framing = core.framing;
 pub const Reliability = core.Reliability;
 pub const Signal = core.Signal;
+pub const parseSignalErrorCode = core.signal.parseErrorCode;
 pub const ServerData = core.ServerData;
 pub const ErrorCode = core.ErrorCode;
 pub const Identity = core.Identity;

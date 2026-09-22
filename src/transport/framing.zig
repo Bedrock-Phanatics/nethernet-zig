@@ -24,10 +24,15 @@ pub fn singleFragmentPayload(fragment: []const u8, reliability: Reliability) !?[
     return fragment[1..];
 }
 
-pub fn validateMessageSize(size: usize, reliability: Reliability, limit: usize) !void {
+pub fn validateMessageSize(
+    size: usize,
+    reliability: Reliability,
+    limit: usize,
+    segment: usize,
+) !void {
     if (size > limit or
-        size > maximum_reliable_message_size or
-        (reliability == .unreliable and size > maximum_segment_payload))
+        size > segment *| maximum_segments or
+        (reliability == .unreliable and size > segment))
     {
         return error.MessageTooLarge;
     }
@@ -35,15 +40,21 @@ pub fn validateMessageSize(size: usize, reliability: Reliability, limit: usize) 
 
 pub const Encoder = struct {
     data: []const u8,
+    segment: usize,
     offset: usize = 0,
 
     pub fn init(
         data: []const u8,
         reliability: Reliability,
         limit: usize,
+        segment: usize,
     ) !Encoder {
-        try validateMessageSize(data.len, reliability, limit);
-        return .{ .data = data };
+        if (segment == 0 or segment > maximum_segment_payload) {
+            return error.InvalidConfiguration;
+        }
+
+        try validateMessageSize(data.len, reliability, limit, segment);
+        return .{ .data = data, .segment = segment };
     }
 
     pub fn next(
@@ -53,10 +64,10 @@ pub const Encoder = struct {
         const remaining = self.data.len - self.offset;
         if (remaining == 0) return null;
 
-        const payload_len: usize = @min(remaining, maximum_segment_payload);
+        const payload_len: usize = @min(remaining, self.segment);
         if (output.len < payload_len + 1) return error.NoSpaceLeft;
 
-        output[0] = @intCast((remaining - 1) / maximum_segment_payload);
+        output[0] = @intCast((remaining - 1) / self.segment);
 
         @memcpy(
             output[1..][0..payload_len],
@@ -137,7 +148,7 @@ test "inbound fragment payload boundaries match the encoder" {
 }
 
 test "empty sends no frames; output exhaustion leaves iterator unchanged" {
-    var empty = try Encoder.init("", .reliable, 10);
+    var empty = try Encoder.init("", .reliable, 10, maximum_segment_payload);
     var tiny: [1]u8 = undefined;
 
     try std.testing.expectEqual(
@@ -145,7 +156,7 @@ test "empty sends no frames; output exhaustion leaves iterator unchanged" {
         try empty.next(&tiny),
     );
 
-    var encoder = try Encoder.init("a", .reliable, 1);
+    var encoder = try Encoder.init("a", .reliable, 1, maximum_segment_payload);
 
     try std.testing.expectError(
         error.NoSpaceLeft,
@@ -187,6 +198,7 @@ test "fragment boundaries and reassembly" {
             data[0..size],
             .reliable,
             data.len,
+            maximum_segment_payload,
         );
         var reassembler = Reassembler.init(storage, .reliable);
         var messages: usize = 0;
@@ -208,7 +220,7 @@ test "fragment boundaries and reassembly" {
 
     try std.testing.expectError(
         error.MessageTooLarge,
-        Encoder.init(data, .unreliable, data.len),
+        Encoder.init(data, .unreliable, data.len, maximum_segment_payload),
     );
 }
 
@@ -279,10 +291,20 @@ test "reassembler rejects a 256-fragment countdown" {
 }
 
 test "reliable message-size boundaries match 255 segment representation" {
-    try validateMessageSize(maximum_reliable_message_size, .reliable, maximum_reliable_message_size);
+    try validateMessageSize(
+        maximum_reliable_message_size,
+        .reliable,
+        maximum_reliable_message_size,
+        maximum_segment_payload,
+    );
     try std.testing.expectError(
         error.MessageTooLarge,
-        validateMessageSize(maximum_reliable_message_size + 1, .reliable, maximum_reliable_message_size + 1),
+        validateMessageSize(
+            maximum_reliable_message_size + 1,
+            .reliable,
+            maximum_reliable_message_size + 1,
+            maximum_segment_payload,
+        ),
     );
 
     const exact_segments =
@@ -293,4 +315,51 @@ test "reliable message-size boundaries match 255 segment representation" {
         maximum_segment_payload;
     try std.testing.expectEqual(@as(usize, maximum_segments), exact_segments);
     try std.testing.expectEqual(@as(usize, maximum_segments + 1), overflow_segments);
+}
+
+test "a negotiated segment size bounds fragmentation and unreliable sends" {
+    const segment = 1023;
+    const data = [_]u8{42} ** (segment * 2 + 1);
+
+    var encoder = try Encoder.init(&data, .reliable, data.len, segment);
+    var storage: [data.len]u8 = undefined;
+    var reassembler = Reassembler.init(&storage, .reliable);
+    var frame: [segment + 1]u8 = undefined;
+
+    var fragments: usize = 0;
+    var message: ?[]const u8 = null;
+    while (try encoder.next(&frame)) |fragment| {
+        fragments += 1;
+        try std.testing.expect(fragment.len <= segment + 1);
+        if (try reassembler.push(fragment)) |complete| message = complete;
+    }
+
+    try std.testing.expectEqual(@as(usize, 3), fragments);
+    try std.testing.expectEqualSlices(u8, &data, message.?);
+
+    _ = try Encoder.init(data[0..segment], .unreliable, data.len, segment);
+    try std.testing.expectError(
+        error.MessageTooLarge,
+        Encoder.init(data[0 .. segment + 1], .unreliable, data.len, segment),
+    );
+
+    try validateMessageSize(segment * maximum_segments, .reliable, std.math.maxInt(usize), segment);
+    try std.testing.expectError(error.MessageTooLarge, validateMessageSize(
+        segment * maximum_segments + 1,
+        .reliable,
+        std.math.maxInt(usize),
+        segment,
+    ));
+
+    for ([_]usize{ 0, maximum_segment_payload + 1 }) |invalid| {
+        try std.testing.expectError(
+            error.InvalidConfiguration,
+            Encoder.init("a", .reliable, 1, invalid),
+        );
+    }
+
+    var minimal = try Encoder.init("ab", .reliable, 2, 1);
+    var single: [2]u8 = undefined;
+    try std.testing.expectEqualSlices(u8, &.{ 1, 'a' }, (try minimal.next(&single)).?);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 'b' }, (try minimal.next(&single)).?);
 }

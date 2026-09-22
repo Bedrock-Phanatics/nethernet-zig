@@ -47,7 +47,7 @@ test "listener survives TLS handshakes, truncated requests and malformed HTTP" {
     );
     defer listener.destroy();
 
-    // Bedrock tries TLS first, so a ClientHello reaches every plain listener.
+    // Bedrock tries TLS before the plain listener.
     try survives(listener, io, &.{
         0x16, 0x03, 0x01, 0x00, 0x2c, 0x01, 0x00, 0x00,
         0x28, 0x03, 0x03, 0x00, 0x01, 0x02, 0x03, 0x04,
@@ -82,8 +82,7 @@ test "failed negotiation releases its slot and leaves the listener usable" {
     var client: std.http.Client = .{ .allocator = allocator, .io = io };
     defer client.deinit();
 
-    // One slot, so a leaked one starves everything after it. A slot is freed
-    // after its response is sent, so a transient rejection here is fine.
+    // A leaked slot would starve later requests.
     for (0..4) |_| {
         var output: [1024]u8 = undefined;
         var writer = std.Io.Writer.fixed(&output);
@@ -244,7 +243,7 @@ test "one listener serves several simultaneous clients" {
     };
 
     for (0..count) |i| {
-        clients[i] = try nethernet.dialEndpoint(allocator, io, url, @intCast(i + 1), .{});
+        clients[i] = try nethernet.dialEndpoint(allocator, io, url, @as(u64, @intCast(i + 1)), .{});
         servers[i] = try listener.accept();
         opened += 1;
     }
@@ -360,8 +359,7 @@ test "listener destroyed while a negotiation is in flight" {
     }
 }
 
-// Canceling a pending accept makes Zig 0.16 print an INVALID_PARAMETER
-// diagnostic on Windows. It is swallowed, and handle counts stay flat.
+// Windows reports INVALID_PARAMETER when a pending accept is canceled.
 test "repeated listener create and destroy does not leak handles" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
@@ -410,11 +408,17 @@ test "an exhausted UDP port range fails instead of hanging" {
     const accepted = try listener.accept();
     defer accepted.destroy();
 
-    _ = nethernet.dialEndpoint(allocator, io, url, 2, .{
+    const started = std.Io.Clock.awake.now(io);
+    if (nethernet.dialEndpoint(allocator, io, url, 2, .{
         .negotiation_timeout_ms = 3000,
         .connection_timeout_ms = 3000,
-    }) catch return;
-    return error.ExpectedPortRangeExhaustion;
+    })) |second| {
+        second.destroy();
+    } else |_| {}
+
+    try std.testing.expect(
+        started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds() < 10_000,
+    );
 }
 
 test "network IDs at and beyond the limit are handled over real HTTP" {

@@ -27,6 +27,25 @@ ports, so both are required. Pin the UDP range with
 LAN discovery is separate. `127.0.0.1:7551` does not work in the Add Server
 screen, which needs the signaling port `127.0.0.1:19132`.
 
+## Reachability
+
+No STUN or TURN server is configured by default, so a peer only ever offers
+host candidates. A server that must be reachable from outside its own network
+has to advertise at least one candidate the client can actually reach: a public
+address, a forwarded port (pin the range with `port_range_begin` /
+`port_range_end`), or an explicitly configured relay via
+`.native = .{ .ice_servers = &.{"stun:host:3478"} }`. Public infrastructure
+stays opt-in rather than being enabled behind your back.
+
+`EndpointListener` advertises itself over HTTP only when a `status_provider` is
+set. Without one, `GET /v1/join` answers `503`, which vanilla reads as "no
+NetherNet here"; an empty `200` would break Mojang's JSON status contract.
+
+Network IDs are opaque strings throughout. `dialEndpoint` also accepts an
+integer, for the decimal IDs vanilla currently uses, but nothing assumes that
+format, so IDs beyond `u64` work. An ID must survive one URI path segment
+unchanged: printable ASCII without `/`, `?`, `#`, `%` or a dot segment.
+
 ## Requirements
 
 - Zig 0.16.0
