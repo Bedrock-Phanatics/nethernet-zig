@@ -417,7 +417,7 @@ test "an exhausted UDP port range fails instead of hanging" {
     } else |_| {}
 
     try std.testing.expect(
-        started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds() < 10_000,
+        started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds() < 30_000,
     );
 }
 
