@@ -38,6 +38,32 @@ fn uppercaseLocalFingerprintDigests(sdp: []u8) void {
     }
 }
 
+fn hasUsableLocalCandidate(sdp: []const u8) bool {
+    var lines = std.mem.tokenizeAny(u8, sdp, "\r\n");
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "a=candidate:")) continue;
+        var fields = std.mem.tokenizeAny(u8, line, " \t");
+        _ = fields.next() orelse continue;
+        const component = std.fmt.parseInt(u16, fields.next() orelse continue, 10) catch continue;
+        if (component != 1 or
+            !std.ascii.eqlIgnoreCase(fields.next() orelse continue, "udp")) continue;
+        _ = std.fmt.parseInt(u32, fields.next() orelse continue, 10) catch continue;
+        const address = fields.next() orelse continue;
+        const port = std.fmt.parseInt(u16, fields.next() orelse continue, 10) catch continue;
+        if (port == 0 or !std.mem.eql(u8, fields.next() orelse continue, "typ")) continue;
+        const kind = fields.next() orelse continue;
+        if (!std.mem.eql(u8, kind, "host") and
+            !std.mem.eql(u8, kind, "srflx") and
+            !std.mem.eql(u8, kind, "prflx") and
+            !std.mem.eql(u8, kind, "relay")) continue;
+        if (std.mem.eql(u8, address, "0.0.0.0") or
+            std.mem.eql(u8, address, "::")) continue;
+        if (std.Io.net.IpAddress.parseIp4(address, port)) |_| return true else |_| {}
+        if (std.Io.net.IpAddress.parseIp6(address, port)) |_| return true else |_| {}
+    }
+    return false;
+}
+
 pub const CallbackStats = struct {
     dropped_unreliable_packets: u64,
     queue_high_water_bytes: usize,
@@ -645,9 +671,9 @@ pub const Peer = struct {
                 return error.WebRtcFailure;
             }
 
-            self.description_sent = true;
-
             const data = output[0 .. @as(usize, @intCast(result)) - 1];
+            if (!hasUsableLocalCandidate(data)) return error.NoLocalIceCandidate;
+            self.description_sent = true;
             uppercaseLocalFingerprintDigests(data);
 
             return if (self.description_kind == .offer)
@@ -1044,6 +1070,27 @@ test "local fingerprint normalization preserves algorithms and other SDP text" {
             "a=fingerprint:sha-384 AA:BB trailing-face\r\n",
         &buffer,
     );
+}
+
+test "non-trickle SDP requires a usable local ICE candidate" {
+    try std.testing.expect(!hasUsableLocalCandidate(""));
+    try std.testing.expect(!hasUsableLocalCandidate(
+        "a=candidate:1 2 UDP 1 127.0.0.1 40000 typ host\r\n" ++
+            "a=candidate:2 1 TCP 1 127.0.0.1 40001 typ host\r\n" ++
+            "a=candidate:3 1 UDP 1 host.local 40002 typ host\r\n" ++
+            "a=candidate:4 1 UDP 1 0.0.0.0 40003 typ host\r\n" ++
+            "a=candidate:5 1 UDP 1 127.0.0.1 0 typ relay\r\n" ++
+            "a=candidate:6 1 UDP invalid 127.0.0.1 40004 typ host\r\n",
+    ));
+    try std.testing.expect(hasUsableLocalCandidate(
+        "a=candidate:1 1 UDP 1 192.0.2.1 40000 typ host\r\n",
+    ));
+    try std.testing.expect(hasUsableLocalCandidate(
+        "a=candidate:1 1 udp 1 2001:db8::1 40000 typ relay\r\n",
+    ));
+    try std.testing.expect(hasUsableLocalCandidate(
+        "a=candidate:1 1 UDP 1 192.0.2.1 40000 typ srflx\r\n",
+    ));
 }
 
 fn gracefulDrain(

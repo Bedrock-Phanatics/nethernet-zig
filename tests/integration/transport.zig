@@ -466,3 +466,38 @@ test "the local description matches current vanilla WebRTC configuration" {
     try std.testing.expect(candidates > 0);
     if (!std.mem.eql(u8, default_port, "9")) try std.testing.expect(default_candidate_found);
 }
+
+test "exhausted UDP port range does not emit a non-trickle offer" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    const address = try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0");
+    const blocker = try address.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer blocker.close(io);
+
+    const port = blocker.address.getPort();
+    const peer = try Peer.create(allocator, io, .{
+        .bind_address = "127.0.0.1",
+        .port_range_begin = port,
+        .port_range_end = port,
+        .disable_trickle = true,
+    });
+    defer peer.destroy();
+    peer.offer() catch |err| {
+        try std.testing.expectEqual(error.WebRtcFailure, err);
+        return;
+    };
+
+    var buffer: [1024 * 1024]u8 = undefined;
+    const started = std.Io.Clock.awake.now(io);
+    while (started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds() < 5000) {
+        if (peer.poll(&buffer)) |event| {
+            if (event != null) return error.SkipZigTest;
+        } else |err| {
+            try std.testing.expect(err == error.NoLocalIceCandidate or
+                err == error.WebRtcFailure);
+            return;
+        }
+        try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    }
+    return error.Timeout;
+}
