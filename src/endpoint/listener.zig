@@ -29,6 +29,7 @@ pub const Options = struct {
     maximum_pending_accepts: usize = 64,
     request_timeout_ms: u32 = 15000,
     status_provider: ?StatusProvider = null,
+    trace: bool = false,
 };
 
 pub const Listener = struct {
@@ -166,6 +167,10 @@ pub const Listener = struct {
         self.allocator.destroy(self);
     }
 
+    fn trace(self: *Listener, comptime format: []const u8, args: anytype) void {
+        if (self.options.trace) std.debug.print("nethernet HTTP: " ++ format ++ "\n", args);
+    }
+
     fn worker(self: *Listener) std.Io.Cancelable!void {
         while (true) {
             const stream = self.server.accept(self.io) catch |err| switch (err) {
@@ -179,7 +184,10 @@ pub const Listener = struct {
 
             self.handleTimed(stream) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
-                else => continue,
+                else => {
+                    self.trace("request failed ({s})", .{@errorName(err)});
+                    continue;
+                },
             };
         }
     }
@@ -227,25 +235,33 @@ pub const Listener = struct {
         if (request.head.method == .GET and
             std.mem.eql(u8, request.head.target, "/v1/join"))
         {
-            const provider = self.options.status_provider orelse
+            self.trace("GET /v1/join received", .{});
+            const provider = self.options.status_provider orelse {
+                self.trace("GET /v1/join HTTP 503 (no status provider)", .{});
                 return request.respond("", .{
                     .status = .service_unavailable,
                     .keep_alive = false,
                 });
+            };
 
-            const status = provider.get(provider.context) catch
+            const status = provider.get(provider.context) catch |err| {
+                self.trace("GET /v1/join HTTP 503 (status provider: {s})", .{@errorName(err)});
                 return request.respond("", .{
                     .status = .service_unavailable,
                     .keep_alive = false,
                 });
+            };
 
             var status_output: [maximum_status_response_size]u8 = undefined;
-            const body = encodeStatus(status, &status_output) catch
+            const body = encodeStatus(status, &status_output) catch |err| {
+                self.trace("GET /v1/join HTTP 500 (status encoding: {s})", .{@errorName(err)});
                 return request.respond("", .{
                     .status = .internal_server_error,
                     .keep_alive = false,
                 });
+            };
 
+            self.trace("GET /v1/join HTTP 200, status bytes={d}", .{body.len});
             return request.respond(body, .{
                 .keep_alive = false,
                 .extra_headers = &.{.{
@@ -258,6 +274,7 @@ pub const Listener = struct {
         if (request.head.method != .POST or
             !std.mem.startsWith(u8, request.head.target, "/v1/join/"))
         {
+            self.trace("HTTP 404 (unknown route)", .{});
             return request.respond("", .{
                 .status = .not_found,
                 .keep_alive = false,
@@ -265,8 +282,10 @@ pub const Listener = struct {
         }
 
         const network_name = request.head.target[9..];
+        self.trace("POST /v1/join/{{networkId}} received", .{});
 
         if (!conn.validNetworkId(network_name)) {
+            self.trace("POST HTTP 400 (invalid network ID)", .{});
             return request.respond("Invalid network ID", .{
                 .status = .bad_request,
                 .keep_alive = false,
@@ -274,6 +293,7 @@ pub const Listener = struct {
         }
 
         if ((request.head.content_length orelse 0) > maximum_sdp_size) {
+            self.trace("POST HTTP 413 (content length)", .{});
             return request.respond("", .{
                 .status = .payload_too_large,
                 .keep_alive = false,
@@ -289,7 +309,8 @@ pub const Listener = struct {
         const body = body_reader.allocRemaining(
             self.allocator,
             .limited(maximum_sdp_size),
-        ) catch {
+        ) catch |err| {
+            self.trace("POST HTTP 413 (body read: {s})", .{@errorName(err)});
             return request.respond("", .{
                 .status = .payload_too_large,
                 .keep_alive = false,
@@ -298,9 +319,23 @@ pub const Listener = struct {
         defer self.allocator.free(body);
 
         if (body.len == 0) {
+            self.trace("POST HTTP 400 (empty offer)", .{});
             return request.respond("Missing SDP offer in request body", .{
                 .status = .bad_request,
                 .keep_alive = false,
+            });
+        }
+
+        if (self.options.trace) {
+            const offer_summary = summarizeSdp(body);
+            self.trace("offer bytes={d}, identity={s}, candidates={d} (host={d}, srflx={d}, relay={d}, other={d})", .{
+                body.len,
+                if (offer_summary.identity) "present" else "missing",
+                offer_summary.candidates,
+                offer_summary.host,
+                offer_summary.srflx,
+                offer_summary.relay,
+                offer_summary.other,
             });
         }
 
@@ -310,6 +345,7 @@ pub const Listener = struct {
         const connection_id = std.mem.readInt(u64, &random, .little);
 
         if (!self.reserveAccept()) {
+            self.trace("POST HTTP 503 (accept queue full)", .{});
             return request.respond("Accept queue full", .{
                 .status = .service_unavailable,
                 .keep_alive = false,
@@ -319,6 +355,7 @@ pub const Listener = struct {
         defer if (accept_reserved) self.releaseAccept();
 
         if (!self.reserveNegotiation()) {
+            self.trace("POST HTTP 503 (negotiation capacity)", .{});
             return request.respond("Negotiation capacity reached", .{
                 .status = .service_unavailable,
                 .keep_alive = false,
@@ -328,15 +365,20 @@ pub const Listener = struct {
 
         var connection_options = self.options.connection;
         connection_options.native.disable_trickle = true;
+        connection_options.trace = connection_options.trace or self.options.trace;
 
-        const connection = try conn.Connection.create(
+        const connection = conn.Connection.create(
             self.allocator,
             self.io,
             .server,
             connection_id,
             network_id,
             connection_options,
-        );
+        ) catch |err| {
+            self.trace("peer creation failed ({s})", .{@errorName(err)});
+            return err;
+        };
+        self.trace("peer created", .{});
 
         var transferred = false;
         defer if (!transferred) connection.destroy();
@@ -346,7 +388,8 @@ pub const Listener = struct {
             .connection_id = connection_id,
             .network_id = network_id,
             .data = body,
-        }) catch {
+        }) catch |err| {
+            self.trace("offer rejected ({s}); HTTP 400", .{@errorName(err)});
             return request.respond("Negotiation failed", .{
                 .status = .bad_request,
                 .keep_alive = false,
@@ -354,9 +397,47 @@ pub const Listener = struct {
         };
 
         var answered = false;
+        var previous_state = connection.state();
+        var previous_diagnostics: ?conn.Diagnostics = if (self.options.trace) connection.diagnostics() else null;
+        if (previous_diagnostics) |diagnostics| {
+            self.trace("peer={s}, ICE={s}, gathering={s}, reliable={s}, unreliable={s}", .{
+                @tagName(previous_state),
+                @tagName(diagnostics.ice_state),
+                @tagName(diagnostics.ice_gathering_state),
+                @tagName(diagnostics.reliable.state),
+                @tagName(diagnostics.unreliable.state),
+            });
+        }
 
         while (!answered or !connection.ready()) {
             connection.prepareWait();
+            if (previous_diagnostics) |previous| {
+                const state = connection.state();
+                const diagnostics = connection.diagnostics();
+                if (state != previous_state or
+                    diagnostics.ice_state != previous.ice_state or
+                    diagnostics.ice_gathering_state != previous.ice_gathering_state or
+                    diagnostics.reliable.state != previous.reliable.state or
+                    diagnostics.unreliable.state != previous.unreliable.state)
+                {
+                    self.trace("peer={s}, ICE={s}, gathering={s}, reliable={s}, unreliable={s}", .{
+                        @tagName(state),
+                        @tagName(diagnostics.ice_state),
+                        @tagName(diagnostics.ice_gathering_state),
+                        @tagName(diagnostics.reliable.state),
+                        @tagName(diagnostics.unreliable.state),
+                    });
+                    if (diagnostics.ice_state == .connected or diagnostics.ice_state == .completed) {
+                        var local: [256]u8 = undefined;
+                        var remote: [256]u8 = undefined;
+                        if (connection.selectedIceAddresses(&local, &remote)) |selected| {
+                            if (selected) |pair| self.trace("selected ICE local={s}, remote={s}", .{ pair.local, pair.remote });
+                        } else |_| {}
+                    }
+                    previous_state = state;
+                    previous_diagnostics = diagnostics;
+                }
+            }
             if (try connection.pollNegotiation()) |event| {
                 switch (event) {
                     .signal => |signal| {
@@ -364,6 +445,18 @@ pub const Listener = struct {
                             return error.UnexpectedSignal;
                         }
 
+                        if (self.options.trace) {
+                            const answer_summary = summarizeSdp(signal.data);
+                            self.trace("answer bytes={d}, identity={s}, candidates={d} (host={d}, srflx={d}, relay={d}, other={d}); HTTP 200 application/sdp", .{
+                                signal.data.len,
+                                if (answer_summary.identity) "present" else "missing",
+                                answer_summary.candidates,
+                                answer_summary.host,
+                                answer_summary.srflx,
+                                answer_summary.relay,
+                                answer_summary.other,
+                            });
+                        }
                         try request.respond(signal.data, .{
                             .keep_alive = false,
                             .extra_headers = &.{
@@ -388,8 +481,60 @@ pub const Listener = struct {
             return error.ConnectionClosed;
         transferred = true;
         accept_reserved = false;
+        self.trace("both data channels open; connection accepted", .{});
     }
 };
+
+const SdpSummary = struct {
+    identity: bool = false,
+    candidates: usize = 0,
+    host: usize = 0,
+    srflx: usize = 0,
+    relay: usize = 0,
+    other: usize = 0,
+};
+
+fn summarizeSdp(sdp: []const u8) SdpSummary {
+    var result: SdpSummary = .{};
+    var lines = std.mem.splitScalar(u8, sdp, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "a=identity:")) result.identity = true;
+        if (!std.mem.startsWith(u8, line, "a=candidate:")) continue;
+        result.candidates += 1;
+        const type_start = std.mem.indexOf(u8, line, " typ ") orelse {
+            result.other += 1;
+            continue;
+        };
+        var fields = std.mem.tokenizeAny(u8, line[type_start + 5 ..], " \t\r");
+        const kind = fields.next() orelse "";
+        if (std.mem.eql(u8, kind, "host")) {
+            result.host += 1;
+        } else if (std.mem.eql(u8, kind, "srflx")) {
+            result.srflx += 1;
+        } else if (std.mem.eql(u8, kind, "relay")) {
+            result.relay += 1;
+        } else {
+            result.other += 1;
+        }
+    }
+    return result;
+}
+
+test "SDP trace summary exposes only identity presence and candidate counts" {
+    const summary = summarizeSdp(
+        "a=identity:secret\r\n" ++
+            "a=candidate:1 1 UDP 1 127.0.0.1 1 typ host\r\n" ++
+            "a=candidate:2 1 UDP 1 127.0.0.1 2 typ srflx\r\n" ++
+            "a=candidate:3 1 UDP 1 127.0.0.1 3 typ relay\r\n" ++
+            "a=candidate:4 1 UDP 1 127.0.0.1 4 typ prflx\r\n",
+    );
+    try std.testing.expect(summary.identity);
+    try std.testing.expectEqual(@as(usize, 4), summary.candidates);
+    try std.testing.expectEqual(@as(usize, 1), summary.host);
+    try std.testing.expectEqual(@as(usize, 1), summary.srflx);
+    try std.testing.expectEqual(@as(usize, 1), summary.relay);
+    try std.testing.expectEqual(@as(usize, 1), summary.other);
+}
 
 fn encodeStatus(status: ServerStatus, output: []u8) ![]const u8 {
     if (!std.unicode.utf8ValidateSlice(status.name) or

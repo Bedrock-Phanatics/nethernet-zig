@@ -6,11 +6,12 @@ const protocol_version = 2193;
 const game_version = "1.26.51";
 
 const usage =
-    \\usage: minecraft [address] [--identity <path>] [--offline]
+    \\usage: minecraft [address] [--identity <path>] [--offline] [--trace]
     \\
     \\  address           TCP signaling address, default 0.0.0.0:19132
     \\  --identity <path> PKCS#8 P-384 identity, default nethernet-identity.der
     \\  --offline         accept clients that present no identity
+    \\  --trace           print safe HTTP and WebRTC negotiation stages
     \\
 ;
 
@@ -52,11 +53,14 @@ pub fn main(init: std.process.Init) !void {
     var address_text: []const u8 = "0.0.0.0:19132";
     var identity_path: []const u8 = "nethernet-identity.der";
     var offline = false;
+    var trace = false;
 
     var index: usize = 1;
     while (index < args.len) : (index += 1) {
         if (std.mem.eql(u8, args[index], "--offline")) {
             offline = true;
+        } else if (std.mem.eql(u8, args[index], "--trace")) {
+            trace = true;
         } else if (std.mem.eql(u8, args[index], "--identity")) {
             index += 1;
             if (index == args.len) {
@@ -96,6 +100,7 @@ pub fn main(init: std.process.Init) !void {
                 .allow_anonymous = offline,
             },
             .status_provider = .{ .context = &status, .get = Status.get },
+            .trace = trace,
         },
     );
     defer listener.destroy();

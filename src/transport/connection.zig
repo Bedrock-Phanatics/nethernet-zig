@@ -66,6 +66,7 @@ pub const Options = struct {
     reassembly_timeout_ms: u32 = 30000,
     graceful_shutdown_timeout_ms: u32 = 2000,
     maximum_remote_candidates: usize = 32,
+    trace: bool = false,
     /// Allows unauthenticated remote peers when no verifier is configured.
     allow_anonymous: bool = false,
     identity: ?auth.Identity = null,
@@ -404,24 +405,34 @@ pub const Connection = struct {
             if (self.role == .client) .server else .client;
 
         const verifier = verifierForRole(self.options, self.role);
-        const key = try auth.verify(
+        const key = auth.verify(
             self.allocator,
             signal.data,
             std.Io.Clock.real.now(self.io).toSeconds(),
             identity_kind,
             verifier,
-        );
+        ) catch |err| {
+            if (self.options.trace) std.debug.print("nethernet identity: rejected ({s})\n", .{@errorName(err)});
+            return err;
+        };
 
-        if (key == null and remoteIdentityRequired(self.options, self.role))
+        if (key == null and remoteIdentityRequired(self.options, self.role)) {
+            if (self.options.trace) std.debug.print("nethernet identity: missing or unverified, required\n", .{});
             return error.IdentityNotAllowed;
+        }
 
         self.public_key = key;
         self.identity_issuer_verified = key != null and verifier != null;
+        if (self.options.trace) std.debug.print("nethernet identity: {s}\n", .{if (key == null) "anonymous allowed" else if (verifier != null) "proof and issuer verified" else "proof verified"});
 
-        try self.peer.remoteDescription(
+        self.peer.remoteDescription(
             auth.removeIdentity(terminated),
             if (is_offer) .offer else .answer,
-        );
+        ) catch |err| {
+            if (self.options.trace) std.debug.print("nethernet remote description: failed ({s})\n", .{@errorName(err)});
+            return err;
+        };
+        if (self.options.trace) std.debug.print("nethernet remote description: accepted\n", .{});
 
         self.answered = std.Io.Clock.awake.now(self.io);
     }
@@ -488,8 +499,12 @@ pub const Connection = struct {
 
                 if (event != .candidate) {
                     if (self.options.identity) |identity| {
-                        self.signal_buffer = try auth.add(self.allocator, data, identity);
+                        self.signal_buffer = auth.add(self.allocator, data, identity) catch |err| {
+                            if (self.options.trace) std.debug.print("nethernet local identity: signing failed ({s})\n", .{@errorName(err)});
+                            return err;
+                        };
                         body = self.signal_buffer.?;
+                        if (self.options.trace) std.debug.print("nethernet local identity: signed\n", .{});
                     }
                 }
 
