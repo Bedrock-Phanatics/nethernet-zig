@@ -394,13 +394,17 @@ test "the local description matches current vanilla WebRTC configuration" {
     var connection_count: usize = 0;
     var fingerprint_count: usize = 0;
     var candidates: usize = 0;
+    var default_port: []const u8 = "";
+    var default_address: []const u8 = "";
+    var default_candidate_found = false;
     var lines = std.mem.tokenizeAny(u8, sdp, "\r\n");
     while (lines.next()) |line| {
         if (std.mem.startsWith(u8, line, "m=")) {
             media += 1;
             var fields = std.mem.tokenizeScalar(u8, line, ' ');
             try std.testing.expectEqualStrings("m=application", fields.next().?);
-            try std.testing.expect((try std.fmt.parseInt(u16, fields.next().?, 10)) > 0);
+            default_port = fields.next().?;
+            try std.testing.expect((try std.fmt.parseInt(u16, default_port, 10)) > 0);
             try std.testing.expectEqualStrings("UDP/DTLS/SCTP", fields.next().?);
             try std.testing.expectEqualStrings("webrtc-datachannel", fields.next().?);
             try std.testing.expect(fields.next() == null);
@@ -410,6 +414,10 @@ test "the local description matches current vanilla WebRTC configuration" {
             try std.testing.expect(std.mem.startsWith(u8, line, "c=IN IP4 ") or
                 std.mem.startsWith(u8, line, "c=IN IP6 "));
             try std.testing.expect(line.len > "c=IN IP4 ".len);
+            var fields = std.mem.tokenizeScalar(u8, line, ' ');
+            _ = fields.next();
+            _ = fields.next();
+            default_address = fields.next().?;
         }
         if (std.mem.startsWith(u8, line, "a=fingerprint:")) {
             fingerprint_count += 1;
@@ -436,10 +444,25 @@ test "the local description matches current vanilla WebRTC configuration" {
         try std.testing.expect(std.mem.indexOf(u8, line, " UDP ") != null or
             std.mem.indexOf(u8, line, " udp ") != null);
         try std.testing.expect(std.mem.indexOf(u8, line, "typ host") != null);
+        var fields = std.mem.tokenizeScalar(u8, line, ' ');
+        _ = fields.next();
+        const component = fields.next().?;
+        const protocol = fields.next().?;
+        _ = fields.next();
+        const address = fields.next().?;
+        const port = fields.next().?;
+        if (std.mem.eql(u8, component, "1") and
+            std.ascii.eqlIgnoreCase(protocol, "udp") and
+            std.mem.eql(u8, address, default_address) and
+            std.mem.eql(u8, port, default_port))
+        {
+            default_candidate_found = true;
+        }
     }
 
     try std.testing.expectEqual(@as(usize, 1), media);
     try std.testing.expectEqual(@as(usize, 1), connection_count);
     try std.testing.expect(fingerprint_count > 0);
     try std.testing.expect(candidates > 0);
+    if (!std.mem.eql(u8, default_port, "9")) try std.testing.expect(default_candidate_found);
 }
