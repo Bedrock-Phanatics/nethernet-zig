@@ -14,6 +14,30 @@ const c = @cImport({
 
 pub const maximum_signal_size = 1024 * 1024;
 
+fn uppercaseLocalFingerprintDigests(sdp: []u8) void {
+    var start: usize = 0;
+    while (start < sdp.len) {
+        const end = std.mem.indexOfScalarPos(u8, sdp, start, '\n') orelse sdp.len;
+        if (std.mem.startsWith(u8, sdp[start..end], "a=fingerprint:")) {
+            const value_start = start + "a=fingerprint:".len;
+            if (std.mem.indexOfScalar(u8, sdp[value_start..end], ' ')) |space| {
+                var pos = value_start + space + 1;
+                while (pos < end) : (pos += 1) {
+                    const byte = sdp[pos];
+                    if (byte >= 'a' and byte <= 'f') {
+                        sdp[pos] = byte - ('a' - 'A');
+                    } else if (!((byte >= '0' and byte <= '9') or
+                        (byte >= 'A' and byte <= 'F') or byte == ':'))
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+        start = end + 1;
+    }
+}
+
 pub const CallbackStats = struct {
     dropped_unreliable_packets: u64,
     queue_high_water_bytes: usize,
@@ -624,6 +648,7 @@ pub const Peer = struct {
             self.description_sent = true;
 
             const data = output[0 .. @as(usize, @intCast(result)) - 1];
+            uppercaseLocalFingerprintDigests(data);
 
             return if (self.description_kind == .offer)
                 .{ .offer = data }
@@ -640,6 +665,7 @@ pub const Peer = struct {
         else
             try self.queue.pop(output)) orelse return null;
 
+        if (entry.tag <= 1) uppercaseLocalFingerprintDigests(output[0..entry.data.len]);
         return switch (entry.tag) {
             0 => .{ .offer = entry.data },
             1 => .{ .answer = entry.data },
@@ -998,6 +1024,27 @@ pub const Peer = struct {
         self.notify();
     }
 };
+
+test "local fingerprint normalization preserves algorithms and other SDP text" {
+    const sdp =
+        "v=0\r\n" ++
+        "a=fingerprint:sha-256 ab:0c:DE\r\n" ++
+        "a=x:face\r\n" ++
+        "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" ++
+        "a=fingerprint:sha-512 01:fe:02\r\n" ++
+        "a=fingerprint:sha-384 aa:bb trailing-face\r\n";
+    var buffer = sdp.*;
+    uppercaseLocalFingerprintDigests(&buffer);
+    try std.testing.expectEqualStrings(
+        "v=0\r\n" ++
+            "a=fingerprint:sha-256 AB:0C:DE\r\n" ++
+            "a=x:face\r\n" ++
+            "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" ++
+            "a=fingerprint:sha-512 01:FE:02\r\n" ++
+            "a=fingerprint:sha-384 AA:BB trailing-face\r\n",
+        &buffer,
+    );
+}
 
 fn gracefulDrain(
     comptime T: type,

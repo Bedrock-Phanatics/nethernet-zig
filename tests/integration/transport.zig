@@ -3,6 +3,7 @@ const nethernet = @import("nethernet");
 const Connection = nethernet.Connection;
 const framing = nethernet.framing;
 const Peer = nethernet.Peer;
+const auth = nethernet.sdp_identity;
 
 test "native peers negotiate and exchange both channel types" {
     const io = std.testing.io;
@@ -351,13 +352,55 @@ test "the local description matches current vanilla WebRTC configuration" {
 
     try std.testing.expect(std.mem.indexOf(u8, sdp, "a=max-message-size:262144") != null);
 
+    const payload = try auth.fingerprintPayload(allocator, sdp);
+    defer allocator.free(payload);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+    const fingerprints = parsed.value.object.get("fingerprint").?.array.items;
+    try std.testing.expect(fingerprints.len > 0);
+
+    const key = try nethernet.IdentityKeyPair.generateDeterministic(.{9} ** 48);
+    const token = try nethernet.identity.serverToken(allocator, key, 1000);
+    defer allocator.free(token);
+    const signed = try auth.add(allocator, sdp, .{ .key = key, .token = token });
+    defer allocator.free(signed);
+    const signed_payload = try auth.fingerprintPayload(allocator, signed);
+    defer allocator.free(signed_payload);
+    try std.testing.expectEqualStrings(payload, signed_payload);
+    try std.testing.expect((try auth.verify(allocator, signed, 1000, .server, null)) != null);
+
+    const digest_offset = std.mem.indexOfScalarPos(u8, signed, std.mem.indexOf(u8, signed, "a=fingerprint:").?, ' ').? + 1;
+    signed[digest_offset] = if (signed[digest_offset] == '0') '1' else '0';
+    if (auth.verify(allocator, signed, 1000, .server, null)) |_| {
+        return error.TamperedFingerprintAccepted;
+    } else |_| {}
+
     var media: usize = 0;
+    var fingerprint_count: usize = 0;
     var candidates: usize = 0;
     var lines = std.mem.tokenizeAny(u8, sdp, "\r\n");
     while (lines.next()) |line| {
         if (std.mem.startsWith(u8, line, "m=")) {
             media += 1;
             try std.testing.expect(std.mem.startsWith(u8, line, "m=application "));
+        }
+        if (std.mem.startsWith(u8, line, "a=fingerprint:")) {
+            fingerprint_count += 1;
+            const value = line["a=fingerprint:".len..];
+            const space = std.mem.indexOfScalar(u8, value, ' ').?;
+            const algorithm = value[0..space];
+            const digest = value[space + 1 ..];
+            for (digest) |byte| try std.testing.expect(byte < 'a' or byte > 'f');
+            var matched = false;
+            for (fingerprints) |fingerprint| {
+                if (std.mem.eql(u8, algorithm, fingerprint.object.get("algorithm").?.string) and
+                    std.mem.eql(u8, digest, fingerprint.object.get("digest").?.string))
+                {
+                    matched = true;
+                    break;
+                }
+            }
+            try std.testing.expect(matched);
         }
         if (!std.mem.startsWith(u8, line, "a=candidate:")) continue;
         candidates += 1;
@@ -369,5 +412,6 @@ test "the local description matches current vanilla WebRTC configuration" {
     }
 
     try std.testing.expectEqual(@as(usize, 1), media);
+    try std.testing.expect(fingerprint_count > 0);
     try std.testing.expect(candidates > 0);
 }

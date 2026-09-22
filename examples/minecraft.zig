@@ -1,8 +1,6 @@
 const std = @import("std");
 const nethernet = @import("nethernet");
 
-/// Advertised on `GET /v1/join`; bump these as Bedrock moves on.
-const protocol_version = 2193;
 const default_protocol: u32 = 2211;
 const default_version = "1.26.60.24";
 

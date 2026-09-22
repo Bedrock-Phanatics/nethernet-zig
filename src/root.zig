@@ -1,6 +1,7 @@
 const core = @import("core.zig");
 pub const credentials = core.credentials;
 pub const identity = core.identity;
+pub const sdp_identity = core.sdp_identity;
 pub const identity_file = core.identity_file;
 pub const framing = core.framing;
 pub const Reliability = core.Reliability;

@@ -283,6 +283,24 @@ test "HTTP signaling uses application/sdp and an opaque network ID" {
     });
 
     try std.testing.expectEqual(std.http.Status.ok, result.status);
-    try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "v=0"));
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "a=candidate:") != null);
+    const answer = writer.buffered();
+    try std.testing.expect(std.mem.startsWith(u8, answer, "v=0"));
+    try std.testing.expect(std.mem.indexOf(u8, answer, "a=candidate:") != null);
+
+    const fingerprint_start = std.mem.indexOf(u8, answer, "a=fingerprint:").?;
+    const digest_start = std.mem.indexOfScalarPos(u8, answer, fingerprint_start, ' ').? + 1;
+    const digest_end = std.mem.indexOfScalarPos(u8, answer, digest_start, '\n').?;
+    const digest = std.mem.trimEnd(u8, answer[digest_start..digest_end], "\r");
+    for (digest) |byte| try std.testing.expect(byte < 'a' or byte > 'f');
+
+    const payload = try nethernet.sdp_identity.fingerprintPayload(allocator, answer);
+    defer allocator.free(payload);
+    try std.testing.expect(std.mem.indexOf(u8, payload, digest) != null);
+    try std.testing.expect((try nethernet.sdp_identity.verify(
+        allocator,
+        answer,
+        std.Io.Clock.real.now(io).toSeconds(),
+        .server,
+        null,
+    )) != null);
 }
