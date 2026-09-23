@@ -173,7 +173,7 @@ pub fn dial(
         io,
         .client,
         connection_id,
-        origin,
+        id,
         actual_options,
     );
     errdefer peer.destroy();
@@ -205,7 +205,7 @@ pub fn dial(
                     try peer.applySignal(.{
                         .kind = Signal.answer,
                         .connection_id = connection_id,
-                        .network_id = origin,
+                        .network_id = id,
                         .data = sdp,
                     });
                 },

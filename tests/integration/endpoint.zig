@@ -316,6 +316,7 @@ test "HTTP signaling uses application/sdp and an opaque network ID" {
 
         try std.testing.expectEqualStrings(network_id, server.remoteAddress().network_id);
         try std.testing.expectEqualStrings(network_id, client.localAddress().network_id);
+        try std.testing.expectEqualStrings(network_id, client.remoteAddress().network_id);
 
         try client.send("opaque", .reliable);
         try std.testing.expectEqualStrings("opaque", (try server.receive()).data);
