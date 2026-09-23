@@ -807,6 +807,22 @@ pub const Peer = struct {
             else
                 return error.InvalidChannel;
 
+        var protocol: [1]u8 = undefined;
+        const protocol_length = c.rtcGetDataChannelProtocol(channel, &protocol, protocol.len);
+        if (protocol_length == c.RTC_ERR_TOO_SMALL) return error.InvalidChannel;
+        try check(protocol_length);
+        if (protocol_length != 1 or protocol[0] != 0) return error.InvalidChannel;
+
+        var reliability: c.rtcReliability = undefined;
+        try check(c.rtcGetDataChannelReliability(channel, &reliability));
+        if (reliability.unordered != (index == 1) or
+            reliability.unreliable != (index == 1) or
+            reliability.maxPacketLifeTime != 0 or
+            reliability.maxRetransmits != 0)
+        {
+            return error.InvalidChannel;
+        }
+
         self.mutex.lockUncancelable(self.io);
 
         if (self.stopping or self.channels[index] >= 0) {
@@ -1255,6 +1271,44 @@ test "unknown remote data channel is deleted and fails the peer" {
     try expectChannelDeleted(channel);
     try std.testing.expectEqual(State.failed, peer.getState());
     try std.testing.expectEqualSlices(c_int, &.{ -1, -1 }, &peer.channels);
+}
+
+test "data channels require vanilla reliability and protocol" {
+    const peer = try Peer.create(std.testing.allocator, std.testing.io, .{});
+    defer peer.destroy();
+
+    var init = std.mem.zeroes(c.rtcDataChannelInit);
+    init.reliability.unordered = true;
+    const wrong_reliable = c.rtcCreateDataChannelEx(peer.id, "ReliableDataChannel", &init);
+    try check(wrong_reliable);
+    try std.testing.expectError(error.InvalidChannel, peer.attach(wrong_reliable));
+    try expectChannelDeleted(wrong_reliable);
+
+    const wrong_unreliable = try testDataChannel(peer, "UnreliableDataChannel");
+    try std.testing.expectError(error.InvalidChannel, peer.attach(wrong_unreliable));
+    try expectChannelDeleted(wrong_unreliable);
+
+    init = std.mem.zeroes(c.rtcDataChannelInit);
+    init.protocol = "other";
+    const wrong_protocol = c.rtcCreateDataChannelEx(peer.id, "ReliableDataChannel", &init);
+    try check(wrong_protocol);
+    try std.testing.expectError(error.InvalidChannel, peer.attach(wrong_protocol));
+    try expectChannelDeleted(wrong_protocol);
+
+    init = std.mem.zeroes(c.rtcDataChannelInit);
+    init.reliability.unordered = true;
+    init.reliability.unreliable = true;
+    init.reliability.maxRetransmits = 1;
+    const retransmitting = c.rtcCreateDataChannelEx(peer.id, "UnreliableDataChannel", &init);
+    try check(retransmitting);
+    try std.testing.expectError(error.InvalidChannel, peer.attach(retransmitting));
+    try expectChannelDeleted(retransmitting);
+
+    init.reliability.maxRetransmits = 0;
+    const valid = c.rtcCreateDataChannelEx(peer.id, "UnreliableDataChannel", &init);
+    try check(valid);
+    try peer.attach(valid);
+    try std.testing.expectEqual(valid, peer.channels[1]);
 }
 
 test "message callback rejects an unregistered channel" {
