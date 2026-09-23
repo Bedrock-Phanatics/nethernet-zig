@@ -590,11 +590,13 @@ pub const Peer = struct {
             return error.ConnectionClosed;
         defer self.releaseNativeHandles();
 
-        try check(c.rtcSetRemoteDescription(
+        const result = c.rtcSetRemoteDescription(
             handles.id,
             sdp,
             if (kind == .offer) "offer" else "answer",
-        ));
+        );
+        if (result == c.RTC_ERR_INVALID) return error.MalformedSignal;
+        try check(result);
 
         if (kind == .offer) {
             self.description_kind = .answer;

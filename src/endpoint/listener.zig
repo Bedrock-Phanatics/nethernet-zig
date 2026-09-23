@@ -171,6 +171,54 @@ pub const Listener = struct {
         if (self.options.trace) std.debug.print("nethernet HTTP: " ++ format ++ "\n", args);
     }
 
+    fn errorStatus(err: anyerror) std.http.Status {
+        return switch (err) {
+            error.HttpHeadersInvalid,
+            error.MalformedSignal,
+            error.UnexpectedSignal,
+            error.TooManyRemoteCandidates,
+            => .bad_request,
+            error.HttpHeadersOversize => .request_header_fields_too_large,
+            error.StreamTooLong, error.MessageTooLarge, error.IdentityTooLarge => .payload_too_large,
+            error.IdentityNotAllowed,
+            error.InvalidIdentity,
+            error.ExpiredIdentity,
+            error.IdentityTooDeep,
+            error.UnsupportedAlgorithm,
+            error.UnsupportedKey,
+            error.InvalidCharacter,
+            error.InvalidPadding,
+            error.SyntaxError,
+            error.UnexpectedEndOfInput,
+            => .forbidden,
+            error.HttpExpectationFailed => .expectation_failed,
+            error.Timeout => .gateway_timeout,
+            else => .internal_server_error,
+        };
+    }
+
+    const ResponseState = enum(u8) { pending, committed, timed_out };
+
+    fn respond(
+        request: *std.http.Server.Request,
+        response_state: *std.atomic.Value(ResponseState),
+        body: []const u8,
+        options: std.http.Server.Request.RespondOptions,
+    ) !void {
+        if (response_state.cmpxchgStrong(.pending, .committed, .acq_rel, .acquire) != null) return error.Timeout;
+        try request.respond(body, options);
+    }
+
+    fn writeError(self: *Listener, stream: std.Io.net.Stream, status: std.http.Status) void {
+        var buffer: [256]u8 = undefined;
+        var writer = stream.writer(self.io, &buffer);
+        writer.interface.print(
+            "HTTP/1.1 {d} {s}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            .{ @intFromEnum(status), status.phrase() orelse "Error" },
+        ) catch return;
+        writer.interface.flush() catch {};
+    }
+
     fn worker(self: *Listener) std.Io.Cancelable!void {
         while (true) {
             const stream = self.server.accept(self.io) catch |err| switch (err) {
@@ -193,6 +241,7 @@ pub const Listener = struct {
     }
 
     fn handleTimed(self: *Listener, stream: std.Io.net.Stream) !void {
+        var response_state = std.atomic.Value(ResponseState).init(.pending);
         const Result = union(enum) {
             done: anyerror!void,
             timeout: std.Io.Cancelable!void,
@@ -211,18 +260,39 @@ pub const Listener = struct {
                 .awake,
             },
         );
-        try select.concurrent(.done, handle, .{ self, stream });
+        try select.concurrent(.done, handle, .{ self, stream, &response_state });
 
         switch (try select.await()) {
-            .done => |result| try result,
+            .done => |result| result catch |err| {
+                if (err != error.Canceled and
+                    err != error.HttpConnectionClosing and
+                    err != error.HttpRequestTruncated and
+                    response_state.load(.acquire) == .pending)
+                {
+                    const status = errorStatus(err);
+                    self.trace("HTTP {d} ({s})", .{ @intFromEnum(status), @errorName(err) });
+                    self.writeError(stream, status);
+                }
+                return err;
+            },
             .timeout => |result| {
                 try result;
+                const send_timeout = response_state.cmpxchgStrong(.pending, .timed_out, .acq_rel, .acquire) == null;
+                select.cancelDiscard();
+                if (send_timeout) {
+                    self.trace("HTTP 504 (request timeout)", .{});
+                    self.writeError(stream, .gateway_timeout);
+                }
                 return error.Timeout;
             },
         }
     }
 
-    fn handle(self: *Listener, stream: std.Io.net.Stream) anyerror!void {
+    fn handle(
+        self: *Listener,
+        stream: std.Io.net.Stream,
+        response_state: *std.atomic.Value(ResponseState),
+    ) anyerror!void {
         var input: [16384]u8 = undefined;
         var output: [4096]u8 = undefined;
 
@@ -231,6 +301,9 @@ pub const Listener = struct {
         var http = std.http.Server.init(&reader.interface, &writer.interface);
 
         var request = try http.receiveHead();
+        if (request.head.expect) |expect| {
+            if (!std.mem.eql(u8, expect, "100-continue")) return error.HttpExpectationFailed;
+        }
 
         if (request.head.method == .GET and
             std.mem.eql(u8, request.head.target, "/v1/join"))
@@ -238,7 +311,7 @@ pub const Listener = struct {
             self.trace("GET /v1/join received", .{});
             const provider = self.options.status_provider orelse {
                 self.trace("GET /v1/join HTTP 503 (no status provider)", .{});
-                return request.respond("", .{
+                return respond(&request, response_state, "", .{
                     .status = .service_unavailable,
                     .keep_alive = false,
                 });
@@ -246,7 +319,7 @@ pub const Listener = struct {
 
             const status = provider.get(provider.context) catch |err| {
                 self.trace("GET /v1/join HTTP 503 (status provider: {s})", .{@errorName(err)});
-                return request.respond("", .{
+                return respond(&request, response_state, "", .{
                     .status = .service_unavailable,
                     .keep_alive = false,
                 });
@@ -255,14 +328,14 @@ pub const Listener = struct {
             var status_output: [maximum_status_response_size]u8 = undefined;
             const body = encodeStatus(status, &status_output) catch |err| {
                 self.trace("GET /v1/join HTTP 500 (status encoding: {s})", .{@errorName(err)});
-                return request.respond("", .{
+                return respond(&request, response_state, "", .{
                     .status = .internal_server_error,
                     .keep_alive = false,
                 });
             };
 
             self.trace("GET /v1/join HTTP 200, status bytes={d}", .{body.len});
-            return request.respond(body, .{
+            return respond(&request, response_state, body, .{
                 .keep_alive = false,
                 .extra_headers = &.{.{
                     .name = "Content-Type",
@@ -274,9 +347,13 @@ pub const Listener = struct {
         if (request.head.method != .POST or
             !std.mem.startsWith(u8, request.head.target, "/v1/join/"))
         {
-            self.trace("HTTP 404 (unknown route)", .{});
-            return request.respond("", .{
-                .status = .not_found,
+            const status: std.http.Status = if (std.mem.startsWith(u8, request.head.target, "/v1/join"))
+                .bad_request
+            else
+                .not_found;
+            self.trace("HTTP {d} (invalid route)", .{@intFromEnum(status)});
+            return respond(&request, response_state, "", .{
+                .status = status,
                 .keep_alive = false,
             });
         }
@@ -286,7 +363,7 @@ pub const Listener = struct {
 
         if (!conn.validNetworkId(network_name)) {
             self.trace("POST HTTP 400 (invalid network ID)", .{});
-            return request.respond("Invalid network ID", .{
+            return respond(&request, response_state, "Invalid network ID", .{
                 .status = .bad_request,
                 .keep_alive = false,
             });
@@ -294,7 +371,7 @@ pub const Listener = struct {
 
         if ((request.head.content_length orelse 0) > maximum_sdp_size) {
             self.trace("POST HTTP 413 (content length)", .{});
-            return request.respond("", .{
+            return respond(&request, response_state, "", .{
                 .status = .payload_too_large,
                 .keep_alive = false,
             });
@@ -310,9 +387,14 @@ pub const Listener = struct {
             self.allocator,
             .limited(maximum_sdp_size),
         ) catch |err| {
-            self.trace("POST HTTP 413 (body read: {s})", .{@errorName(err)});
-            return request.respond("", .{
-                .status = .payload_too_large,
+            const status: std.http.Status = switch (err) {
+                error.StreamTooLong => .payload_too_large,
+                error.OutOfMemory => .internal_server_error,
+                else => .bad_request,
+            };
+            self.trace("POST HTTP {d} (body read: {s})", .{ @intFromEnum(status), @errorName(err) });
+            return respond(&request, response_state, "", .{
+                .status = status,
                 .keep_alive = false,
             });
         };
@@ -320,7 +402,7 @@ pub const Listener = struct {
 
         if (body.len == 0) {
             self.trace("POST HTTP 400 (empty offer)", .{});
-            return request.respond("Missing SDP offer in request body", .{
+            return respond(&request, response_state, "Missing SDP offer in request body", .{
                 .status = .bad_request,
                 .keep_alive = false,
             });
@@ -346,7 +428,7 @@ pub const Listener = struct {
 
         if (!self.reserveAccept()) {
             self.trace("POST HTTP 503 (accept queue full)", .{});
-            return request.respond("Accept queue full", .{
+            return respond(&request, response_state, "Accept queue full", .{
                 .status = .service_unavailable,
                 .keep_alive = false,
             });
@@ -356,7 +438,7 @@ pub const Listener = struct {
 
         if (!self.reserveNegotiation()) {
             self.trace("POST HTTP 503 (negotiation capacity)", .{});
-            return request.respond("Negotiation capacity reached", .{
+            return respond(&request, response_state, "Negotiation capacity reached", .{
                 .status = .service_unavailable,
                 .keep_alive = false,
             });
@@ -389,9 +471,10 @@ pub const Listener = struct {
             .network_id = network_id,
             .data = body,
         }) catch |err| {
-            self.trace("offer rejected ({s}); HTTP 400", .{@errorName(err)});
-            return request.respond("Negotiation failed", .{
-                .status = .bad_request,
+            const status = errorStatus(err);
+            self.trace("offer rejected ({s}); HTTP {d}", .{ @errorName(err), @intFromEnum(status) });
+            return respond(&request, response_state, "", .{
+                .status = status,
                 .keep_alive = false,
             });
         };
@@ -457,7 +540,7 @@ pub const Listener = struct {
                                 answer_summary.other,
                             });
                         }
-                        try request.respond(signal.data, .{
+                        try respond(&request, response_state, signal.data, .{
                             .keep_alive = false,
                             .extra_headers = &.{
                                 .{

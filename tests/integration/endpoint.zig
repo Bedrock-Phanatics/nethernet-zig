@@ -118,7 +118,7 @@ test "HTTP rejects invalid routes, network IDs, empty SDP and oversized bodies" 
         allocator,
         io,
         try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0"),
-        .{ .maximum_negotiations = 2 },
+        .{ .connection = .{ .allow_anonymous = true }, .maximum_negotiations = 2 },
     );
     defer listener.destroy();
 
@@ -134,6 +134,22 @@ test "HTTP rejects invalid routes, network IDs, empty SDP and oversized bodies" 
         .{
             .request = "GET /bad HTTP/1.1\r\nHost: localhost\r\n\r\n",
             .status = "404",
+        },
+        .{
+            .request = "NOTAMETHOD /v1/join HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            .status = "400",
+        },
+        .{
+            .request = "POST /v1/join HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+            .status = "400",
+        },
+        .{
+            .request = "GET /v1/join/1 HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            .status = "400",
+        },
+        .{
+            .request = "GET /v1/join HTTP/1.1\r\nHost: localhost\r\nExpect: nope\r\n\r\n",
+            .status = "417",
         },
         .{
             .request = "POST /v1/join/nope HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
@@ -175,6 +191,63 @@ test "HTTP rejects invalid routes, network IDs, empty SDP and oversized bodies" 
         const prefix = try reader.interface.take(12);
         try std.testing.expectEqualStrings(case.status, prefix[9..12]);
     }
+}
+
+test "HTTP reports identity rejection and peer creation failures" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const address = try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0");
+
+    for ([_]struct { options: nethernet.EndpointListenerOptions, status: []const u8 }{
+        .{ .options = .{}, .status = "403" },
+        .{ .options = .{ .connection = .{
+            .allow_anonymous = true,
+            .native = .{ .port_range_begin = 30000 },
+        } }, .status = "500" },
+    }) |case| {
+        const listener = try Listener.listen(allocator, io, address, case.options);
+        defer listener.destroy();
+        const stream = try listener.server.socket.address.connect(io, .{ .mode = .stream });
+        defer stream.close(io);
+
+        var write_buffer: [512]u8 = undefined;
+        var writer = stream.writer(io, &write_buffer);
+        try writer.interface.writeAll(
+            "POST /v1/join/1 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\n\r\nnope",
+        );
+        try writer.interface.flush();
+
+        var read_buffer: [512]u8 = undefined;
+        var reader = stream.reader(io, &read_buffer);
+        const prefix = try reader.interface.take(12);
+        try std.testing.expectEqualStrings(case.status, prefix[9..12]);
+    }
+}
+
+test "HTTP times out a stalled request with a response" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const listener = try Listener.listen(
+        allocator,
+        io,
+        try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0"),
+        .{ .request_timeout_ms = 100 },
+    );
+    defer listener.destroy();
+
+    const stream = try listener.server.socket.address.connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+    var write_buffer: [512]u8 = undefined;
+    var writer = stream.writer(io, &write_buffer);
+    try writer.interface.writeAll(
+        "POST /v1/join/1 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\n\r\n",
+    );
+    try writer.interface.flush();
+
+    var read_buffer: [512]u8 = undefined;
+    var reader = stream.reader(io, &read_buffer);
+    const prefix = try reader.interface.take(12);
+    try std.testing.expectEqualStrings("504", prefix[9..12]);
 }
 
 test "endpoint listener keeps one server identity key for its lifetime" {
