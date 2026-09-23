@@ -2,6 +2,24 @@ const std = @import("std");
 const nethernet = @import("nethernet");
 const Connection = nethernet.Connection;
 
+const ConcurrentSendTask = struct {
+    connection: *Connection,
+    sender: u8,
+    failure: ?anyerror = null,
+
+    fn run(self: *ConcurrentSendTask) std.Io.Cancelable!void {
+        var payload: [4096]u8 = undefined;
+        @memset(&payload, self.sender);
+        for (0..16) |sequence| {
+            payload[1] = @intCast(sequence);
+            self.connection.send(&payload, .reliable) catch |err| {
+                self.failure = err;
+                return;
+            };
+        }
+    }
+};
+
 fn concurrentConnectionPair(io: std.Io, index: usize) !void {
     const allocator = std.testing.allocator;
     const id: u64 = @intCast(index + 1000);
@@ -75,6 +93,31 @@ fn concurrentConnectionPair(io: std.Io, index: usize) !void {
         try server.send(received.data, .reliable);
         const echoed = try client.receive();
         try std.testing.expectEqualSlices(u8, &payload, echoed.data);
+    }
+
+    if (index == 0) {
+        var group: std.Io.Group = .init;
+        defer group.cancel(io);
+        var tasks: [4]ConcurrentSendTask = undefined;
+        for (&tasks, 0..) |*task, sender| {
+            task.* = .{ .connection = client, .sender = @intCast(sender) };
+            try group.concurrent(io, ConcurrentSendTask.run, .{task});
+        }
+        try group.await(io);
+        for (tasks) |task| if (task.failure) |failure| return failure;
+
+        var seen: [4][16]bool = std.mem.zeroes([4][16]bool);
+        for (0..tasks.len * 16) |_| {
+            const message = try server.receive();
+            try std.testing.expectEqual(@as(usize, 4096), message.data.len);
+            const sender: usize = message.data[0];
+            const sequence: usize = message.data[1];
+            try std.testing.expect(sender < tasks.len and sequence < 16);
+            try std.testing.expect(!seen[sender][sequence]);
+            seen[sender][sequence] = true;
+            for (message.data[2..]) |byte| try std.testing.expectEqual(@as(u8, @intCast(sender)), byte);
+        }
+        for (seen) |sequences| for (sequences) |received| try std.testing.expect(received);
     }
 }
 

@@ -205,6 +205,8 @@ pub const Connection = struct {
     packet_scratch: []u8,
     negotiation_scratch: ?[]u8,
     send_buffer: []u8,
+    /// Guards the shared fragment buffer and send counters.
+    send_mutex: std.Io.Mutex = .init,
     assemblies: [2]Assembly = .{
         .{ .decoder = framing.Reassembler.init(&.{}, .reliable) },
         .{ .decoder = framing.Reassembler.init(&.{}, .unreliable) },
@@ -617,6 +619,9 @@ pub const Connection = struct {
         if (data.len > self.options.maximum_message_size) {
             return error.MessageTooLarge;
         }
+
+        self.send_mutex.lockUncancelable(self.io);
+        defer self.send_mutex.unlock(self.io);
 
         try self.peer.send(data, reliability, self.send_buffer);
 
