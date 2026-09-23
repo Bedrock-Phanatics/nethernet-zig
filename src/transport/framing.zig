@@ -315,6 +315,22 @@ test "reliable message-size boundaries match 255 segment representation" {
         maximum_segment_payload;
     try std.testing.expectEqual(@as(usize, maximum_segments), exact_segments);
     try std.testing.expectEqual(@as(usize, maximum_segments + 1), overflow_segments);
+
+    const data = [_]u8{42} ** maximum_segments;
+    var encoder = try Encoder.init(&data, .reliable, data.len, 1);
+    var fragment: [2]u8 = undefined;
+    for (0..maximum_segments) |index| {
+        const frame = (try encoder.next(&fragment)).?;
+        try std.testing.expectEqual(@as(u8, @intCast(maximum_segments - index - 1)), frame[0]);
+        try std.testing.expectEqual(@as(u8, 42), frame[1]);
+    }
+    try std.testing.expect((try encoder.next(&fragment)) == null);
+    try std.testing.expectError(error.MessageTooLarge, Encoder.init(
+        &([_]u8{42} ** (maximum_segments + 1)),
+        .reliable,
+        maximum_segments + 1,
+        1,
+    ));
 }
 
 test "a negotiated segment size bounds fragmentation and unreliable sends" {
