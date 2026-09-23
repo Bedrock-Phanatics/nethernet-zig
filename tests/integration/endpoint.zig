@@ -45,6 +45,7 @@ test "HTTP endpoint listener and dialer transfer ownership and shut down" {
 
     const client = try nethernet.dialEndpoint(allocator, io, origin, 12, .{});
     defer client.destroy();
+    try std.testing.expect(client.public_key != null);
 
     const server = try listener.accept();
     defer server.destroy();

@@ -80,14 +80,14 @@ pub const Options = struct {
 
 fn verifierForRole(options: Options, role: Role) ?auth.Verifier {
     return if (role == .client)
-        options.verify_server orelse options.verify_client
+        options.verify_server
     else
         options.verify_client;
 }
 
 fn remoteIdentityRequired(options: Options, role: Role) bool {
     if (verifierForRole(options, role) != null) return true;
-    return role == .server and !options.allow_anonymous;
+    return !options.allow_anonymous;
 }
 
 fn validateOptions(options: Options) !void {
@@ -97,7 +97,6 @@ fn validateOptions(options: Options) !void {
         options.connection_timeout_ms == 0 or
         options.reassembly_timeout_ms == 0 or
         options.graceful_shutdown_timeout_ms == 0 or
-        options.server_identity_domain.len == 0 or
         options.server_identity_domain.len > 255)
     {
         return error.InvalidConfiguration;
@@ -669,18 +668,16 @@ test "remote identity verifiers are selected by connection role" {
     };
     try std.testing.expect(verifierForRole(options, .client).?.verify == Verifiers.server);
     try std.testing.expect(verifierForRole(options, .server).?.verify == Verifiers.client);
-    try std.testing.expect(
-        verifierForRole(
-            .{ .verify_client = .{ .verify = Verifiers.client } },
-            .client,
-        ).?.verify == Verifiers.client,
-    );
+    try std.testing.expect(verifierForRole(.{
+        .verify_client = .{ .verify = Verifiers.client },
+    }, .client) == null);
 
     try std.testing.expect(remoteIdentityRequired(options, .client));
     try std.testing.expect(remoteIdentityRequired(.{
         .verify_client = .{ .verify = Verifiers.client },
     }, .client));
-    try std.testing.expect(!remoteIdentityRequired(.{}, .client));
+    try std.testing.expect(remoteIdentityRequired(.{}, .client));
+    try std.testing.expect(!remoteIdentityRequired(.{ .allow_anonymous = true }, .client));
     try std.testing.expect(remoteIdentityRequired(.{}, .server));
     try std.testing.expect(!remoteIdentityRequired(.{ .allow_anonymous = true }, .server));
 
@@ -688,6 +685,7 @@ test "remote identity verifiers are selected by connection role" {
         .allow_anonymous = true,
         .verify_client = .{ .verify = Verifiers.client },
     }, .server));
+    try validateOptions(.{ .server_identity_domain = "" });
 }
 
 fn connectionCreationFailureScenario(allocator: std.mem.Allocator) !void {

@@ -286,13 +286,19 @@ test "identity insertion ignores m equals inside attribute values" {
         "a=x:term=value\r\n" ++
         "a=fingerprint:sha-256 00:11\r\n" ++
         "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n";
-    const signed = try add(allocator, source, .{ .key = key, .token = token });
+    const signed = try add(allocator, source, .{ .key = key, .token = token, .domain = "" });
     defer allocator.free(signed);
     try std.testing.expect(std.mem.indexOf(u8, signed, "a=x:term=value\r\n") != null);
     try std.testing.expect(
         std.mem.indexOf(u8, signed, "a=identity:").? <
             std.mem.indexOf(u8, signed, "m=application").?,
     );
+    try std.testing.expect((try verify(allocator, signed, 1000, .server, null)) != null);
+    const start = std.mem.indexOf(u8, signed, "a=identity:").? + "a=identity:".len;
+    const end = std.mem.indexOfPos(u8, signed, start, "\r\n").?;
+    const assertion = try jwt.decode64(allocator, signed[start..end]);
+    defer allocator.free(assertion);
+    try std.testing.expect(std.mem.indexOf(u8, assertion, "\"domain\":\"\"") != null);
 }
 
 test "duplicate SDP identity assertions are rejected" {

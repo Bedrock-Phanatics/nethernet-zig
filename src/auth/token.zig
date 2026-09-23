@@ -309,15 +309,7 @@ pub fn claimPublicKey(
         },
 
         .server => {
-            if (claims.value.object.get("exp")) |value| {
-                if (@as(i128, try integer(value)) <
-                    @as(i128, now) - clock_skew_seconds)
-                {
-                    return error.ExpiredIdentity;
-                }
-            }
-
-            for ([_][]const u8{ "nbf", "iat" }) |name| {
+            for ([_][]const u8{ "exp", "nbf", "iat" }) |name| {
                 if (claims.value.object.get(name)) |value| _ = try integer(value);
             }
         },
@@ -382,7 +374,7 @@ pub fn claimPublicKey(
     return key;
 }
 
-test "server identity, expiry, detached signatures, and tampering" {
+test "server identity, temporal claims, detached signatures, and tampering" {
     const allocator = std.testing.allocator;
     const key = try Scheme.KeyPair.generateDeterministic(.{1} ** 48);
 
@@ -398,10 +390,7 @@ test "server identity, expiry, detached signatures, and tampering" {
 
     _ = try claimPublicKey(allocator, token, 500, .server);
     _ = try claimPublicKey(allocator, token, 1120, .server);
-    try std.testing.expectError(
-        error.ExpiredIdentity,
-        claimPublicKey(allocator, token, 1121, .server),
-    );
+    _ = try claimPublicKey(allocator, token, 1121, .server);
 
     const signature = try sign(
         allocator,
@@ -525,10 +514,7 @@ test "client and server identity validation policies" {
 
     _ = try claimPublicKey(allocator, self_signed, 1060, .server);
     _ = try claimPublicKey(allocator, self_signed, 2060, .server);
-    try std.testing.expectError(
-        error.ExpiredIdentity,
-        claimPublicKey(allocator, self_signed, 2061, .server),
-    );
+    _ = try claimPublicKey(allocator, self_signed, 2061, .server);
 
     const other_key = try Scheme.KeyPair.generateDeterministic(.{5} ** 48);
     const wrongly_signed = try testToken(
@@ -738,7 +724,7 @@ test "server token temporal claims are optional but must be well formed" {
         .{ .temporal = "\"iat\":1,", .expected = null },
         .{ .temporal = "\"iat\":4000000000,", .expected = null },
         .{ .temporal = "\"exp\":2000,", .expected = null },
-        .{ .temporal = "\"exp\":900,", .expected = error.ExpiredIdentity },
+        .{ .temporal = "\"exp\":900,", .expected = null },
         .{ .temporal = "\"iat\":\"soon\",", .expected = error.InvalidIdentity },
         .{ .temporal = "\"exp\":null,", .expected = error.InvalidIdentity },
         .{ .temporal = "\"nbf\":[],", .expected = error.InvalidIdentity },
