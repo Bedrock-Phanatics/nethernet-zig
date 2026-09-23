@@ -50,6 +50,13 @@ test "HTTP endpoint listener and dialer transfer ownership and shut down" {
     const server = try listener.accept();
     defer server.destroy();
 
+    const client_channels = client.diagnostics();
+    const server_channels = server.diagnostics();
+    try std.testing.expectEqual(nethernet.ChannelState.open, client_channels.reliable.state);
+    try std.testing.expectEqual(nethernet.ChannelState.open, client_channels.unreliable.state);
+    try std.testing.expectEqual(nethernet.ChannelState.open, server_channels.reliable.state);
+    try std.testing.expectEqual(nethernet.ChannelState.open, server_channels.unreliable.state);
+
     listener.close();
     listener.close();
 
@@ -347,20 +354,41 @@ test "HTTP signaling uses application/sdp and an opaque network ID" {
     var client: std.http.Client = .{ .allocator = allocator, .io = io };
     defer client.deinit();
 
-    var output: [1024 * 1024]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&output);
-    const result = try client.fetch(.{
-        .location = .{ .url = url },
-        .method = .POST,
-        .payload = sdp,
-        .response_writer = &writer,
+    var request = try client.request(.POST, try std.Uri.parse(url), .{
         .headers = .{ .content_type = .{ .override = "application/sdp" } },
     });
+    defer request.deinit();
+    request.transfer_encoding = .{ .content_length = sdp.len };
+    var body = try request.sendBodyUnflushed(&.{});
+    try body.writer.writeAll(sdp);
+    try body.end();
+    try request.connection.?.flush();
 
-    try std.testing.expectEqual(std.http.Status.ok, result.status);
+    var response = try request.receiveHead(&.{});
+    try std.testing.expectEqual(std.http.Status.ok, response.head.status);
+    try std.testing.expectEqualStrings("application/sdp", response.head.content_type.?);
+    var output: [1024 * 1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&output);
+    var transfer_buffer: [64]u8 = undefined;
+    _ = try response.reader(&transfer_buffer).streamRemaining(&writer);
+
     const answer = writer.buffered();
     try std.testing.expect(std.mem.startsWith(u8, answer, "v=0"));
-    try std.testing.expect(std.mem.indexOf(u8, answer, "a=candidate:") != null);
+    for ([_][]const u8{
+        "\r\no=",             "\r\ns=",                                "\r\nt=",          "\r\nc=IN IP",
+        "\r\nm=application ", " UDP/DTLS/SCTP webrtc-datachannel\r\n", "\r\na=mid:0\r\n", "\r\na=ice-ufrag:",
+        "\r\na=ice-pwd:",
+    }) |field| try std.testing.expect(std.mem.indexOf(u8, answer, field) != null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, answer, "\r\nm="));
+    var candidates: usize = 0;
+    var lines = std.mem.tokenizeAny(u8, answer, "\r\n");
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "a=candidate:")) continue;
+        candidates += 1;
+        try std.testing.expect(std.mem.indexOf(u8, line, " UDP ") != null or
+            std.mem.indexOf(u8, line, " udp ") != null);
+    }
+    try std.testing.expect(candidates > 0);
     const media_start = std.mem.indexOf(u8, answer, "\r\nm=").? + 2;
     const identity_start = std.mem.indexOf(u8, answer, "a=identity:").?;
     try std.testing.expect(identity_start < media_start);
