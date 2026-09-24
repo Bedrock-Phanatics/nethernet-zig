@@ -14,6 +14,31 @@ const c = @cImport({
 
 pub const maximum_signal_size = 1024 * 1024;
 
+fn sdpTraceLineKind(line: []const u8) enum { identity, ice_password, plain } {
+    if (std.mem.startsWith(u8, line, "a=identity:")) return .identity;
+    if (std.mem.startsWith(u8, line, "a=ice-pwd:")) return .ice_password;
+    return .plain;
+}
+
+pub fn traceSdp(stage: []const u8, sdp: []const u8) void {
+    std.debug.print("nethernet SDP {s}: {d} bytes\n", .{ stage, sdp.len });
+    var lines = std.mem.splitScalar(u8, sdp, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trimEnd(u8, raw_line, "\r");
+        switch (sdpTraceLineKind(line)) {
+            .identity => std.debug.print("nethernet SDP {s}: a=identity:<redacted> ({d} bytes)\n", .{ stage, line.len }),
+            .ice_password => std.debug.print("nethernet SDP {s}: a=ice-pwd:<redacted> ({d} bytes)\n", .{ stage, line.len }),
+            .plain => if (line.len != 0) std.debug.print("nethernet SDP {s}: {s}\n", .{ stage, line }),
+        }
+    }
+}
+
+test "SDP tracing redacts authentication values" {
+    try std.testing.expectEqual(.identity, sdpTraceLineKind("a=identity:secret"));
+    try std.testing.expectEqual(.ice_password, sdpTraceLineKind("a=ice-pwd:secret"));
+    try std.testing.expectEqual(.plain, sdpTraceLineKind("a=candidate:example"));
+}
+
 fn uppercaseLocalFingerprintDigests(sdp: []u8) void {
     var start: usize = 0;
     while (start < sdp.len) {
@@ -133,6 +158,7 @@ pub const Event = union(enum) {
 };
 
 pub const Options = struct {
+    trace: bool = false,
     queue_bytes: usize = maximum_signal_size,
     queue_entries: usize = 512,
     maximum_buffered_send: usize = 16 * 1024 * 1024 + 255,
@@ -218,12 +244,17 @@ pub const Peer = struct {
         var config = std.mem.zeroes(c.rtcConfiguration);
         config.disableAutoNegotiation = true;
         config.maxMessageSize = framing.maximum_segment_payload + 1;
+        config.mtu = 1200;
         config.iceServers = @ptrCast(@constCast(options.ice_servers.ptr));
         config.iceServersCount = @intCast(options.ice_servers.len);
         config.portRangeBegin = options.port_range_begin;
         config.portRangeEnd = options.port_range_end;
         config.enableIceUdpMux = options.enable_ice_udp_mux;
         if (options.bind_address) |address| config.bindAddress = address.ptr;
+        if (options.trace) std.debug.print("nethernet WebRTC: config mtu={d}, maxMessageSize={d}, iceTcp={any}, udpMux={any}, autoNegotiation={any}\n", .{
+            config.mtu,             config.maxMessageSize,          config.enableIceTcp,
+            config.enableIceUdpMux, !config.disableAutoNegotiation,
+        });
 
         self.id = c.rtcCreatePeerConnection(&config);
         if (self.id < 0) return error.WebRtcFailure;
@@ -559,7 +590,9 @@ pub const Peer = struct {
         self.notify();
         self.mutex.unlock(self.io);
 
-        try check(c.rtcSetLocalDescription(handles.id, "offer"));
+        const local_result = c.rtcSetLocalDescription(handles.id, "offer");
+        if (self.options.trace) std.debug.print("nethernet WebRTC: set local offer result={d}\n", .{local_result});
+        try check(local_result);
     }
 
     pub fn remoteDescription(
@@ -596,6 +629,7 @@ pub const Peer = struct {
             if (kind == .offer) "offer" else "answer",
         );
         if (result == c.RTC_ERR_INVALID) return error.MalformedSignal;
+        if (self.options.trace) std.debug.print("nethernet WebRTC: set remote {s} result={d}\n", .{ if (kind == .offer) "offer" else "answer", result });
         try check(result);
 
         if (kind == .offer) {
@@ -606,7 +640,9 @@ pub const Peer = struct {
             self.notify();
             self.mutex.unlock(self.io);
 
-            try check(c.rtcSetLocalDescription(handles.id, "answer"));
+            const local_result = c.rtcSetLocalDescription(handles.id, "answer");
+            if (self.options.trace) std.debug.print("nethernet WebRTC: set local answer result={d}\n", .{local_result});
+            try check(local_result);
         }
     }
 
@@ -621,7 +657,9 @@ pub const Peer = struct {
             return error.ConnectionClosed;
         defer self.releaseNativeHandles();
 
-        try check(c.rtcAddRemoteCandidate(handles.id, candidate, "0"));
+        const result = c.rtcAddRemoteCandidate(handles.id, candidate, "0");
+        if (self.options.trace) std.debug.print("nethernet WebRTC: remote candidate {s}; result={d}\n", .{ candidate, result });
+        try check(result);
     }
 
     pub fn poll(self: *Peer, output: []u8) !?Event {
@@ -674,6 +712,7 @@ pub const Peer = struct {
             }
 
             const data = output[0 .. @as(usize, @intCast(result)) - 1];
+            if (self.options.trace) traceSdp("native local gathered", data);
             if (!hasUsableLocalCandidate(data)) return error.NoLocalIceCandidate;
             self.description_sent = true;
             uppercaseLocalFingerprintDigests(data);
@@ -822,6 +861,10 @@ pub const Peer = struct {
         {
             return error.InvalidChannel;
         }
+        if (self.options.trace) std.debug.print("nethernet WebRTC: channel label={s}, unordered={any}, unreliable={any}, maxRetransmits={d}, maxPacketLifeTime={d}\n", .{
+            label,                      reliability.unordered,         reliability.unreliable,
+            reliability.maxRetransmits, reliability.maxPacketLifeTime,
+        });
 
         self.mutex.lockUncancelable(self.io);
 
@@ -885,6 +928,8 @@ pub const Peer = struct {
     ) callconv(.c) void {
         const self = from(ptr);
 
+        if (self.options.trace) traceSdp("native local callback", std.mem.span(sdp));
+
         if (!self.options.disable_trickle) {
             self.enqueue(
                 if (std.mem.eql(u8, std.mem.span(kind), "offer")) 0 else 1,
@@ -901,6 +946,8 @@ pub const Peer = struct {
     ) callconv(.c) void {
         const self = from(ptr);
 
+        if (self.options.trace) std.debug.print("nethernet WebRTC: local candidate {s}\n", .{std.mem.span(value)});
+
         if (!self.options.disable_trickle) {
             self.enqueue(2, std.mem.span(value));
         }
@@ -912,6 +959,15 @@ pub const Peer = struct {
         ptr: ?*anyopaque,
     ) callconv(.c) void {
         const self = from(ptr);
+        const mapped: State = switch (state) {
+            c.RTC_NEW => .new,
+            c.RTC_CONNECTING => .connecting,
+            c.RTC_CONNECTED => .connected,
+            c.RTC_DISCONNECTED => .disconnected,
+            c.RTC_FAILED => .failed,
+            else => .closed,
+        };
+        if (self.options.trace) std.debug.print("nethernet WebRTC: peer state={s}\n", .{@tagName(mapped)});
 
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -921,14 +977,7 @@ pub const Peer = struct {
             self.drain_queued_on_close = false;
         }
         if (self.state != .failed) {
-            self.state = switch (state) {
-                c.RTC_NEW => .new,
-                c.RTC_CONNECTING => .connecting,
-                c.RTC_CONNECTED => .connected,
-                c.RTC_DISCONNECTED => .disconnected,
-                c.RTC_FAILED => .failed,
-                else => .closed,
-            };
+            self.state = mapped;
             self.notify();
         }
     }
@@ -939,11 +988,7 @@ pub const Peer = struct {
         ptr: ?*anyopaque,
     ) callconv(.c) void {
         const self = from(ptr);
-
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-
-        self.ice_state = switch (state) {
+        const mapped: IceState = switch (state) {
             c.RTC_ICE_NEW => .new,
             c.RTC_ICE_CHECKING => .checking,
             c.RTC_ICE_CONNECTED => .connected,
@@ -952,6 +997,12 @@ pub const Peer = struct {
             c.RTC_ICE_DISCONNECTED => .disconnected,
             else => .closed,
         };
+        if (self.options.trace) std.debug.print("nethernet WebRTC: ICE state={s}\n", .{@tagName(mapped)});
+
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+
+        self.ice_state = mapped;
         self.notify();
     }
 
@@ -961,16 +1012,18 @@ pub const Peer = struct {
         ptr: ?*anyopaque,
     ) callconv(.c) void {
         const self = from(ptr);
+        const mapped: GatheringState = switch (state) {
+            c.RTC_GATHERING_NEW => .new,
+            c.RTC_GATHERING_INPROGRESS => .in_progress,
+            else => .complete,
+        };
+        if (self.options.trace) std.debug.print("nethernet WebRTC: gathering state={s}\n", .{@tagName(mapped)});
 
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
         self.gathered = state == c.RTC_GATHERING_COMPLETE;
-        self.gathering_state = switch (state) {
-            c.RTC_GATHERING_NEW => .new,
-            c.RTC_GATHERING_INPROGRESS => .in_progress,
-            else => .complete,
-        };
+        self.gathering_state = mapped;
         self.notify();
     }
 
@@ -1029,6 +1082,7 @@ pub const Peer = struct {
     }
     fn onOpen(_: c_int, ptr: ?*anyopaque) callconv(.c) void {
         const self = from(ptr);
+        if (self.options.trace) std.debug.print("nethernet WebRTC: channel open\n", .{});
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         self.notify();
@@ -1056,10 +1110,11 @@ pub const Peer = struct {
 
     fn onError(
         _: c_int,
-        _: [*c]const u8,
+        message: [*c]const u8,
         ptr: ?*anyopaque,
     ) callconv(.c) void {
         const self = from(ptr);
+        if (self.options.trace) std.debug.print("nethernet WebRTC: channel error={s}\n", .{std.mem.span(message)});
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.stopping) return;

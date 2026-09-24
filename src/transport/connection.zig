@@ -216,6 +216,7 @@ pub const Connection = struct {
     signal_buffer: ?[:0]u8 = null,
 
     received_messages: u64 = 0,
+    first_payload_traced: bool = false,
     sent_messages: u64 = 0,
     received_bytes: u64 = 0,
     sent_bytes: u64 = 0,
@@ -259,6 +260,7 @@ pub const Connection = struct {
 
         var native_options = options.native;
         native_options.maximum_message_size = options.maximum_message_size;
+        native_options.trace = native_options.trace or options.trace;
 
         const peer = try native.Peer.create(allocator, io, native_options);
         errdefer peer.destroy();
@@ -405,6 +407,8 @@ pub const Connection = struct {
         const identity_kind: auth.IdentityKind =
             if (self.role == .client) .server else .client;
 
+        if (self.options.trace) native.traceSdp("remote signed", signal.data);
+
         const verifier = verifierForRole(self.options, self.role);
         const key = auth.verify(
             self.allocator,
@@ -426,8 +430,10 @@ pub const Connection = struct {
         self.identity_issuer_verified = key != null and verifier != null;
         if (self.options.trace) std.debug.print("nethernet identity: {s}\n", .{if (key == null) "anonymous allowed" else if (verifier != null) "proof and issuer verified" else "proof verified"});
 
+        const native_sdp = auth.removeIdentity(terminated);
+        if (self.options.trace) native.traceSdp("remote stripped", native_sdp);
         self.peer.remoteDescription(
-            auth.removeIdentity(terminated),
+            native_sdp,
             if (is_offer) .offer else .answer,
         ) catch |err| {
             if (self.options.trace) std.debug.print("nethernet remote description: failed ({s})\n", .{@errorName(err)});
@@ -498,6 +504,9 @@ pub const Connection = struct {
             .offer, .answer, .candidate => |data| {
                 var body = data;
 
+                if (self.options.trace and event != .candidate)
+                    native.traceSdp("local before identity", data);
+
                 if (event != .candidate) {
                     if (self.options.identity) |identity| {
                         self.signal_buffer = auth.add(self.allocator, data, identity) catch |err| {
@@ -508,6 +517,9 @@ pub const Connection = struct {
                         if (self.options.trace) std.debug.print("nethernet local identity: signed\n", .{});
                     }
                 }
+
+                if (self.options.trace and event != .candidate)
+                    native.traceSdp("local signaled", body);
 
                 const kind = if (event == .offer)
                     Signal.offer
@@ -539,6 +551,12 @@ pub const Connection = struct {
 
                 self.received_messages +|= 1;
                 self.received_bytes +|= message.len;
+                if (self.options.trace and !self.first_payload_traced) {
+                    self.first_payload_traced = true;
+                    std.debug.print("nethernet WebRTC: first Bedrock payload channel={s}, bytes={d}\n", .{
+                        if (reliable) "reliable" else "unreliable", message.len,
+                    });
+                }
 
                 return .{
                     .message = .{
