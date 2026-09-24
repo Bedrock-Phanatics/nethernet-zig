@@ -115,7 +115,7 @@ test "HTTP endpoint status is optional and provider errors are safe" {
         .location = .{ .url = url },
         .response_writer = &writer,
     });
-    try std.testing.expectEqual(std.http.Status.service_unavailable, failed.status);
+    try std.testing.expectEqual(std.http.Status.ok, failed.status);
     try std.testing.expectEqual(@as(usize, 0), writer.buffered().len);
 }
 
@@ -137,7 +137,7 @@ test "HTTP rejects invalid routes, network IDs, empty SDP and oversized bodies" 
     const cases = [_]Case{
         .{
             .request = "GET /v1/join HTTP/1.1\r\nHost: localhost\r\n\r\n",
-            .status = "503",
+            .status = "200",
         },
         .{
             .request = "GET /bad HTTP/1.1\r\nHost: localhost\r\n\r\n",
@@ -314,7 +314,7 @@ test "HTTP signaling uses application/sdp and an opaque network ID" {
     );
     defer allocator.free(origin);
 
-    for ([_][]const u8{ "a3f0-9c11", "18446744073709551616" }) |network_id| {
+    for ([_][]const u8{ "a3f0-9c11", "18446744073709551616", "a/b?c#d% e" }) |network_id| {
         const client = try nethernet.dialEndpoint(allocator, io, origin, network_id, .{});
         defer client.destroy();
 
@@ -332,7 +332,10 @@ test "HTTP signaling uses application/sdp and an opaque network ID" {
     const url = try std.fmt.allocPrint(allocator, "{s}/v1/join/7", .{origin});
     defer allocator.free(url);
 
-    const offer = try nethernet.Peer.create(allocator, io, .{ .disable_trickle = true });
+    const offer = try nethernet.Peer.create(allocator, io, .{
+        .disable_trickle = true,
+        .bind_address = "127.0.0.1",
+    });
     defer offer.destroy();
     try offer.offer();
 
@@ -351,6 +354,17 @@ test "HTTP signaling uses application/sdp and an opaque network ID" {
         try std.Io.sleep(io, .fromMilliseconds(1), .awake);
     };
 
+    const rewritten = try allocator.dupe(u8, sdp);
+    defer allocator.free(rewritten);
+    var replacements: usize = 0;
+    var position: usize = 0;
+    while (std.mem.indexOfPos(u8, rewritten, position, "127.0.0.1")) |found| {
+        @memcpy(rewritten[found..][0..9], "192.0.2.1");
+        replacements += 1;
+        position = found + 9;
+    }
+    try std.testing.expect(replacements > 0);
+
     var client: std.http.Client = .{ .allocator = allocator, .io = io };
     defer client.deinit();
 
@@ -358,9 +372,9 @@ test "HTTP signaling uses application/sdp and an opaque network ID" {
         .headers = .{ .content_type = .{ .override = "application/sdp" } },
     });
     defer request.deinit();
-    request.transfer_encoding = .{ .content_length = sdp.len };
+    request.transfer_encoding = .{ .content_length = rewritten.len };
     var body = try request.sendBodyUnflushed(&.{});
-    try body.writer.writeAll(sdp);
+    try body.writer.writeAll(rewritten);
     try body.end();
     try request.connection.?.flush();
 
@@ -414,4 +428,17 @@ test "HTTP signaling uses application/sdp and an opaque network ID" {
         .server,
         null,
     )) != null);
+
+    const native_answer = try allocator.dupeZ(u8, answer);
+    defer allocator.free(native_answer);
+    try offer.remoteDescription(native_answer, .answer);
+    const deadline = std.Io.Clock.awake.now(io);
+    while (!offer.ready()) {
+        if (deadline.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds() > 15_000)
+            return error.Timeout;
+        try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    }
+    const server = try listener.accept();
+    defer server.destroy();
+    try std.testing.expectEqual(std.mem.count(u8, rewritten, "a=candidate:") + 1, server.remoteIceCandidateCount());
 }

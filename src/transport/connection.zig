@@ -16,20 +16,86 @@ pub const SelectedIceAddresses = native.SelectedIceAddresses;
 pub const maximum_network_id_length = 4096;
 const maximum_signal_size = 1024 * 1024;
 
-/// Validates an opaque network ID for use in an HTTP path segment.
+/// Bounds an opaque network ID before it is stored or URL encoded.
 pub fn validNetworkId(text: []const u8) bool {
     if (text.len == 0 or text.len > maximum_network_id_length) return false;
-    if (std.mem.eql(u8, text, ".") or std.mem.eql(u8, text, "..")) return false;
-
     for (text) |byte| {
-        if (byte < 0x21 or byte > 0x7e) return false;
-        switch (byte) {
-            '/', '?', '#', '%' => return false,
-            else => {},
+        if (byte < 0x20 or byte == 0x7f) return false;
+    }
+    return true;
+}
+
+fn signalingPeerCandidate(
+    offer: []const u8,
+    peer_address: std.Io.net.IpAddress,
+    output: *[256]u8,
+) ?[:0]const u8 {
+    var address_buffer: [64]u8 = undefined;
+    const formatted = std.fmt.bufPrint(&address_buffer, "{f}", .{peer_address}) catch return null;
+    const host = switch (peer_address) {
+        .ip4 => formatted[0 .. std.mem.lastIndexOfScalar(u8, formatted, ':') orelse return null],
+        .ip6 => formatted[1 .. std.mem.indexOfScalar(u8, formatted, ']') orelse return null],
+    };
+
+    var peer_ip = peer_address;
+    peer_ip.setPort(0);
+    var host_port: ?u16 = null;
+    var lines = std.mem.splitScalar(u8, offer, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "a=candidate:")) continue;
+        var fields = std.mem.tokenizeAny(u8, line, " \t\r");
+        _ = fields.next() orelse continue;
+        const component = std.fmt.parseInt(u16, fields.next() orelse continue, 10) catch continue;
+        const protocol = fields.next() orelse continue;
+        _ = fields.next() orelse continue;
+        const candidate_host = fields.next() orelse continue;
+        const port = std.fmt.parseInt(u16, fields.next() orelse continue, 10) catch continue;
+        if (!std.mem.eql(u8, fields.next() orelse continue, "typ")) continue;
+        const kind = fields.next() orelse continue;
+        if (std.Io.net.IpAddress.parse(candidate_host, 0)) |candidate_ip| {
+            if (candidate_ip.eql(&peer_ip)) return null;
+        } else |_| {}
+        if (host_port == null and component == 1 and port != 0 and
+            std.ascii.eqlIgnoreCase(protocol, "udp") and std.mem.eql(u8, kind, "host"))
+        {
+            host_port = port;
         }
     }
 
-    return true;
+    const candidate = std.fmt.bufPrint(
+        output[0 .. output.len - 1],
+        "candidate:signaling 1 udp 1694498815 {s} {d} typ srflx raddr 0.0.0.0 rport 0",
+        .{ host, host_port orelse return null },
+    ) catch return null;
+    output[candidate.len] = 0;
+    return output[0..candidate.len :0];
+}
+
+test "signaling peer candidate uses the offered UDP host port" {
+    const peer = try std.Io.net.IpAddress.parseLiteral("198.51.100.8:19132");
+    var output: [256]u8 = undefined;
+    const offer =
+        "a=candidate:a 1 udp 2130706431 192.168.1.4 45678 typ host\r\n" ++
+        "a=candidate:b 1 tcp 1 192.168.1.4 9 typ host\r\n";
+    try std.testing.expectEqualStrings(
+        "candidate:signaling 1 udp 1694498815 198.51.100.8 45678 typ srflx raddr 0.0.0.0 rport 0",
+        signalingPeerCandidate(offer, peer, &output).?,
+    );
+    try std.testing.expect(signalingPeerCandidate(
+        offer ++ "a=candidate:c 1 udp 1 198.51.100.8 12345 typ srflx\r\n",
+        peer,
+        &output,
+    ) == null);
+    try std.testing.expect(signalingPeerCandidate(
+        "a=candidate:b 1 tcp 1 192.168.1.4 9 typ host\r\n",
+        peer,
+        &output,
+    ) == null);
+    const ipv6 = try std.Io.net.IpAddress.parseLiteral("[2001:db8::8]:19132");
+    try std.testing.expectEqualStrings(
+        "candidate:signaling 1 udp 1694498815 2001:db8::8 45678 typ srflx raddr 0.0.0.0 rport 0",
+        signalingPeerCandidate(offer, ipv6, &output).?,
+    );
 }
 
 pub const Role = enum { client, server };
@@ -362,6 +428,21 @@ pub const Connection = struct {
     pub fn start(self: *Connection) !void {
         if (self.role != .client) return error.InvalidState;
         try self.peer.offer();
+    }
+
+    pub fn addSignalingPeerCandidate(
+        self: *Connection,
+        offer: []const u8,
+        peer_address: std.Io.net.IpAddress,
+    ) void {
+        if (self.role != .server) return;
+        var buffer: [256]u8 = undefined;
+        const candidate = signalingPeerCandidate(offer, peer_address, &buffer) orelse return;
+        self.remote_candidates.addTrickled(self.options.maximum_remote_candidates) catch return;
+        self.remote_candidate_count.store(self.remote_candidates.count, .release);
+        self.peer.remoteCandidate(candidate) catch |err| {
+            if (self.options.trace) std.debug.print("nethernet signaling peer candidate rejected ({s})\n", .{@errorName(err)});
+        };
     }
 
     pub fn applySignal(self: *Connection, signal: Signal) !void {
@@ -1139,7 +1220,7 @@ test "proof of possession alone is not issuer verification" {
     try std.testing.expect(!connection.identity_issuer_verified);
 }
 
-test "network IDs are opaque but bounded to one path segment" {
+test "network IDs are opaque but bounded" {
     for ([_][]const u8{
         "1",
         "18446744073709551615",
@@ -1147,22 +1228,17 @@ test "network IDs are opaque but bounded to one path segment" {
         "a3f0-9c11",
         "{1}",
         "..a",
+        ".",
+        "..",
+        "a/b?c#d% e",
+        "\xff\xfe",
         "a" ** maximum_network_id_length,
     }) |id| try std.testing.expect(validNetworkId(id));
 
     for ([_][]const u8{
         "",
-        ".",
-        "..",
-        "123/extra",
-        "123?x=1",
-        "123#f",
-        "%7B1%7D",
-        "%2e%2e",
-        "with space",
         "tab\there",
         &.{ '1', 0 },
-        "\xff\xfe",
         "a" ** (maximum_network_id_length + 1),
     }) |id| try std.testing.expect(!validNetworkId(id));
 }

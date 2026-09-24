@@ -78,8 +78,8 @@ fn exchangeWork(
     const base = std.mem.trimEnd(u8, origin, "/");
     const url = try std.fmt.allocPrint(
         allocator,
-        "{s}/v1/join/{s}",
-        .{ base, network_id },
+        "{s}/v1/join/{f}",
+        .{ base, std.fmt.alt(std.Uri.Component{ .raw = network_id }, .formatEscaped) },
     );
     defer allocator.free(url);
 
@@ -256,11 +256,11 @@ test "opaque and numeric network IDs share one representation" {
     );
 }
 
-test "endpoint exchanges reject IDs that would leave the path segment" {
+test "endpoint exchanges reject empty, control, and oversized IDs" {
     const allocator = std.testing.allocator;
     var output: [64]u8 = undefined;
 
-    for ([_][]const u8{ "", ".", "..", "a/b", "a?b", "a#b", "%2e%2e", &.{ '1', 0 } }) |id| {
+    for ([_][]const u8{ "", "tab\there", &.{ '1', 0 }, "a" ** (connection.maximum_network_id_length + 1) }) |id| {
         try std.testing.expectError(error.InvalidNetworkId, exchangeWork(
             allocator,
             undefined,

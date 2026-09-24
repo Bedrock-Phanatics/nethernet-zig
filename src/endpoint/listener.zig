@@ -305,22 +305,23 @@ pub const Listener = struct {
             if (!std.mem.eql(u8, expect, "100-continue")) return error.HttpExpectationFailed;
         }
 
+        const target = request.head.target;
+        const path = target[0 .. std.mem.indexOfAny(u8, target, "?#") orelse target.len];
+
         if (request.head.method == .GET and
-            std.mem.eql(u8, request.head.target, "/v1/join"))
+            (std.mem.eql(u8, path, "/v1/join") or std.mem.eql(u8, path, "/v1/join/")))
         {
             self.trace("GET /v1/join received", .{});
             const provider = self.options.status_provider orelse {
-                self.trace("GET /v1/join HTTP 503 (no status provider)", .{});
+                self.trace("GET /v1/join HTTP 200 (no status provider)", .{});
                 return respond(&request, response_state, "", .{
-                    .status = .service_unavailable,
                     .keep_alive = false,
                 });
             };
 
             const status = provider.get(provider.context) catch |err| {
-                self.trace("GET /v1/join HTTP 503 (status provider: {s})", .{@errorName(err)});
+                self.trace("GET /v1/join HTTP 200 (status provider: {s})", .{@errorName(err)});
                 return respond(&request, response_state, "", .{
-                    .status = .service_unavailable,
                     .keep_alive = false,
                 });
             };
@@ -345,9 +346,9 @@ pub const Listener = struct {
         }
 
         if (request.head.method != .POST or
-            !std.mem.startsWith(u8, request.head.target, "/v1/join/"))
+            !std.mem.startsWith(u8, path, "/v1/join/"))
         {
-            const status: std.http.Status = if (std.mem.startsWith(u8, request.head.target, "/v1/join"))
+            const status: std.http.Status = if (std.mem.startsWith(u8, path, "/v1/join"))
                 .bad_request
             else
                 .not_found;
@@ -358,10 +359,20 @@ pub const Listener = struct {
             });
         }
 
-        const network_name = request.head.target[9..];
+        const network_name = path[9..];
         self.trace("POST /v1/join/{{networkId}} received", .{});
 
-        if (!conn.validNetworkId(network_name)) {
+        if (network_name.len > 3 * conn.maximum_network_id_length) {
+            self.trace("POST HTTP 400 (network ID too long)", .{});
+            return respond(&request, response_state, "Invalid network ID", .{
+                .status = .bad_request,
+                .keep_alive = false,
+            });
+        }
+        const network_id = try self.allocator.dupe(u8, network_name);
+        defer self.allocator.free(network_id);
+        const decoded_id = std.Uri.percentDecodeInPlace(network_id);
+        if (!conn.validNetworkId(decoded_id)) {
             self.trace("POST HTTP 400 (invalid network ID)", .{});
             return respond(&request, response_state, "Invalid network ID", .{
                 .status = .bad_request,
@@ -376,9 +387,6 @@ pub const Listener = struct {
                 .keep_alive = false,
             });
         }
-
-        const network_id = try self.allocator.dupe(u8, network_name);
-        defer self.allocator.free(network_id);
 
         var transfer: [4096]u8 = undefined;
         const body_reader = try request.readerExpectContinue(&transfer);
@@ -454,7 +462,7 @@ pub const Listener = struct {
             self.io,
             .server,
             connection_id,
-            network_id,
+            decoded_id,
             connection_options,
         ) catch |err| {
             self.trace("peer creation failed ({s})", .{@errorName(err)});
@@ -468,7 +476,7 @@ pub const Listener = struct {
         connection.applySignal(.{
             .kind = Signal.offer,
             .connection_id = connection_id,
-            .network_id = network_id,
+            .network_id = decoded_id,
             .data = body,
         }) catch |err| {
             const status = errorStatus(err);
@@ -478,6 +486,8 @@ pub const Listener = struct {
                 .keep_alive = false,
             });
         };
+
+        connection.addSignalingPeerCandidate(body, stream.socket.address);
 
         var answered = false;
         var previous_state = connection.state();
