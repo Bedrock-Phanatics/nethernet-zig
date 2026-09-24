@@ -173,12 +173,12 @@ pub fn build(b: *std.Build) void {
     }
 
     if (target.result.os.tag == .windows) {
-        const dll = b.addInstallFileWithDir(
-            .{ .cwd_relative = b.pathJoin(&.{ native_prefix, "bin", "libdatachannel.dll" }) },
-            .bin,
-            "libdatachannel.dll",
-        );
-        b.getInstallStep().dependOn(&dll.step);
+        b.installDirectory(.{
+            .source_dir = .{ .cwd_relative = b.pathJoin(&.{ native_prefix, "bin" }) },
+            .install_dir = .bin,
+            .install_subdir = "",
+            .include_extensions = &.{".dll"},
+        });
     }
 
     const wake_bench_module = createModule(
