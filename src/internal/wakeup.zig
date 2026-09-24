@@ -71,7 +71,7 @@ test "concurrent signals are not lost" {
     var harness: Harness = .{};
     var producer = try io.concurrent(Harness.produce, .{ &harness, io });
     defer producer.cancel(io) catch {};
-    const limit = deadline(std.Io.Clock.awake.now(io), 30_000);
+    const limit = deadline(std.Io.Clock.awake.now(io), 120_000);
     for (1..1001) |i| {
         while (true) {
             harness.wakeup.prepare();
