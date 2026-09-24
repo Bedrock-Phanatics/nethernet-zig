@@ -39,6 +39,35 @@ test "SDP tracing redacts authentication values" {
     try std.testing.expectEqual(.plain, sdpTraceLineKind("a=candidate:example"));
 }
 
+fn nativeTransportStage(message: []const u8) ?[]const u8 {
+    for ([_][]const u8{
+        "Initializing DTLS transport (MbedTLS)",
+        "Initializing DTLS transport (OpenSSL)",
+        "Starting DTLS transport",
+        "DTLS handshake finished",
+        "DTLS handshake failed",
+        "DTLS closed",
+        "SCTP connecting",
+        "SCTP connected",
+        "SCTP disconnected",
+        "SCTP connection failed",
+    }) |stage| {
+        if (std.mem.indexOf(u8, message, stage) != null) return stage;
+    }
+    return null;
+}
+
+fn onNativeLog(_: c.rtcLogLevel, message: [*c]const u8) callconv(.c) void {
+    const stage = nativeTransportStage(std.mem.span(message)) orelse return;
+    std.debug.print("nethernet WebRTC: {s}\n", .{stage});
+}
+
+test "native transport tracing emits milestones without log contents" {
+    try std.testing.expectEqualStrings("DTLS handshake failed", nativeTransportStage("handshake: DTLS handshake failed, secret=hidden").?);
+    try std.testing.expect(nativeTransportStage("Setting remote description: a=ice-pwd:secret") == null);
+    try std.testing.expect(nativeTransportStage("Setting remote description: a=identity:secret") == null);
+}
+
 fn uppercaseLocalFingerprintDigests(sdp: []u8) void {
     var start: usize = 0;
     while (start < sdp.len) {
@@ -175,6 +204,10 @@ pub const Options = struct {
 };
 
 pub const Peer = struct {
+    pub fn enableNativeTrace() void {
+        c.rtcInitLogger(c.RTC_LOG_DEBUG, onNativeLog);
+    }
+
     allocator: std.mem.Allocator,
     io: std.Io,
 
@@ -251,10 +284,12 @@ pub const Peer = struct {
         config.portRangeEnd = options.port_range_end;
         config.enableIceUdpMux = options.enable_ice_udp_mux;
         if (options.bind_address) |address| config.bindAddress = address.ptr;
-        if (options.trace) std.debug.print("nethernet WebRTC: config mtu={d}, maxMessageSize={d}, iceTcp={any}, udpMux={any}, autoNegotiation={any}\n", .{
-            config.mtu,             config.maxMessageSize,          config.enableIceTcp,
-            config.enableIceUdpMux, !config.disableAutoNegotiation,
-        });
+        if (options.trace) {
+            std.debug.print("nethernet WebRTC: config mtu={d}, maxMessageSize={d}, iceTcp={any}, udpMux={any}, autoNegotiation={any}\n", .{
+                config.mtu,             config.maxMessageSize,          config.enableIceTcp,
+                config.enableIceUdpMux, !config.disableAutoNegotiation,
+            });
+        }
 
         self.id = c.rtcCreatePeerConnection(&config);
         if (self.id < 0) return error.WebRtcFailure;

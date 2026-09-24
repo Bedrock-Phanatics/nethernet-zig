@@ -100,6 +100,8 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
+    if (trace) nethernet.Peer.enableNativeTrace();
+
     const key = try nethernet.identity_file.loadOrCreate(
         init.io,
         init.gpa,
