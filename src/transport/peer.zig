@@ -1860,3 +1860,42 @@ test "late ICE and channel callbacks leave a closed peer terminal" {
     try std.testing.expectEqual(@as(usize, 0), peer.queue.count);
     try std.testing.expectEqual(@as(c_int, -1), peer.id);
 }
+
+test "bounded ICE mutations and callback sequences preserve terminal states" {
+    const source = "a=candidate:1 1 UDP 1 192.0.2.1 40000 typ host\r\n";
+    for (0..source.len) |offset| {
+        for ([_]u8{ 0, 10, 13, 32, 58, 127, 255 }) |value| {
+            var damaged = source.*;
+            damaged[offset] = value;
+            _ = hasUsableLocalCandidate(&damaged);
+            _ = hasUsableLocalCandidate(damaged[0..offset]);
+        }
+    }
+
+    var random = std.Random.DefaultPrng.init(0xCA11BAC);
+    for (0..16) |_| {
+        const peer = try Peer.create(std.testing.allocator, std.testing.io, .{ .queue_entries = 4 });
+        defer peer.destroy();
+        var data: [256]u8 = undefined;
+        for (0..128) |step| {
+            const before = peer.getState();
+            switch (random.random().uintLessThan(u8, 6)) {
+                0 => Peer.onState(0, random.random().uintLessThan(c.rtcState, 6), peer),
+                1 => Peer.onIceState(0, random.random().uintLessThan(c.rtcIceState, 7), peer),
+                2 => Peer.onGathered(0, random.random().uintLessThan(c.rtcGatheringState, 3), peer),
+                3 => Peer.onBufferedAmountLow(0, peer),
+                4 => {
+                    random.random().bytes(&data);
+                    peer.enqueue(3, data[0..random.random().uintLessThan(usize, data.len + 1)]);
+                },
+                else => Peer.onError(0, null, peer),
+            }
+            if (before == .failed or before == .closed)
+                try std.testing.expectEqual(before, peer.getState());
+            try std.testing.expect(peer.queue.count <= peer.queue.entries.len);
+            try std.testing.expect(peer.queue.used_bytes <= peer.queue.bytes.len);
+            if (step == 64) peer.close();
+        }
+        try std.testing.expectEqual(State.closed, peer.getState());
+    }
+}

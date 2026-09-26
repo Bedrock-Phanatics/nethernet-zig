@@ -14,6 +14,7 @@ pub fn exercise(input: []u8) void {
     const codec = discovery.Codec.init();
     _ = codec.decode(input, &scratch) catch {};
     _ = Signal.parse(input) catch {};
+    _ = std.http.Server.Request.Head.parse(input) catch {};
     _ = ServerData.decode(input) catch {};
     var decoder = framing.Reassembler.init(&scratch, .reliable);
     var offset: usize = 0;
@@ -203,5 +204,17 @@ test "SDP identity verifier survives mutations of a signed assertion" {
     for ([_]i64{ std.math.minInt(i64), -1, 0, 999, 1000, 1001, std.math.maxInt(i64) }) |now| {
         if (sdp_identity.verify(allocator, signed, now, .server, null)) |_| {} else |_| {}
         if (sdp_identity.verify(allocator, signed, now, .client, null)) |_| {} else |_| {}
+    }
+}
+
+test "HTTP request head mutations remain bounded" {
+    const source = "POST /v1/join/opaque%2Fid HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\n\r\n";
+    for (0..source.len) |offset| {
+        for ([_]u8{ 0, 10, 13, 32, 37, 58, 127, 255 }) |value| {
+            var damaged = source.*;
+            damaged[offset] = value;
+            _ = std.http.Server.Request.Head.parse(&damaged) catch {};
+            _ = std.http.Server.Request.Head.parse(damaged[0..offset]) catch {};
+        }
     }
 }

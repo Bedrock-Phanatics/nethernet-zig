@@ -1,49 +1,10 @@
 # NetherNet
 
-NetherNet is a Zig transport library for Minecraft Bedrock networking. It
-provides authenticated WebRTC connections over HTTP or LAN signaling, with
-reliable and unreliable message delivery through libdatachannel.
+A Zig transport library for Minecraft Bedrock, powered by libdatachannel.
 
-## Features
-
-- HTTP endpoint and LAN discovery connection flows
-- Reliable and unreliable DataChannel messages
-- Authenticated SDP exchange and configurable identity verification
-- Bounded queues, message sizes, candidates, and signaling payloads
-- Graceful shutdown, connection diagnostics, and transport statistics
-
-## Ports
-
-| Port | Protocol | Use |
-| --- | --- | --- |
-| 19132 | TCP | Direct HTTP signaling (`/v1/join`) |
-| negotiated | UDP | ICE, DTLS and SCTP traffic |
-| 7551 | UDP | LAN discovery |
-
-Signaling only carries the SDP exchange; gameplay moves onto the negotiated UDP
-ports, so both are required. Pin the UDP range with
-`.native = .{ .port_range_begin = 30000, .port_range_end = 30010 }`.
-
-LAN discovery is separate. `127.0.0.1:7551` does not work in the Add Server
-screen, which needs the signaling port `127.0.0.1:19132`.
-
-## Reachability
-
-No STUN or TURN server is configured by default, so a peer only ever offers
-host candidates. A server that must be reachable from outside its own network
-has to advertise at least one candidate the client can actually reach: a public
-address, a forwarded port (pin the range with `port_range_begin` /
-`port_range_end`), or an explicitly configured relay via
-`.native = .{ .ice_servers = &.{"stun:host:3478"} }`. Public infrastructure
-stays opt-in rather than being enabled behind your back.
-
-`EndpointListener` returns an empty `200` for `GET /v1/join` without a
-`status_provider`, matching Axolotl's fallback. With a provider it returns JSON
-status, including the advertised Bedrock protocol and version.
-
-Network IDs are opaque strings throughout. `dialEndpoint` also accepts an
-integer and percent-encodes the ID in the request path. IDs are bounded to
-4096 bytes and cannot contain control characters.
+- Authenticated WebRTC connections over HTTP or LAN discovery
+- Reliable and unreliable messaging with fragmentation and reassembly
+- Configurable limits, backpressure, and connection diagnostics
 
 ## Requirements
 
@@ -53,24 +14,69 @@ integer and percent-encodes the ID in the request path. IDs are bounded to
 
 ## Build
 
-Set up the pinned native dependencies, then build in `ReleaseSafe` mode:
+Linux and macOS:
 
 ```sh
-# Linux and macOS
 sh tools/setup-native.sh
 zig build -Doptimize=ReleaseSafe
 ```
 
+Windows:
+
 ```powershell
-# Windows
 powershell -ExecutionPolicy Bypass -File tools/setup-native.ps1
 zig build -Doptimize=ReleaseSafe
 ```
 
-An existing patched libdatachannel installation can be selected with
-`-Dnative-prefix=/path/to/prefix`.
+Use `-Dnative-prefix=/path/to/prefix` to select an existing patched
+libdatachannel installation.
 
-## Quick start
+## Example: echo server and client
+
+The server accepts one connection and echoes a message. The client prints the
+response and acknowledges it before both programs close.
+
+### Server
+
+[examples/server.zig](examples/server.zig)
+
+```zig
+const std = @import("std");
+const nethernet = @import("nethernet");
+
+pub fn main(init: std.process.Init) !void {
+    const address = try std.Io.net.IpAddress.parseLiteral("127.0.0.1:18750");
+
+    const listener = try nethernet.EndpointListener.listen(
+        init.gpa,
+        init.io,
+        address,
+        .{
+            .connection = .{
+                .allow_anonymous = true,
+            },
+        },
+    );
+    defer listener.destroy();
+
+    std.debug.print("NetherNet server on http://127.0.0.1:18750\n", .{});
+
+    const connection = try listener.accept();
+    defer connection.destroy();
+
+    const message = try connection.receive();
+    try connection.send(message.data, message.reliability);
+
+    const acknowledgement = try connection.receive();
+    if (!std.mem.eql(u8, acknowledgement.data, "ack")) return error.InvalidAcknowledgement;
+}
+```
+
+This local example allows clients without an identity token.
+
+### Client
+
+[examples/client.zig](examples/client.zig)
 
 ```zig
 const std = @import("std");
@@ -90,87 +96,71 @@ pub fn main(init: std.process.Init) !void {
 
     const message = try connection.receive();
     std.debug.print("received: {s}\n", .{message.data});
+    try connection.send("ack", .reliable);
 }
 ```
 
-Complete client and server programs are available in
-[`examples/client.zig`](examples/client.zig) and
-[`examples/server.zig`](examples/server.zig).
+### Run it
 
-## Minecraft smoke test
-
-[`examples/minecraft.zig`](examples/minecraft.zig) binds `0.0.0.0:19132` and
-reports each transport stage up to the first Bedrock payload, which it hands
-back undecoded. It is a transport test, not a Minecraft server.
+Build the examples using the instructions above, then start the server:
 
 ```sh
-./zig-out/bin/minecraft   # then Add Server -> 127.0.0.1:19132
+./zig-out/bin/server
 ```
 
-Its identity is persisted to `nethernet-identity.der` (`--identity` to choose).
-Clients pin the server key on first connection over plain HTTP, so a key that
-changes on restart re-prompts every player. An existing P-384 key works if it is
-PKCS#8:
+In a second terminal, run the client:
 
 ```sh
-openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-384 |
-    openssl pkcs8 -topk8 -nocrypt -outform DER -out nethernet-identity.der
+./zig-out/bin/client
 ```
 
-Clients must present an identity unless `--offline` is passed.
+On Windows, run the corresponding executables:
 
-For a same-client backend check on Windows, run the smoke test with
-`--trace --identity nethernet-identity.der` twice. Use the default MbedTLS build
-first. Then run `tools/setup-native.ps1 -Backend OpenSSL -OpenSslRoot <path>` and
-build with `-Dnative-prefix=.deps/native-openssl`. Keep the identity file,
-address, and client unchanged. The trace redacts identity assertions and ICE
-passwords; compare HTTP, SDP, ICE, channel states, and the first payload.
+```powershell
+# First terminal
+.\zig-out\bin\server.exe
 
-## API overview
+# Second terminal
+.\zig-out\bin\client.exe
+```
 
-| API | Use |
-| --- | --- |
-| `dialEndpoint` | Connect to a server through HTTP signaling. |
-| `EndpointListener` | Listen for HTTP-signaled connections. |
-| `dialLan` | Discover and connect to a server on the local network. |
-| `LanListener` | Advertise and accept connections on the local network. |
-| `Connection` | Send and receive messages, inspect state, and close a connection. |
-| `ConnectionOptions` | Configure timeouts, limits, ICE servers, and identity policy. |
-| `Identity` / `IdentityKeyPair` | Configure authenticated SDP identities. |
-| `identity_file` | Load or create a persistent PKCS#8 P-384 server identity. |
+The client prints:
 
-The supported public surface is exposed by `@import("nethernet")`. Everything
-under `src/internal` is private implementation detail.
+```text
+received: hello
+```
 
-## Verification
+### Minecraft smoke test
+
+[examples/minecraft.zig](examples/minecraft.zig) receives the first Bedrock
+payload on port 19132. It is a transport example, not a complete Minecraft server.
+
+Run `zig-out/bin/minecraft` (`minecraft.exe` on Windows) and connect to
+`127.0.0.1:19132`. The server identity is saved in `nethernet-identity.der`.
+
+## Networking
+
+| Port | Protocol | Purpose |
+| --- | --- | --- |
+| 19132 | TCP | HTTP signaling (`/v1/join`) |
+| Negotiated | UDP | WebRTC traffic |
+| 7551 | UDP | LAN discovery |
+
+Both signaling and WebRTC ports must be reachable. Configure
+`port_range_begin` and `port_range_end` to fix the UDP range.
+STUN and TURN servers are optional and must be configured explicitly.
+
+## Tests
 
 ```sh
-zig fmt --check build.zig build.zig.zon src tests examples
 zig build test
-zig build fuzz -Dfuzz-iterations=100000
 zig build test-integration -Doptimize=ReleaseSafe
+zig build fuzz -Dfuzz-iterations=1000
 zig build stress-smoke -Doptimize=ReleaseSafe
 ```
 
-## Benchmarks
-
-```sh
-zig build bench
-zig build test-bench -Doptimize=ReleaseSafe
-zig build stress -Doptimize=ReleaseFast -- --connections 10 --duration-ms 1000 --timeout-ms 3000 --profile fixed --reliability reliable --payload-size 8192
-```
-
-Stress runs use loopback echo pairs, with sequential setup and traffic across
-pairs. `setup_ms` is total setup time; latency includes both directions and
-benchmark validation. Use `--profile fixed` to measure the requested payload
-size. These short runs are diagnostics, not sustained throughput claims.
-
-RSS fields report current residency when available; `rss_peak_bytes` reports
-the process peak separately. `rss_after_close_bytes` is sampled after destroying
-all pairs, while the benchmark and native runtime remain alive. Unavailable
-values are `null` (including current RSS on macOS). Outgoing-buffer high-water
-values are sampled around each send burst.
+Run `zig build bench` for benchmarks.
 
 ## License
 
-Licensed under Apache-2.0. See [LICENSE](LICENSE).
+[Apache-2.0](LICENSE).

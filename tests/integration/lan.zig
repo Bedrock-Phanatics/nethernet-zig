@@ -57,6 +57,14 @@ test "LAN discovery signaling negotiates WebRTC with trickle ICE" {
     defer client.destroy();
 
     try std.testing.expect(client.public_key != null);
+    const transfer_started = std.Io.Clock.awake.now(io);
+    try client.send("LAN application payload", .reliable);
+    const received = try @import("concurrency.zig").receiveDeadline(server, transfer_started);
+    try std.testing.expectEqualStrings("LAN application payload", received.data);
+    try server.send(received.data, .reliable);
+    const echoed = try @import("concurrency.zig").receiveDeadline(client, transfer_started);
+    try std.testing.expectEqualStrings("LAN application payload", echoed.data);
+
     try std.testing.expect(client_discovery.isSubscribed(&restored_listener.wakeup));
 
     // The restored subscription must wake the second accept promptly.

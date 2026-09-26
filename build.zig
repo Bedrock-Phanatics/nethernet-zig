@@ -99,9 +99,12 @@ pub fn build(b: *std.Build) void {
         "Run only matching native tests",
     );
     const native_filters: []const []const u8 = if (native_test_filter) |filter| &.{filter} else &.{};
+    const handshake_pairs = b.option(usize, "handshake-pairs", "Concurrent native test pairs (1-100)") orelse 8;
+    if (handshake_pairs == 0 or handshake_pairs > 100) @panic("handshake-pairs must be 1-100");
 
     const build_options = b.addOptions();
     build_options.addOption(usize, "fuzz_iterations", fuzz_iterations);
+    build_options.addOption(usize, "handshake_pairs", handshake_pairs);
 
     const nethernet = b.addModule("nethernet", .{
         .root_source_file = b.path("src/root.zig"),
@@ -148,6 +151,7 @@ pub fn build(b: *std.Build) void {
         optimize,
     );
     integration_module.addImport("nethernet", nethernet);
+    integration_module.addOptions("build_options", build_options);
     const integration_tests = b.addTest(.{
         .root_module = integration_module,
         .filters = native_filters,
