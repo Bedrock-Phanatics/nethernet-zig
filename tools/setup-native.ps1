@@ -99,14 +99,37 @@ if ($Backend -eq 'MbedTLS') {
     Apply-LibdatachannelPatch (Join-Path $root 'tools/libdatachannel-mbedtls-link-order.patch')
 }
 
+$nativeZigCacheRoot = Join-Path $root '.deps/zig-native-cache'
+if (Test-Path -LiteralPath $nativeZigCacheRoot) {
+    Remove-Item -LiteralPath $nativeZigCacheRoot -Recurse -Force
+}
+New-Item -ItemType Directory -Force (Join-Path $nativeZigCacheRoot 'local') | Out-Null
+New-Item -ItemType Directory -Force (Join-Path $nativeZigCacheRoot 'global') | Out-Null
+
+$nativeZigLocalCache = Join-Path $nativeZigCacheRoot 'local'
+$nativeZigGlobalCache = Join-Path $nativeZigCacheRoot 'global'
+
 foreach ($tool in @{
     'cc' = 'cc'
     'cxx' = 'c++'
+}.GetEnumerator()) {
+    $wrapper = @(
+        '@echo off',
+        "set `"ZIG_LOCAL_CACHE_DIR=$nativeZigLocalCache`"",
+        "set `"ZIG_GLOBAL_CACHE_DIR=$nativeZigGlobalCache`"",
+        "zig $($tool.Value) %*",
+        'exit /b %errorlevel%'
+    ) -join "`r`n"
+
+    Set-Content -LiteralPath ".deps/zig-$($tool.Key).cmd" -Value $wrapper
+}
+
+foreach ($tool in @{
     'ar' = 'ar'
     'ranlib' = 'ranlib'
 }.GetEnumerator()) {
     Set-Content -LiteralPath ".deps/zig-$($tool.Key).cmd" `
-        -Value "@echo off`nzig $($tool.Value) %*"
+        -Value "@echo off`r`nzig $($tool.Value) %*`r`nexit /b %errorlevel%"
 }
 
 $prefix = $root.Replace('\', '/')
