@@ -119,6 +119,13 @@ openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-384 |
 
 Clients must present an identity unless `--offline` is passed.
 
+For a same-client backend check on Windows, run the smoke test with
+`--trace --identity nethernet-identity.der` twice. Use the default MbedTLS build
+first. Then run `tools/setup-native.ps1 -Backend OpenSSL -OpenSslRoot <path>` and
+build with `-Dnative-prefix=.deps/native-openssl`. Keep the identity file,
+address, and client unchanged. The trace redacts identity assertions and ICE
+passwords; compare HTTP, SDP, ICE, channel states, and the first payload.
+
 ## API overview
 
 | API | Use |

@@ -93,6 +93,12 @@ pub fn build(b: *std.Build) void {
         "native-sanitizer",
         "Link a matching instrumented native dependency build",
     );
+    const native_test_filter = b.option(
+        []const u8,
+        "native-test-filter",
+        "Run only matching native tests",
+    );
+    const native_filters: []const []const u8 = if (native_test_filter) |filter| &.{filter} else &.{};
 
     const build_options = b.addOptions();
     build_options.addOption(usize, "fuzz_iterations", fuzz_iterations);
@@ -142,11 +148,17 @@ pub fn build(b: *std.Build) void {
         optimize,
     );
     integration_module.addImport("nethernet", nethernet);
-    const integration_tests = b.addTest(.{ .root_module = integration_module });
+    const integration_tests = b.addTest(.{
+        .root_module = integration_module,
+        .filters = native_filters,
+    });
     const run_integration = b.addRunArtifact(integration_tests);
     addNativeRuntime(b, run_integration, target, native_prefix);
 
-    const library_tests = b.addTest(.{ .root_module = nethernet });
+    const library_tests = b.addTest(.{
+        .root_module = nethernet,
+        .filters = native_filters,
+    });
     const run_library_tests = b.addRunArtifact(library_tests);
     addNativeRuntime(b, run_library_tests, target, native_prefix);
 
