@@ -254,6 +254,11 @@ pub fn decodePayload(payload: []u8) !Decoded {
 }
 
 test "all packet kinds roundtrip and reject tampering" {
+    const Tag = std.meta.Tag(Packet);
+    try std.testing.expectEqual(@as(u16, 0), @intFromEnum(Tag.request));
+    try std.testing.expectEqual(@as(u16, 1), @intFromEnum(Tag.response));
+    try std.testing.expectEqual(@as(u16, 2), @intFromEnum(Tag.message));
+
     const codec = Codec.init();
 
     var scratch: [256]u8 = undefined;

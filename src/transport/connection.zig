@@ -482,6 +482,11 @@ pub const Connection = struct {
 
         errdefer self.close();
 
+        switch (self.state()) {
+            .failed, .closed => return error.ConnectionClosed,
+            else => {},
+        }
+
         if (std.mem.eql(u8, signal.kind, Signal.failure)) {
             return error.RemoteFailure;
         }
@@ -1034,6 +1039,37 @@ test "candidates before an answer are bounded and released" {
         .data = &large,
     }));
     try std.testing.expectEqual(@as(usize, 0), limited.pending_candidates.items.len);
+}
+
+test "late signals cannot refill a terminal connection's candidate queue" {
+    for ([_]native.State{ .failed, .closed }) |terminal| {
+        const connection = try Connection.create(std.testing.allocator, std.testing.io, .client, 7, "remote", .{});
+        defer connection.destroy();
+        const candidate: Signal = .{
+            .kind = Signal.candidate,
+            .connection_id = 7,
+            .network_id = "remote",
+            .data = "candidate:1 1 udp 2122260223 127.0.0.1 9999 typ host",
+        };
+        try connection.applySignal(candidate);
+        if (terminal == .closed) {
+            connection.close();
+        } else {
+            connection.peer.mutex.lockUncancelable(connection.io);
+            connection.peer.state = terminal;
+            connection.peer.mutex.unlock(connection.io);
+        }
+
+        for ([_][]const u8{ Signal.candidate, Signal.answer, Signal.offer, Signal.failure }) |kind| {
+            var late = candidate;
+            late.kind = kind;
+            try std.testing.expectError(error.ConnectionClosed, connection.applySignal(late));
+            try std.testing.expectEqual(@as(usize, 0), connection.pending_candidates.items.len);
+            try std.testing.expectEqual(@as(usize, 0), connection.pending_candidate_bytes);
+            try std.testing.expectEqual(@as(usize, 1), connection.remoteIceCandidateCount());
+            try std.testing.expectEqual(native.State.closed, connection.state());
+        }
+    }
 }
 
 test "candidate before answer replays after the remote description" {

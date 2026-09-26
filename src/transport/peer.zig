@@ -1835,3 +1835,28 @@ test "ICE port ranges and bind addresses are validated" {
         .{ .bind_address = "" },
     ));
 }
+
+test "late ICE and channel callbacks leave a closed peer terminal" {
+    const peer = try Peer.create(std.testing.allocator, std.testing.io, .{});
+    defer peer.destroy();
+    peer.close();
+    const ice_state = peer.ice_state;
+    const gathering_state = peer.gathering_state;
+
+    Peer.onState(-1, c.RTC_CONNECTED, peer);
+    Peer.onIceState(-1, c.RTC_ICE_CONNECTED, peer);
+    Peer.onGathered(-1, c.RTC_GATHERING_COMPLETE, peer);
+    Peer.onCandidate(-1, "candidate:1 1 udp 1 127.0.0.1 9999 typ host", "0", peer);
+    Peer.onDescription(-1, "v=0\r\n", "answer", peer);
+    Peer.onBufferedAmountLow(-1, peer);
+    Peer.onOpen(-1, peer);
+    Peer.onClosed(-1, peer);
+    Peer.onError(-1, "late failure", peer);
+    peer.close();
+
+    try std.testing.expectEqual(State.closed, peer.getState());
+    try std.testing.expectEqual(ice_state, peer.ice_state);
+    try std.testing.expectEqual(gathering_state, peer.gathering_state);
+    try std.testing.expectEqual(@as(usize, 0), peer.queue.count);
+    try std.testing.expectEqual(@as(c_int, -1), peer.id);
+}

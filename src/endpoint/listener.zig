@@ -709,3 +709,43 @@ test "server status JSON is bounded and escaped" {
         .game_type = 0,
     }, &tiny));
 }
+
+test "HTTP capacity exhaustion returns 503 and releases reservations" {
+    const io = std.testing.io;
+    const listener = try Listener.listen(
+        std.testing.allocator,
+        io,
+        try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0"),
+        .{ .maximum_negotiations = 1, .maximum_pending_accepts = 1, .maximum_http_workers = 2, .request_timeout_ms = 1000 },
+    );
+    defer listener.destroy();
+
+    for ([_]bool{ false, true }) |negotiation| {
+        try std.testing.expect(if (negotiation) listener.reserveNegotiation() else listener.reserveAccept());
+        var reserved = true;
+        defer if (reserved) {
+            if (negotiation) listener.releaseNegotiation() else listener.releaseAccept();
+        };
+
+        const stream = try listener.server.socket.address.connect(io, .{ .mode = .stream });
+        defer stream.close(io);
+        var write_buffer: [256]u8 = undefined;
+        var writer = stream.writer(io, &write_buffer);
+        try writer.interface.writeAll(
+            "POST /v1/join/1 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnope",
+        );
+        try writer.interface.flush();
+        var read_buffer: [256]u8 = undefined;
+        var reader = stream.reader(io, &read_buffer);
+        try std.testing.expectEqualStrings("HTTP/1.1 503", try reader.interface.take(12));
+        _ = try reader.interface.discardRemaining();
+        if (negotiation) listener.releaseNegotiation() else listener.releaseAccept();
+        reserved = false;
+        listener.accept_mutex.lockUncancelable(io);
+        const accepts = listener.reserved_accepts;
+        const negotiations = listener.active_negotiations;
+        listener.accept_mutex.unlock(io);
+        try std.testing.expectEqual(@as(usize, 0), accepts);
+        try std.testing.expectEqual(@as(usize, 0), negotiations);
+    }
+}

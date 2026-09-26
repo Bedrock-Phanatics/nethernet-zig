@@ -44,3 +44,50 @@ pub const ErrorCode = enum(u8) {
     failed_to_create_identity_assertion = 36,
     identity_not_allowed = 37,
 };
+
+test "signaling error codes retain their wire values" {
+    const std = @import("std");
+    const codes = [_]ErrorCode{
+        .none,
+        .destination_not_logged_in,
+        .negotiation_timeout,
+        .wrong_transport_version,
+        .failed_to_create_peer_connection,
+        .ice,
+        .connect_request,
+        .connect_response,
+        .candidate_add,
+        .inactivity_timeout,
+        .failed_to_create_offer,
+        .failed_to_create_answer,
+        .failed_to_set_local_description,
+        .failed_to_set_remote_description,
+        .negotiation_timeout_waiting_for_response,
+        .negotiation_timeout_waiting_for_accept,
+        .incoming_connection_ignored,
+        .signaling_parsing_failure,
+        .signaling_unknown_error,
+        .signaling_unicast_message_delivery_failed,
+        .signaling_broadcast_delivery_failed,
+        .signaling_message_delivery_failed,
+        .signaling_turn_auth_failed,
+        .signaling_fallback_to_best_effort_delivery,
+        .no_signaling_channel,
+        .not_logged_in,
+        .signaling_failed_to_send,
+        .relay_server_configuration_result_failure,
+        .relay_server_configuration_result_parsing_error_no_urls,
+        .relay_server_configuration_result_parsing_error_no_credentials,
+        .relay_server_configuration_result_parsing_error_no_servers,
+        .relay_server_configuration_result_parsing_error_no_expiration,
+        .data_channel_closed,
+        .internal_error_json_serialization,
+        .invalid_argument,
+        .generic_failure,
+        .failed_to_create_identity_assertion,
+        .identity_not_allowed,
+    };
+    for (codes, 0..) |code, value| {
+        try std.testing.expectEqual(@as(u8, @intCast(value)), @intFromEnum(code));
+    }
+}
