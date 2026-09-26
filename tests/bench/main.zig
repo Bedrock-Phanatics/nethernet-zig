@@ -64,7 +64,7 @@ pub fn main(init: std.process.Init) !void {
         report(io, start, "discovery_decode", size, default_iterations, 0);
     }
 
-    for ([_]usize{ 32, 64, 128, 256, 512, 1024, 1400, 8192, 262143, 262144, payload_size }) |size| {
+    for ([_]usize{ 32, 64, 128, 256, 512, 1024, 1200, 1400, 8192, 65536, 262143, 262144, payload_size }) |size| {
         const iterations: usize = if (size > 8192) 1000 else default_iterations;
         try validateFraming(payload[0..size], frame, storage);
         const start = std.Io.Clock.awake.now(io);
@@ -84,7 +84,7 @@ pub fn main(init: std.process.Init) !void {
             "frame_reassemble",
             size,
             iterations,
-            if (size <= framing.maximum_segment_payload) 0 else size,
+            size,
         );
     }
 

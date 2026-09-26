@@ -152,6 +152,25 @@ zig build test-integration -Doptimize=ReleaseSafe
 zig build stress-smoke -Doptimize=ReleaseSafe
 ```
 
+## Benchmarks
+
+```sh
+zig build bench
+zig build test-bench -Doptimize=ReleaseSafe
+zig build stress -Doptimize=ReleaseFast -- --connections 10 --duration-ms 1000 --timeout-ms 3000 --profile fixed --reliability reliable --payload-size 8192
+```
+
+Stress runs use loopback echo pairs, with sequential setup and traffic across
+pairs. `setup_ms` is total setup time; latency includes both directions and
+benchmark validation. Use `--profile fixed` to measure the requested payload
+size. These short runs are diagnostics, not sustained throughput claims.
+
+RSS fields report current residency when available; `rss_peak_bytes` reports
+the process peak separately. `rss_after_close_bytes` is sampled after destroying
+all pairs, while the benchmark and native runtime remain alive. Unavailable
+values are `null` (including current RSS on macOS). Outgoing-buffer high-water
+values are sampled around each send burst.
+
 ## License
 
 Licensed under Apache-2.0. See [LICENSE](LICENSE).

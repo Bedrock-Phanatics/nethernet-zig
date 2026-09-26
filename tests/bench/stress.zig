@@ -36,6 +36,7 @@ const Metrics = struct {
     corruptions: u64 = 0,
     dropped_unreliable: u64 = 0,
     queue_high_water_bytes: usize = 0,
+    buffered_high_water_bytes: usize = 0,
     latencies_ns: std.ArrayList(u64) = .empty,
 };
 
@@ -53,13 +54,13 @@ pub fn main(init: std.process.Init) !void {
     var connected: usize = 0;
     defer for (pairs[0..connected]) |pair| pair.destroy();
 
-    const rss_process_start = residentBytes();
+    const rss_process_start = residentBytes(io);
     const setup_started = std.Io.Clock.awake.now(io);
     while (connected < pairs.len) : (connected += 1) {
         pairs[connected] = try connect(allocator, io, connected, config.timeout_ms);
     }
     const setup_ns = setup_started.durationTo(std.Io.Clock.awake.now(io)).nanoseconds;
-    const rss_start = residentBytes();
+    const rss_start = residentBytes(io);
 
     const maximum_payload = @max(config.payload_size, 8192);
     const payload = try allocator.alloc(u8, maximum_payload);
@@ -106,12 +107,14 @@ pub fn main(init: std.process.Init) !void {
                 };
             }
 
+            updateHighWater(&metrics, pair.*);
             for (0..config.burst) |_| {
                 const received = try receiveDeadline(pair.server, sent, config.timeout_ms);
                 if (!validPayload(received.data, sequence, size)) metrics.corruptions += 1;
                 try pair.server.send(received.data, received.reliability);
             }
 
+            updateHighWater(&metrics, pair.*);
             for (0..config.burst) |_| {
                 const echoed = try receiveDeadline(pair.client, sent, config.timeout_ms);
                 if (!validPayload(echoed.data, sequence, size)) metrics.corruptions += 1;
@@ -131,8 +134,9 @@ pub fn main(init: std.process.Init) !void {
                 metrics.messages % config.churn_messages == 0)
             {
                 recordFinalStats(&metrics, pair.*);
+                const replacement = try connect(allocator, io, pair_index, config.timeout_ms);
                 pair.destroy();
-                pair.* = try connect(allocator, io, pair_index, config.timeout_ms);
+                pair.* = replacement;
                 metrics.reconnects += 1;
             }
 
@@ -147,7 +151,10 @@ pub fn main(init: std.process.Init) !void {
 
     const elapsed_ns = wall_started.durationTo(std.Io.Clock.awake.now(io)).nanoseconds;
     const cpu_ns = cpu_started.durationTo(std.Io.Clock.cpu_process.now(io)).nanoseconds;
-    const rss_end = residentBytes();
+    const rss_end = residentBytes(io);
+    for (pairs) |pair| pair.destroy();
+    connected = 0;
+    const rss_after_close = residentBytes(io);
     std.mem.sort(u64, metrics.latencies_ns.items, {}, std.sort.asc(u64));
 
     printReport(
@@ -159,6 +166,7 @@ pub fn main(init: std.process.Init) !void {
         rss_process_start,
         rss_start,
         rss_end,
+        rss_after_close,
     );
 
     if (metrics.failures != 0 or metrics.corruptions != 0) {
@@ -169,6 +177,10 @@ pub fn main(init: std.process.Init) !void {
 fn updateHighWater(metrics: *Metrics, pair: Pair) void {
     const client = pair.client.callbackStats();
     const server = pair.server.callbackStats();
+    metrics.buffered_high_water_bytes = @max(
+        metrics.buffered_high_water_bytes,
+        @max(pair.client.diagnostics().bufferedOutgoingBytes(), pair.server.diagnostics().bufferedOutgoingBytes()),
+    );
     metrics.queue_high_water_bytes = @max(
         metrics.queue_high_water_bytes,
         @max(client.queue_high_water_bytes, server.queue_high_water_bytes),
@@ -189,17 +201,20 @@ fn printReport(
     setup_ns: i96,
     elapsed_ns: i96,
     cpu_ns: i96,
-    rss_process_start: u64,
-    rss_start: u64,
-    rss_end: u64,
+    rss_process_start: Memory,
+    rss_start: Memory,
+    rss_end: Memory,
+    rss_after_close: Memory,
 ) void {
     const seconds = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_s;
     const cpu_percent =
         @as(f64, @floatFromInt(cpu_ns)) /
         @as(f64, @floatFromInt(elapsed_ns)) *
         100;
-    const rss_growth =
-        @as(i128, @intCast(rss_end)) - @as(i128, @intCast(rss_start));
+    const rss_growth: ?i128 = if (rss_end.current != null and rss_start.current != null)
+        @as(i128, rss_end.current.?) - @as(i128, rss_start.current.?)
+    else
+        null;
 
     const format =
         "{{\"os\":\"{s}\",\"arch\":\"{s}\",\"zig\":\"{s}\",\"mode\":\"{s}\"," ++
@@ -208,10 +223,10 @@ fn printReport(
         "\"reliability\":\"{s}\",\"setup_ms\":{d:.1},\"messages\":{d},\"bytes\":{d}," ++
         "\"messages_per_second\":{d:.1},\"mib_per_second\":{d:.2}," ++
         "\"latency_p50_us\":{d:.1},\"latency_p95_us\":{d:.1},\"latency_p99_us\":{d:.1}," ++
-        "\"cpu_percent\":{d:.1},\"rss_process_start_bytes\":{d},\"rss_start_bytes\":{d}," ++
-        "\"rss_end_bytes\":{d},\"rss_growth_bytes\":{d},\"reconnects\":{d}," ++
+        "\"cpu_percent\":{d:.1},\"rss_process_start_bytes\":{?d},\"rss_start_bytes\":{?d}," ++
+        "\"rss_end_bytes\":{?d},\"rss_growth_bytes\":{?d},\"reconnects\":{d}," ++
         "\"failures\":{d},\"corruptions\":{d},\"dropped_unreliable\":{d}," ++
-        "\"queue_high_water_bytes\":{d}}}\n";
+        "\"queue_high_water_bytes\":{d},";
 
     std.debug.print(format, .{
         @tagName(builtin.os.tag),
@@ -235,15 +250,20 @@ fn printReport(
         percentile(metrics.latencies_ns.items, 95),
         percentile(metrics.latencies_ns.items, 99),
         cpu_percent,
-        rss_process_start,
-        rss_start,
-        rss_end,
+        rss_process_start.current,
+        rss_start.current,
+        rss_end.current,
         rss_growth,
         metrics.reconnects,
         metrics.failures,
         metrics.corruptions,
         metrics.dropped_unreliable,
         metrics.queue_high_water_bytes,
+    });
+    std.debug.print("\"buffered_high_water_bytes\":{d},\"rss_peak_bytes\":{?d},\"rss_after_close_bytes\":{?d}}}\n", .{
+        metrics.buffered_high_water_bytes,
+        rss_after_close.peak,
+        rss_after_close.current,
     });
 }
 
@@ -394,9 +414,22 @@ fn receiveDeadline(
         }
 
         if (!connection.peer.hasPending(false)) {
-            try std.Io.sleep(connection.io, .fromMilliseconds(1), .awake);
+            try connection.peer.wakeup.wait(connection.io, .{ .deadline = .{
+                .raw = started.addDuration(.fromMilliseconds(timeout_ms)),
+                .clock = .awake,
+            } });
         }
     }
+}
+
+test "benchmark receive deadline remains bounded" {
+    const connection = try Connection.create(std.testing.allocator, std.testing.io, .client, 1, "remote", .{});
+    defer connection.destroy();
+    connection.established = true;
+    try std.testing.expectError(
+        error.Timeout,
+        receiveDeadline(connection, std.Io.Clock.awake.now(std.testing.io), 1),
+    );
 }
 
 fn payloadSize(config: Config, sequence: u64) usize {
@@ -441,15 +474,44 @@ fn percentile(values: []const u64, percent: usize) f64 {
     return @as(f64, @floatFromInt(values[index])) / std.time.ns_per_us;
 }
 
-fn residentBytes() u64 {
+const Memory = struct {
+    current: ?u64 = null,
+    peak: ?u64 = null,
+};
+
+fn residentBytes(io: std.Io) Memory {
     if (builtin.os.tag == .windows) return windowsResidentBytes();
     if (builtin.os.tag == .linux or builtin.os.tag == .macos) {
         const usage = std.posix.getrusage(std.posix.rusage.SELF);
         const value: u64 = @intCast(usage.maxrss);
-        return if (builtin.os.tag == .macos) value else value * 1024;
+        var memory: Memory = .{ .peak = if (builtin.os.tag == .macos) value else value * 1024 };
+        if (builtin.os.tag == .linux) {
+            var buffer: [8192]u8 = undefined;
+            const status = std.Io.Dir.cwd().readFile(io, "/proc/self/status", &buffer) catch return memory;
+            memory.current = parseResidentBytes(status);
+        }
+        return memory;
     }
+    return .{};
+}
 
-    return 0;
+fn parseResidentBytes(status: []const u8) ?u64 {
+    var lines = std.mem.splitScalar(u8, status, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "VmRSS:")) continue;
+        var fields = std.mem.tokenizeAny(u8, line[6..], " \t");
+        const kib = std.fmt.parseInt(u64, fields.next() orelse return null, 10) catch return null;
+        if (!std.mem.eql(u8, fields.next() orelse return null, "kB")) return null;
+        return std.math.mul(u64, kib, 1024) catch null;
+    }
+    return null;
+}
+
+test "benchmark RSS distinguishes current usage from peak" {
+    try std.testing.expectEqual(@as(?u64, 4096), parseResidentBytes("VmHWM: 99 kB\nVmRSS:\t4 kB\n"));
+    for ([_][]const u8{ "", "VmHWM: 99 kB\n", "VmRSS: x kB", "VmRSS: 4 MB", "VmRSS: 18446744073709551615 kB" }) |invalid| {
+        try std.testing.expectEqual(@as(?u64, null), parseResidentBytes(invalid));
+    }
 }
 
 const ProcessMemoryCounters = extern struct {
@@ -472,12 +534,12 @@ extern "psapi" fn GetProcessMemoryInfo(
     u32,
 ) callconv(.winapi) i32;
 
-fn windowsResidentBytes() u64 {
-    if (builtin.os.tag != .windows) return 0;
+fn windowsResidentBytes() Memory {
+    if (builtin.os.tag != .windows) return .{};
 
     var counters: ProcessMemoryCounters = undefined;
     counters.cb = @sizeOf(ProcessMemoryCounters);
-    if (GetProcessMemoryInfo(GetCurrentProcess(), &counters, counters.cb) == 0) return 0;
+    if (GetProcessMemoryInfo(GetCurrentProcess(), &counters, counters.cb) == 0) return .{};
 
-    return @intCast(counters.working_set_size);
+    return .{ .current = counters.working_set_size, .peak = counters.peak_working_set_size };
 }

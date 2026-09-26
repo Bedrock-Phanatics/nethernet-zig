@@ -9,7 +9,7 @@ test "native peers negotiate and exchange both channel types" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
 
-    const a = try Peer.create(allocator, io, .{ .disable_trickle = true });
+    const a = try Peer.create(allocator, io, .{ .disable_trickle = true, .maximum_buffered_send = 8 });
     defer a.destroy();
 
     const b = try Peer.create(allocator, io, .{ .disable_trickle = true });
@@ -50,6 +50,7 @@ test "native peers negotiate and exchange both channel types" {
     }
 
     for ([_]framing.Reliability{ .reliable, .unreliable }) |reliability| {
+        try std.testing.expectError(error.Backpressure, a.send("12345678", reliability, buffer));
         try a.send("hello", reliability, buffer);
 
         var received = false;

@@ -283,6 +283,11 @@ pub fn build(b: *std.Build) void {
         .name = "transport-stress",
         .root_module = stress_module,
     });
+    const stress_tests = b.addTest(.{ .root_module = stress_module, .filters = &.{"benchmark "} });
+    const run_stress_tests = b.addRunArtifact(stress_tests);
+    addNativeRuntime(b, run_stress_tests, target, native_prefix);
+    b.step("test-bench", "Check benchmark diagnostics").dependOn(&run_stress_tests.step);
+
     const install_stress = b.addInstallArtifact(stress, .{});
     const stress_install_step = b.step(
         "stress-install",
