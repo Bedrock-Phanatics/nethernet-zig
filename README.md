@@ -132,11 +132,27 @@ received: hello
 
 ### Minecraft smoke test
 
-[examples/minecraft.zig](examples/minecraft.zig) receives the first Bedrock
-payload on port 19132. It is a transport example, not a complete Minecraft server.
+[examples/minecraft.zig](examples/minecraft.zig) tests transport connections and
+receives Bedrock payloads. It does not implement login or gameplay.
 
-Run `zig-out/bin/minecraft` (`minecraft.exe` on Windows) and connect to
-`127.0.0.1:19132`. The server identity is saved in `nethernet-identity.der`.
+`--protocol` and `--version` are required and must match the exact client build.
+Check [Mojang's protocol metadata](https://mojang.github.io/bedrock-protocol-docs/changelog/).
+For preview/beta 1.26.60.28 on Windows:
+
+```powershell
+.\zig-out\bin\minecraft.exe --protocol 2216 --version 1.26.60-beta.28 --identity nethernet-identity.der --trace
+```
+
+Connect through Add Server to `127.0.0.1:19132`. Keep the identity file between
+runs. The Windows default accepts both IPv4 and IPv6.
+
+With `--trace`, expect `GET /v1/join HTTP 200 application/json`, followed by
+`POST /v1/join/{networkId} received`. A successful transport connection reaches
+`[7/7] first Bedrock payload`. Live vanilla compatibility still needs testing.
+
+For vanilla-facing applications, provide `status_provider` in
+`EndpointListenerOptions`. GET returns JSON metadata, 503 when unavailable, or
+500 when invalid. POST requires `Content-Type: application/sdp`.
 
 ## Networking
 

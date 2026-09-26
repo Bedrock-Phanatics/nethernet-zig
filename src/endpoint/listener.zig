@@ -28,6 +28,7 @@ pub const Options = struct {
     maximum_http_workers: usize = 32,
     maximum_pending_accepts: usize = 64,
     request_timeout_ms: u32 = 15000,
+    /// GET /v1/join returns 503 without metadata. POST still works.
     status_provider: ?StatusProvider = null,
     trace: bool = false,
 };
@@ -313,15 +314,17 @@ pub const Listener = struct {
         {
             self.trace("GET /v1/join received", .{});
             const provider = self.options.status_provider orelse {
-                self.trace("GET /v1/join HTTP 200 (no status provider)", .{});
+                self.trace("GET /v1/join HTTP 503 (no status provider)", .{});
                 return respond(&request, response_state, "", .{
+                    .status = .service_unavailable,
                     .keep_alive = false,
                 });
             };
 
             const status = provider.get(provider.context) catch |err| {
-                self.trace("GET /v1/join HTTP 200 (status provider: {s})", .{@errorName(err)});
+                self.trace("GET /v1/join HTTP 503 (status provider: {s})", .{@errorName(err)});
                 return respond(&request, response_state, "", .{
+                    .status = .service_unavailable,
                     .keep_alive = false,
                 });
             };
@@ -335,14 +338,15 @@ pub const Listener = struct {
                 });
             };
 
-            self.trace("GET /v1/join HTTP 200, status bytes={d}", .{body.len});
-            return respond(&request, response_state, body, .{
+            try respond(&request, response_state, body, .{
                 .keep_alive = false,
                 .extra_headers = &.{.{
                     .name = "Content-Type",
                     .value = "application/json",
                 }},
             });
+            self.trace("GET /v1/join HTTP 200 application/json, status bytes={d}", .{body.len});
+            return;
         }
 
         if (request.head.method != .POST or
@@ -362,8 +366,8 @@ pub const Listener = struct {
         const network_name = path[9..];
         self.trace("POST /v1/join/{{networkId}} received", .{});
 
-        if (network_name.len > 3 * conn.maximum_network_id_length) {
-            self.trace("POST HTTP 400 (network ID too long)", .{});
+        if (network_name.len > 3 * conn.maximum_network_id_length or !validPercentEncoding(network_name)) {
+            self.trace("POST HTTP 400 (network ID length or encoding)", .{});
             return respond(&request, response_state, "Invalid network ID", .{
                 .status = .bad_request,
                 .keep_alive = false,
@@ -376,6 +380,16 @@ pub const Listener = struct {
             self.trace("POST HTTP 400 (invalid network ID)", .{});
             return respond(&request, response_state, "Invalid network ID", .{
                 .status = .bad_request,
+                .keep_alive = false,
+            });
+        }
+
+        const content_type = request.head.content_type orelse "";
+        const media_type = std.mem.trim(u8, content_type[0 .. std.mem.indexOfScalar(u8, content_type, ';') orelse content_type.len], " \t");
+        if (!std.ascii.eqlIgnoreCase(media_type, "application/sdp")) {
+            self.trace("POST HTTP 415 (expected application/sdp)", .{});
+            return respond(&request, response_state, "", .{
+                .status = .unsupported_media_type,
                 .keep_alive = false,
             });
         }
@@ -540,7 +554,7 @@ pub const Listener = struct {
 
                         if (self.options.trace) {
                             const answer_summary = summarizeSdp(signal.data);
-                            self.trace("answer bytes={d}, identity={s}, candidates={d} (host={d}, srflx={d}, relay={d}, other={d}); HTTP 200 application/sdp", .{
+                            self.trace("answer bytes={d}, identity={s}, candidates={d} (host={d}, srflx={d}, relay={d}, other={d})", .{
                                 signal.data.len,
                                 if (answer_summary.identity) "present" else "missing",
                                 answer_summary.candidates,
@@ -561,6 +575,7 @@ pub const Listener = struct {
                         });
 
                         answered = true;
+                        self.trace("HTTP 200 application/sdp returned", .{});
                     },
 
                     .message => return error.UnexpectedMessage,
@@ -586,6 +601,17 @@ const SdpSummary = struct {
     relay: usize = 0,
     other: usize = 0,
 };
+
+fn validPercentEncoding(value: []const u8) bool {
+    var offset: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, value, offset, '%')) |index| {
+        if (value.len - index < 3 or
+            !std.ascii.isHex(value[index + 1]) or
+            !std.ascii.isHex(value[index + 2])) return false;
+        offset = index + 3;
+    }
+    return true;
+}
 
 fn summarizeSdp(sdp: []const u8) SdpSummary {
     var result: SdpSummary = .{};
@@ -633,6 +659,8 @@ fn encodeStatus(status: ServerStatus, output: []u8) ![]const u8 {
     if (!std.unicode.utf8ValidateSlice(status.name) or
         !std.unicode.utf8ValidateSlice(status.version) or
         !std.unicode.utf8ValidateSlice(status.level) or
+        status.protocol == 0 or status.version.len == 0 or
+        status.game_type < 0 or status.game_type > 2 or
         status.players > status.max_players)
     {
         return error.InvalidServerStatus;
@@ -732,7 +760,7 @@ test "HTTP capacity exhaustion returns 503 and releases reservations" {
         var write_buffer: [256]u8 = undefined;
         var writer = stream.writer(io, &write_buffer);
         try writer.interface.writeAll(
-            "POST /v1/join/1 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnope",
+            "POST /v1/join/1 HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/sdp\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnope",
         );
         try writer.interface.flush();
         var read_buffer: [256]u8 = undefined;

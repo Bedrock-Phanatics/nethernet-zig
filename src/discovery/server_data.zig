@@ -101,7 +101,6 @@ const Writer = struct {
     }
 };
 
-/// Current Bedrock server data wire version.
 pub const wire_version: u8 = 7;
 
 pub const ServerData = struct {
@@ -176,7 +175,6 @@ pub const ServerData = struct {
         return result;
     }
 
-    /// Builds server data from a RakNet pong.
     pub fn fromPong(pong: []const u8) Error!ServerData {
         var fields = std.mem.splitScalar(u8, pong, ';');
         var parts: [9][]const u8 = undefined;

@@ -1,18 +1,16 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const nethernet = @import("nethernet");
 
-const default_protocol: u32 = 2193;
-const default_version = "1.26.51";
-
 const usage =
-    \\usage: minecraft [address] [--identity <path>] [--offline] [--trace] [--protocol <number>] [--version <string>]
+    \\usage: minecraft [address] --protocol <number> --version <string> [--identity <path>] [--offline] [--trace]
     \\
-    \\  address           TCP signaling address, default 0.0.0.0:19132
+    \\  address           TCP signaling address, default 0.0.0.0:19132 (also IPv6 on Windows)
     \\  --identity <path> PKCS#8 P-384 identity, default nethernet-identity.der
     \\  --offline         accept clients that present no identity
     \\  --trace           print safe HTTP and WebRTC negotiation stages
-    \\  --protocol <number> advertised Bedrock protocol, default 2193
-    \\  --version <string>  advertised Bedrock version, default 1.26.51
+    \\  --protocol <number> required: protocol for the exact client build
+    \\  --version <string>  required: version for the exact client build
     \\
 ;
 
@@ -23,16 +21,17 @@ const banner =
     \\  signaling  tcp {s}
     \\  identity   {s} (sha256 {x})
     \\  anonymous  {}
+    \\  advertised protocol {d}, version {s} (transport test only)
     \\
-    \\Add Server -> 127.0.0.1:19132, then join.
+    \\Add Server -> a reachable address and port for this listener, then join.
     \\
     \\
 ;
 
 const Status = struct {
     queries: std.atomic.Value(usize) = .init(0),
-    protocol: u32 = default_protocol,
-    version: []const u8 = default_version,
+    protocol: u32 = 0,
+    version: []const u8 = "",
 
     fn get(context: ?*anyopaque) !nethernet.EndpointServerStatus {
         const self: *Status = @ptrCast(@alignCast(context.?));
@@ -100,6 +99,11 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
+    if (status.protocol == 0 or status.version.len == 0) {
+        std.debug.print("Both --protocol and --version must match the exact client build.\n{s}", .{usage});
+        return error.MissingClientMetadata;
+    }
+
     if (trace) nethernet.Peer.enableNativeTrace();
 
     const key = try nethernet.identity_file.loadOrCreate(
@@ -130,9 +134,39 @@ pub fn main(init: std.process.Init) !void {
     );
     defer listener.destroy();
 
-    std.debug.print(banner, .{ address_text, identity_path, fingerprint, offline });
+    // Windows needs separate listeners for IPv4 and IPv6.
+    const address = listener.server.socket.address;
+    const ipv6_listener = if (builtin.os.tag == .windows and address == .ip4 and
+        std.mem.eql(u8, &address.ip4.bytes, &.{ 0, 0, 0, 0 }))
+        try nethernet.EndpointListener.listen(
+            init.gpa,
+            init.io,
+            .{ .ip6 = .{ .bytes = .{0} ** 16, .port = address.getPort() } },
+            listener.options,
+        )
+    else
+        null;
+    defer if (ipv6_listener) |ipv6| ipv6.destroy();
 
-    const connection = try listener.accept();
+    std.debug.print(banner, .{ address_text, identity_path, fingerprint, offline, status.protocol, status.version });
+    if (ipv6_listener != null) std.debug.print("  signaling  tcp [::]:{d}\n", .{address.getPort()});
+
+    const connection = if (ipv6_listener) |ipv6| connection: {
+        const Accepted = union(enum) { ipv4: anyerror!*nethernet.Connection, ipv6: anyerror!*nethernet.Connection };
+        var results: [2]Accepted = undefined;
+        var select = std.Io.Select(Accepted).init(init.io, &results);
+        defer while (select.cancel()) |pending| {
+            const extra = switch (pending) {
+                inline else => |result| result catch continue,
+            };
+            extra.destroy();
+        };
+        try select.concurrent(.ipv4, nethernet.EndpointListener.accept, .{listener});
+        try select.concurrent(.ipv6, nethernet.EndpointListener.accept, .{ipv6});
+        break :connection try switch (try select.await()) {
+            inline else => |result| result,
+        };
+    } else try listener.accept();
     defer connection.destroy();
 
     const diagnostics = connection.diagnostics();

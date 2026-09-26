@@ -5,10 +5,9 @@ const connection = @import("../transport/connection.zig");
 
 pub const maximum_sdp_size = 1024 * 1024;
 
-/// Room for a decimal u64 network ID.
+// A u64 needs at most 20 decimal digits.
 const maximum_numeric_network_id = 20;
 
-/// Network IDs are opaque strings, though callers may pass integers.
 fn networkIdText(
     network_id: anytype,
     buffer: *[maximum_numeric_network_id]u8,

@@ -120,16 +120,16 @@ test "endpoint negotiates over IPv6 loopback" {
     const listener = Listener.listen(allocator, io, address, .{
         .connection = .{ .allow_anonymous = true },
         .maximum_negotiations = 2,
-    }) catch return error.SkipZigTest;
+    }) catch |err| switch (err) {
+        error.AddressFamilyUnsupported, error.AddressUnavailable => return error.SkipZigTest,
+        else => return err,
+    };
     defer listener.destroy();
 
     const url = try origin(allocator, listener, "[::1]");
     defer allocator.free(url);
 
-    const client = nethernet.dialEndpoint(allocator, io, url, 6, .{}) catch |err| {
-        std.debug.print("skipping IPv6 endpoint negotiation: {s}\n", .{@errorName(err)});
-        return error.SkipZigTest;
-    };
+    const client = try nethernet.dialEndpoint(allocator, io, url, 6, .{});
     defer client.destroy();
 
     const server = try listener.accept();
@@ -276,8 +276,8 @@ test "status response carries exactly the fields Bedrock expects" {
         fn get(_: ?*anyopaque) !nethernet.EndpointServerStatus {
             return .{
                 .name = "srv",
-                .protocol = 2211,
-                .version = "1.26.60.24",
+                .protocol = 2216,
+                .version = "1.26.60-beta.28",
                 .level = "world",
                 .players = 0,
                 .max_players = 10,
@@ -328,8 +328,8 @@ test "status response carries exactly the fields Bedrock expects" {
     }
     try std.testing.expectEqual(bds_status_fields.len, parsed.value.object.count());
 
-    try std.testing.expectEqual(@as(i64, 2211), parsed.value.object.get("protocol").?.integer);
-    try std.testing.expectEqualStrings("1.26.60.24", parsed.value.object.get("version").?.string);
+    try std.testing.expectEqual(@as(i64, 2216), parsed.value.object.get("protocol").?.integer);
+    try std.testing.expectEqualStrings("1.26.60-beta.28", parsed.value.object.get("version").?.string);
     try std.testing.expectEqual(@as(i64, 10), parsed.value.object.get("maxPlayers").?.integer);
 }
 
@@ -350,7 +350,7 @@ test "listener destroyed while a negotiation is in flight" {
         var buffer: [512]u8 = undefined;
         var writer = stream.writer(io, &buffer);
         writer.interface.writeAll(
-            "POST /v1/join/1 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 64\r\n\r\nv=0\r\n",
+            "POST /v1/join/1 HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/sdp\r\nContent-Length: 64\r\n\r\nv=0\r\n",
         ) catch {};
         writer.interface.flush() catch {};
 
@@ -441,7 +441,7 @@ test "network IDs at and beyond the limit are handled over real HTTP" {
 
         const request = try std.fmt.allocPrint(
             allocator,
-            "POST /v1/join/{s} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+            "POST /v1/join/{s} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/sdp\r\nContent-Length: 0\r\n\r\n",
             .{id},
         );
         defer allocator.free(request);

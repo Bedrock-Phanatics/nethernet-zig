@@ -18,7 +18,6 @@ const maximum_signal_size = 1024 * 1024;
 const maximum_pending_candidate_bytes = 64 * 1024;
 const maximum_pending_candidates = 32;
 
-/// Bounds an opaque network ID before it is stored or URL encoded.
 pub fn validNetworkId(text: []const u8) bool {
     if (text.len == 0 or text.len > maximum_network_id_length) return false;
     for (text) |byte| {
@@ -121,7 +120,7 @@ pub const Address = struct {
 
 pub const Message = struct {
     reliability: framing.Reliability,
-    /// Borrowed until the next poll/receive call or destroy().
+    /// Borrowed data. Invalid after the next poll, receive, or destroy.
     data: []const u8,
 };
 
@@ -136,14 +135,13 @@ pub const Options = struct {
     graceful_shutdown_timeout_ms: u32 = 2000,
     maximum_remote_candidates: usize = 32,
     trace: bool = false,
-    /// Allows unauthenticated remote peers when no verifier is configured.
+    /// A configured verifier still requires an identity.
     allow_anonymous: bool = false,
     identity: ?auth.Identity = null,
     server_identity_key: ?auth.KeyPair = null,
     server_identity_domain: []const u8 = "self",
-    /// Verifies the issuer of a remote server token.
+    /// These callbacks verify token issuers, not just key ownership.
     verify_server: ?auth.Verifier = null,
-    /// Verifies the issuer of a remote client token.
     verify_client: ?auth.Verifier = null,
 };
 
@@ -267,9 +265,8 @@ pub const Connection = struct {
     local_id: []u8,
     options: Options,
 
-    /// Key that signed the remote DTLS fingerprint assertion.
+    /// The peer's signing key does not prove its issuer is trusted.
     public_key: ?auth.Key = null,
-    /// Whether the remote token passed issuer verification.
     identity_issuer_verified: bool = false,
     started: std.Io.Timestamp,
     answered: ?std.Io.Timestamp = null,
@@ -283,7 +280,7 @@ pub const Connection = struct {
     packet_scratch: []u8,
     negotiation_scratch: ?[]u8,
     send_buffer: []u8,
-    /// Guards the shared fragment buffer and send counters.
+    // Protects the send buffer and counters.
     send_mutex: std.Io.Mutex = .init,
     assemblies: [2]Assembly = .{
         .{ .decoder = framing.Reassembler.init(&.{}, .reliable) },
@@ -630,7 +627,6 @@ pub const Connection = struct {
         else
             self.packet_scratch;
         const event = try self.peer.pollRestricted(scratch, signals_only) orelse {
-            // Reuse large buffers during a burst, then release them once drained.
             for (&self.assemblies) |*assembly| {
                 if (assembly.decoder.used == 0 and
                     assembly.buffer.capacity > framing.maximum_segment_payload)

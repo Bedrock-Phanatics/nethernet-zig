@@ -14,7 +14,7 @@ const point_size = 97;
 const ec_public_key_oid = [_]u8{ 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01 };
 const secp384r1_oid = [_]u8{ 0x2b, 0x81, 0x04, 0x00, 0x22 };
 
-/// PrivateKeyInfo wrapping an ECPrivateKey, up to the private scalar.
+// PKCS#8 header before the private scalar.
 const prefix =
     [_]u8{ 0x30, 0x81, 0xb6, 0x02, 0x01, 0x00, 0x30, 0x10 } ++
     [_]u8{ 0x06, ec_public_key_oid.len } ++ ec_public_key_oid ++
@@ -73,7 +73,7 @@ pub fn decode(bytes: []const u8) !KeyPair {
 pub fn loadOrCreate(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !KeyPair {
     const cwd: std.Io.Dir = .cwd();
 
-    // Bounded: a file repeatedly created and removed must not spin forever.
+    // Stop retrying if another process keeps replacing the file.
     for (0..8) |_| {
         if (cwd.readFileAlloc(io, path, allocator, .limited(maximum_size))) |bytes| {
             defer {
@@ -112,15 +112,14 @@ const private_permissions: std.Io.File.Permissions =
     else
         .default_file;
 
-/// `start` is also the first child, `end` the next sibling.
+// Offsets point to the contents and the next element.
 const Element = struct {
     start: usize,
     end: usize,
     contents: []const u8,
 };
 
-/// `std.crypto.Certificate.der` skips bounds checks because TLS validates
-/// lengths first. Identity files are untrusted, so decode the length here.
+// The stdlib DER parser assumes checked lengths. Key files need bounds checks here.
 fn take(
     bytes: []const u8,
     index: usize,
@@ -180,7 +179,6 @@ fn expectInteger(bytes: []const u8, index: usize, value: u8) !usize {
     return integer.end;
 }
 
-/// `openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-384 | pkcs8 -topk8`.
 const openssl_fixture = &[_]u8{
     0x30, 0x81, 0xb6, 0x02, 0x01, 0x00, 0x30, 0x10, 0x06, 0x07, 0x2a, 0x86,
     0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22,

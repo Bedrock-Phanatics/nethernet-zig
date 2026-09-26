@@ -474,7 +474,6 @@ pub const Peer = struct {
         return .{ .id = self.id, .channels = self.channels };
     }
 
-    /// Returns the negotiated payload budget for each fragment.
     fn negotiatedSegmentPayload(self: *Peer, id: c_int) !usize {
         const cached = self.segment_payload.load(.acquire);
         if (cached != 0) return cached;

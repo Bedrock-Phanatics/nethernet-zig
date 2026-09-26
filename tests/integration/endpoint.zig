@@ -5,6 +5,9 @@ const Listener = nethernet.EndpointListener;
 
 const TestStatusProvider = struct {
     fail: bool = false,
+    protocol: u32 = 800,
+    version: []const u8 = "1.21.0",
+    game_type: i32 = 1,
 
     fn get(context: ?*anyopaque) !nethernet.EndpointServerStatus {
         const self: *TestStatusProvider = @ptrCast(@alignCast(context.?));
@@ -12,12 +15,12 @@ const TestStatusProvider = struct {
 
         return .{
             .name = "Nether \"Server\"\\One",
-            .protocol = 800,
-            .version = "1.21.0",
+            .protocol = self.protocol,
+            .version = self.version,
             .level = "Snowman ☃",
             .players = 3,
             .max_players = 20,
-            .game_type = 1,
+            .game_type = self.game_type,
         };
     }
 };
@@ -65,7 +68,7 @@ test "HTTP endpoint listener and dialer transfer ownership and shut down" {
     try std.testing.expectEqualStrings("survives listener close", message.data);
 }
 
-test "HTTP endpoint status is optional and provider errors are safe" {
+test "HTTP endpoint returns JSON only for valid available metadata" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     var state: TestStatusProvider = .{};
@@ -96,11 +99,14 @@ test "HTTP endpoint status is optional and provider errors are safe" {
 
     var output: [8192]u8 = undefined;
     var writer = std.Io.Writer.fixed(&output);
-    const result = try client.fetch(.{
-        .location = .{ .url = url },
-        .response_writer = &writer,
-    });
-    try std.testing.expectEqual(std.http.Status.ok, result.status);
+    var request = try client.request(.GET, try std.Uri.parse(url), .{});
+    defer request.deinit();
+    try request.sendBodiless();
+    var response = try request.receiveHead(&.{});
+    try std.testing.expectEqual(std.http.Status.ok, response.head.status);
+    try std.testing.expectEqualStrings("application/json", response.head.content_type.?);
+    var transfer: [64]u8 = undefined;
+    _ = try response.reader(&transfer).streamRemaining(&writer);
 
     const expected =
         "{\"name\":\"Nether \\\"Server\\\"\\\\One\"," ++
@@ -115,8 +121,31 @@ test "HTTP endpoint status is optional and provider errors are safe" {
         .location = .{ .url = url },
         .response_writer = &writer,
     });
-    try std.testing.expectEqual(std.http.Status.ok, failed.status);
+    try std.testing.expectEqual(std.http.Status.service_unavailable, failed.status);
     try std.testing.expectEqual(@as(usize, 0), writer.buffered().len);
+
+    for ([_]TestStatusProvider{
+        .{ .protocol = 0 },
+        .{ .version = "" },
+        .{ .version = "\xff" },
+        .{ .game_type = -1 },
+        .{ .game_type = 3 },
+    }) |invalid| {
+        state = invalid;
+        writer = std.Io.Writer.fixed(&output);
+        const result = try client.fetch(.{
+            .location = .{ .url = url },
+            .response_writer = &writer,
+        });
+        try std.testing.expectEqual(std.http.Status.internal_server_error, result.status);
+        try std.testing.expectEqual(@as(usize, 0), writer.buffered().len);
+    }
+
+    state = .{};
+    writer = std.Io.Writer.fixed(&output);
+    const recovered = try client.fetch(.{ .location = .{ .url = url }, .response_writer = &writer });
+    try std.testing.expectEqual(std.http.Status.ok, recovered.status);
+    try std.testing.expectEqualStrings(expected, writer.buffered());
 }
 
 test "HTTP rejects invalid routes, network IDs, empty SDP and oversized bodies" {
@@ -136,8 +165,16 @@ test "HTTP rejects invalid routes, network IDs, empty SDP and oversized bodies" 
     };
     const cases = [_]Case{
         .{
+            .request = "POST /v1/join/1 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\n\r\nnope",
+            .status = "415",
+        },
+        .{
+            .request = "POST /v1/join/1 HTTP/1.1\r\nHost: localhost\r\nContent-Type: text/plain\r\nContent-Length: 4\r\n\r\nnope",
+            .status = "415",
+        },
+        .{
             .request = "GET /v1/join HTTP/1.1\r\nHost: localhost\r\n\r\n",
-            .status = "200",
+            .status = "503",
         },
         .{
             .request = "GET /bad HTTP/1.1\r\nHost: localhost\r\n\r\n",
@@ -148,7 +185,7 @@ test "HTTP rejects invalid routes, network IDs, empty SDP and oversized bodies" 
             .status = "400",
         },
         .{
-            .request = "POST /v1/join HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+            .request = "POST /v1/join HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/sdp\r\nContent-Length: 0\r\n\r\n",
             .status = "400",
         },
         .{
@@ -160,27 +197,27 @@ test "HTTP rejects invalid routes, network IDs, empty SDP and oversized bodies" 
             .status = "417",
         },
         .{
-            .request = "POST /v1/join/nope HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+            .request = "POST /v1/join/nope HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/sdp\r\nContent-Length: 0\r\n\r\n",
             .status = "400",
         },
         .{
-            .request = "POST /v1/join/ HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+            .request = "POST /v1/join/ HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/sdp\r\nContent-Length: 0\r\n\r\n",
             .status = "400",
         },
         .{
-            .request = "POST /v1/join/one/two HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+            .request = "POST /v1/join/one/two HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/sdp\r\nContent-Length: 0\r\n\r\n",
             .status = "400",
         },
         .{
-            .request = "POST /v1/join/1 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+            .request = "POST /v1/join/1 HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/sdp\r\nContent-Length: 0\r\n\r\n",
             .status = "400",
         },
         .{
-            .request = "POST /v1/join/1 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1048577\r\n\r\n",
+            .request = "POST /v1/join/1 HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/sdp\r\nContent-Length: 1048577\r\n\r\n",
             .status = "413",
         },
         .{
-            .request = "POST /v1/join/1 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\n\r\nnope",
+            .request = "POST /v1/join/1 HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/sdp\r\nContent-Length: 4\r\n\r\nnope",
             .status = "400",
         },
     };
@@ -198,6 +235,24 @@ test "HTTP rejects invalid routes, network IDs, empty SDP and oversized bodies" 
         var reader = stream.reader(io, &read_buffer);
         const prefix = try reader.interface.take(12);
         try std.testing.expectEqualStrings(case.status, prefix[9..12]);
+    }
+}
+
+test "HTTP rejects malformed percent escapes before negotiating" {
+    const io = std.testing.io;
+    const listener = try Listener.listen(std.testing.allocator, io, try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0"), .{});
+    defer listener.destroy();
+
+    for ([_][]const u8{ "%", "%2", "%GG", "%+1", "%-1", "%0G", "%00", "%09", "%7f" }) |id| {
+        const stream = try listener.server.socket.address.connect(io, .{ .mode = .stream });
+        defer stream.close(io);
+        var output: [512]u8 = undefined;
+        var writer = stream.writer(io, &output);
+        try writer.interface.print("POST /v1/join/{s} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/sdp\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnope", .{id});
+        try writer.interface.flush();
+        var input: [256]u8 = undefined;
+        var reader = stream.reader(io, &input);
+        try std.testing.expectEqualStrings("HTTP/1.1 400", try reader.interface.take(12));
     }
 }
 
@@ -221,7 +276,7 @@ test "HTTP reports identity rejection and peer creation failures" {
         var write_buffer: [512]u8 = undefined;
         var writer = stream.writer(io, &write_buffer);
         try writer.interface.writeAll(
-            "POST /v1/join/1 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\n\r\nnope",
+            "POST /v1/join/1 HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/sdp\r\nContent-Length: 4\r\n\r\nnope",
         );
         try writer.interface.flush();
 
@@ -248,7 +303,7 @@ test "HTTP times out a stalled request with a response" {
     var write_buffer: [512]u8 = undefined;
     var writer = stream.writer(io, &write_buffer);
     try writer.interface.writeAll(
-        "POST /v1/join/1 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\n\r\n",
+        "POST /v1/join/1 HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/sdp\r\nContent-Length: 4\r\n\r\n",
     );
     try writer.interface.flush();
 
@@ -314,7 +369,7 @@ test "HTTP signaling uses application/sdp and an opaque network ID" {
     );
     defer allocator.free(origin);
 
-    for ([_][]const u8{ "a3f0-9c11", "18446744073709551616", "a/b?c#d% e" }) |network_id| {
+    for ([_][]const u8{ "a3f0-9c11", "18446744073709551616", "a/b?c#d% e", "literal%2F+id" }) |network_id| {
         const client = try nethernet.dialEndpoint(allocator, io, origin, network_id, .{});
         defer client.destroy();
 
@@ -369,7 +424,7 @@ test "HTTP signaling uses application/sdp and an opaque network ID" {
     defer client.deinit();
 
     var request = try client.request(.POST, try std.Uri.parse(url), .{
-        .headers = .{ .content_type = .{ .override = "application/sdp" } },
+        .headers = .{ .content_type = .{ .override = "Application/SDP; charset=utf-8" } },
     });
     defer request.deinit();
     request.transfer_encoding = .{ .content_length = rewritten.len };
@@ -413,6 +468,7 @@ test "HTTP signaling uses application/sdp and an opaque network ID" {
     try std.testing.expect(std.mem.indexOf(u8, answer[media_start..], "a=end-of-candidates\r\n") != null);
 
     const fingerprint_start = std.mem.indexOf(u8, answer, "a=fingerprint:").?;
+    try std.testing.expect(std.mem.startsWith(u8, answer[fingerprint_start..], "a=fingerprint:sha-256 "));
     const digest_start = std.mem.indexOfScalarPos(u8, answer, fingerprint_start, ' ').? + 1;
     const digest_end = std.mem.indexOfScalarPos(u8, answer, digest_start, '\n').?;
     const digest = std.mem.trimEnd(u8, answer[digest_start..digest_end], "\r");
