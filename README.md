@@ -166,6 +166,10 @@ Both signaling and WebRTC ports must be reachable. Configure
 `port_range_begin` and `port_range_end` to fix the UDP range.
 STUN and TURN servers are optional and must be configured explicitly.
 
+For LAN discovery, bind hosts to `0.0.0.0:7551` and clients to port `0`.
+Set `ServerData` with your server details and matching client protocol/version.
+Port 7551 allows sharing, but Windows may deliver packets to only one listener.
+
 ## Tests
 
 ```sh

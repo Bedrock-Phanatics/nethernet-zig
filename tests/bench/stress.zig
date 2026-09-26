@@ -232,10 +232,10 @@ pub fn main(init: std.process.Init) !void {
         var phase_offset: i96 = 0;
 
         if (config.rate != 0 and config.connections > 1) {
-            phase_offset =
-                interval_ns *
-                @as(i96, @intCast(index)) /
-                @as(i96, @intCast(config.connections));
+            phase_offset = @divTrunc(
+                interval_ns * @as(i96, @intCast(index)),
+                @as(i96, @intCast(config.connections)),
+            );
         }
 
         state.* = .{
@@ -345,11 +345,11 @@ pub fn main(init: std.process.Init) !void {
                 state,
                 &metrics,
                 config.poll_budget,
-            ) catch {
+            ) catch failed: {
                 metrics.poll_failures += 1;
                 metrics.failures += 1;
                 state.phase = .dead;
-                false
+                break :failed false;
             };
 
             progress = progress or server_progress;
@@ -366,11 +366,11 @@ pub fn main(init: std.process.Init) !void {
                 &metrics,
                 &histogram,
                 config,
-            ) catch {
+            ) catch failed: {
                 metrics.poll_failures += 1;
                 metrics.failures += 1;
                 state.phase = .dead;
-                false
+                break :failed false;
             };
 
             progress = progress or client_progress;
@@ -837,8 +837,8 @@ fn pumpClient(
 
                 const completed_ns =
                     run_started
-                    .durationTo(std.Io.Clock.awake.now(io))
-                    .nanoseconds;
+                        .durationTo(std.Io.Clock.awake.now(io))
+                        .nanoseconds;
 
                 if (completed_ns >= pending.sent_ns) {
                     histogram.record(
@@ -1067,11 +1067,10 @@ fn reliabilityFor(
     return switch (config.reliability) {
         .reliable => .reliable,
         .unreliable => .unreliable,
-        .mixed =>
-            if (sequence % 10 == 0)
-                .unreliable
-            else
-                .reliable,
+        .mixed => if (sequence % 10 == 0)
+            .unreliable
+        else
+            .reliable,
     };
 }
 
@@ -1412,11 +1411,11 @@ fn printReport(
 
     const rss_growth: ?i128 =
         if (rss_end.current != null and
-            rss_start.current != null)
-        @as(i128, rss_end.current.?) -
-            @as(i128, rss_start.current.?)
-    else
-        null;
+        rss_start.current != null)
+            @as(i128, rss_end.current.?) -
+                @as(i128, rss_start.current.?)
+        else
+            null;
 
     const active_connections =
         countStates(
@@ -1601,11 +1600,10 @@ fn residentBytes(io: std.Io) Memory {
             @intCast(usage.maxrss);
 
         var memory: Memory = .{
-            .peak =
-                if (builtin.os.tag == .macos)
-                    value
-                else
-                    value * 1024,
+            .peak = if (builtin.os.tag == .macos)
+                value
+            else
+                value * 1024,
         };
 
         if (builtin.os.tag == .linux) {
@@ -1697,8 +1695,7 @@ const ProcessMemoryCounters = extern struct {
     peak_pagefile_usage: usize,
 };
 
-extern "kernel32" fn GetCurrentProcess()
-    callconv(.winapi) *anyopaque;
+extern "kernel32" fn GetCurrentProcess() callconv(.winapi) *anyopaque;
 
 extern "psapi" fn GetProcessMemoryInfo(
     *anyopaque,
