@@ -28,7 +28,9 @@ pub const Options = struct {
     maximum_http_workers: usize = 32,
     maximum_pending_accepts: usize = 64,
     request_timeout_ms: u32 = 15000,
+    /// GET /v1/join returns 503 without metadata. POST still works.
     status_provider: ?StatusProvider = null,
+    trace: bool = false,
 };
 
 pub const Listener = struct {
@@ -166,6 +168,58 @@ pub const Listener = struct {
         self.allocator.destroy(self);
     }
 
+    fn trace(self: *Listener, comptime format: []const u8, args: anytype) void {
+        if (self.options.trace) std.debug.print("nethernet HTTP: " ++ format ++ "\n", args);
+    }
+
+    fn errorStatus(err: anyerror) std.http.Status {
+        return switch (err) {
+            error.HttpHeadersInvalid,
+            error.MalformedSignal,
+            error.UnexpectedSignal,
+            error.TooManyRemoteCandidates,
+            => .bad_request,
+            error.HttpHeadersOversize => .request_header_fields_too_large,
+            error.StreamTooLong, error.MessageTooLarge, error.IdentityTooLarge => .payload_too_large,
+            error.IdentityNotAllowed,
+            error.InvalidIdentity,
+            error.ExpiredIdentity,
+            error.IdentityTooDeep,
+            error.UnsupportedAlgorithm,
+            error.UnsupportedKey,
+            error.InvalidCharacter,
+            error.InvalidPadding,
+            error.SyntaxError,
+            error.UnexpectedEndOfInput,
+            => .forbidden,
+            error.HttpExpectationFailed => .expectation_failed,
+            error.Timeout => .gateway_timeout,
+            else => .internal_server_error,
+        };
+    }
+
+    const ResponseState = enum(u8) { pending, committed, timed_out };
+
+    fn respond(
+        request: *std.http.Server.Request,
+        response_state: *std.atomic.Value(ResponseState),
+        body: []const u8,
+        options: std.http.Server.Request.RespondOptions,
+    ) !void {
+        if (response_state.cmpxchgStrong(.pending, .committed, .acq_rel, .acquire) != null) return error.Timeout;
+        try request.respond(body, options);
+    }
+
+    fn writeError(self: *Listener, stream: std.Io.net.Stream, status: std.http.Status) void {
+        var buffer: [256]u8 = undefined;
+        var writer = stream.writer(self.io, &buffer);
+        writer.interface.print(
+            "HTTP/1.1 {d} {s}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            .{ @intFromEnum(status), status.phrase() orelse "Error" },
+        ) catch return;
+        writer.interface.flush() catch {};
+    }
+
     fn worker(self: *Listener) std.Io.Cancelable!void {
         while (true) {
             const stream = self.server.accept(self.io) catch |err| switch (err) {
@@ -179,12 +233,16 @@ pub const Listener = struct {
 
             self.handleTimed(stream) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
-                else => continue,
+                else => {
+                    self.trace("request failed ({s})", .{@errorName(err)});
+                    continue;
+                },
             };
         }
     }
 
     fn handleTimed(self: *Listener, stream: std.Io.net.Stream) !void {
+        var response_state = std.atomic.Value(ResponseState).init(.pending);
         const Result = union(enum) {
             done: anyerror!void,
             timeout: std.Io.Cancelable!void,
@@ -203,18 +261,39 @@ pub const Listener = struct {
                 .awake,
             },
         );
-        try select.concurrent(.done, handle, .{ self, stream });
+        try select.concurrent(.done, handle, .{ self, stream, &response_state });
 
         switch (try select.await()) {
-            .done => |result| try result,
+            .done => |result| result catch |err| {
+                if (err != error.Canceled and
+                    err != error.HttpConnectionClosing and
+                    err != error.HttpRequestTruncated and
+                    response_state.load(.acquire) == .pending)
+                {
+                    const status = errorStatus(err);
+                    self.trace("HTTP {d} ({s})", .{ @intFromEnum(status), @errorName(err) });
+                    self.writeError(stream, status);
+                }
+                return err;
+            },
             .timeout => |result| {
                 try result;
+                const send_timeout = response_state.cmpxchgStrong(.pending, .timed_out, .acq_rel, .acquire) == null;
+                select.cancelDiscard();
+                if (send_timeout) {
+                    self.trace("HTTP 504 (request timeout)", .{});
+                    self.writeError(stream, .gateway_timeout);
+                }
                 return error.Timeout;
             },
         }
     }
 
-    fn handle(self: *Listener, stream: std.Io.net.Stream) anyerror!void {
+    fn handle(
+        self: *Listener,
+        stream: std.Io.net.Stream,
+        response_state: *std.atomic.Value(ResponseState),
+    ) anyerror!void {
         var input: [16384]u8 = undefined;
         var output: [4096]u8 = undefined;
 
@@ -223,78 +302,105 @@ pub const Listener = struct {
         var http = std.http.Server.init(&reader.interface, &writer.interface);
 
         var request = try http.receiveHead();
+        if (request.head.expect) |expect| {
+            if (!std.mem.eql(u8, expect, "100-continue")) return error.HttpExpectationFailed;
+        }
+
+        const target = request.head.target;
+        const path = target[0 .. std.mem.indexOfAny(u8, target, "?#") orelse target.len];
 
         if (request.head.method == .GET and
-            std.mem.eql(u8, request.head.target, "/v1/join"))
+            (std.mem.eql(u8, path, "/v1/join") or std.mem.eql(u8, path, "/v1/join/")))
         {
-            const provider = self.options.status_provider orelse
-                return request.respond("", .{ .keep_alive = false });
-
-            const status = provider.get(provider.context) catch
-                return request.respond("", .{
+            self.trace("GET /v1/join received", .{});
+            const provider = self.options.status_provider orelse {
+                self.trace("GET /v1/join HTTP 503 (no status provider)", .{});
+                return respond(&request, response_state, "", .{
                     .status = .service_unavailable,
                     .keep_alive = false,
                 });
+            };
+
+            const status = provider.get(provider.context) catch |err| {
+                self.trace("GET /v1/join HTTP 503 (status provider: {s})", .{@errorName(err)});
+                return respond(&request, response_state, "", .{
+                    .status = .service_unavailable,
+                    .keep_alive = false,
+                });
+            };
 
             var status_output: [maximum_status_response_size]u8 = undefined;
-            const body = encodeStatus(status, &status_output) catch
-                return request.respond("", .{
+            const body = encodeStatus(status, &status_output) catch |err| {
+                self.trace("GET /v1/join HTTP 500 (status encoding: {s})", .{@errorName(err)});
+                return respond(&request, response_state, "", .{
                     .status = .internal_server_error,
                     .keep_alive = false,
                 });
+            };
 
-            return request.respond(body, .{
+            try respond(&request, response_state, body, .{
                 .keep_alive = false,
                 .extra_headers = &.{.{
                     .name = "Content-Type",
                     .value = "application/json",
                 }},
             });
+            self.trace("GET /v1/join HTTP 200 application/json, status bytes={d}", .{body.len});
+            return;
         }
 
         if (request.head.method != .POST or
-            !std.mem.startsWith(u8, request.head.target, "/v1/join/"))
+            !std.mem.startsWith(u8, path, "/v1/join/"))
         {
-            return request.respond("", .{
-                .status = .not_found,
+            const status: std.http.Status = if (std.mem.startsWith(u8, path, "/v1/join"))
+                .bad_request
+            else
+                .not_found;
+            self.trace("HTTP {d} (invalid route)", .{@intFromEnum(status)});
+            return respond(&request, response_state, "", .{
+                .status = status,
                 .keep_alive = false,
             });
         }
 
-        const network_name = request.head.target[9..];
+        const network_name = path[9..];
+        self.trace("POST /v1/join/{{networkId}} received", .{});
 
-        if (network_name.len == 0) {
-            return request.respond("Network ID must be uint64", .{
+        if (network_name.len > 3 * conn.maximum_network_id_length or !validPercentEncoding(network_name)) {
+            self.trace("POST HTTP 400 (network ID length or encoding)", .{});
+            return respond(&request, response_state, "Invalid network ID", .{
+                .status = .bad_request,
+                .keep_alive = false,
+            });
+        }
+        const network_id = try self.allocator.dupe(u8, network_name);
+        defer self.allocator.free(network_id);
+        const decoded_id = std.Uri.percentDecodeInPlace(network_id);
+        if (!conn.validNetworkId(decoded_id)) {
+            self.trace("POST HTTP 400 (invalid network ID)", .{});
+            return respond(&request, response_state, "Invalid network ID", .{
                 .status = .bad_request,
                 .keep_alive = false,
             });
         }
 
-        for (network_name) |byte| {
-            if (byte < '0' or byte > '9') {
-                return request.respond("Network ID must be uint64", .{
-                    .status = .bad_request,
-                    .keep_alive = false,
-                });
-            }
-        }
-
-        _ = std.fmt.parseInt(u64, network_name, 10) catch {
-            return request.respond("Network ID must be uint64", .{
-                .status = .bad_request,
+        const content_type = request.head.content_type orelse "";
+        const media_type = std.mem.trim(u8, content_type[0 .. std.mem.indexOfScalar(u8, content_type, ';') orelse content_type.len], " \t");
+        if (!std.ascii.eqlIgnoreCase(media_type, "application/sdp")) {
+            self.trace("POST HTTP 415 (expected application/sdp)", .{});
+            return respond(&request, response_state, "", .{
+                .status = .unsupported_media_type,
                 .keep_alive = false,
             });
-        };
+        }
 
         if ((request.head.content_length orelse 0) > maximum_sdp_size) {
-            return request.respond("", .{
+            self.trace("POST HTTP 413 (content length)", .{});
+            return respond(&request, response_state, "", .{
                 .status = .payload_too_large,
                 .keep_alive = false,
             });
         }
-
-        const network_id = try self.allocator.dupe(u8, network_name);
-        defer self.allocator.free(network_id);
 
         var transfer: [4096]u8 = undefined;
         const body_reader = try request.readerExpectContinue(&transfer);
@@ -302,18 +408,38 @@ pub const Listener = struct {
         const body = body_reader.allocRemaining(
             self.allocator,
             .limited(maximum_sdp_size),
-        ) catch {
-            return request.respond("", .{
-                .status = .payload_too_large,
+        ) catch |err| {
+            const status: std.http.Status = switch (err) {
+                error.StreamTooLong => .payload_too_large,
+                error.OutOfMemory => .internal_server_error,
+                else => .bad_request,
+            };
+            self.trace("POST HTTP {d} (body read: {s})", .{ @intFromEnum(status), @errorName(err) });
+            return respond(&request, response_state, "", .{
+                .status = status,
                 .keep_alive = false,
             });
         };
         defer self.allocator.free(body);
 
         if (body.len == 0) {
-            return request.respond("Missing SDP offer in request body", .{
+            self.trace("POST HTTP 400 (empty offer)", .{});
+            return respond(&request, response_state, "Missing SDP offer in request body", .{
                 .status = .bad_request,
                 .keep_alive = false,
+            });
+        }
+
+        if (self.options.trace) {
+            const offer_summary = summarizeSdp(body);
+            self.trace("offer bytes={d}, identity={s}, candidates={d} (host={d}, srflx={d}, relay={d}, other={d})", .{
+                body.len,
+                if (offer_summary.identity) "present" else "missing",
+                offer_summary.candidates,
+                offer_summary.host,
+                offer_summary.srflx,
+                offer_summary.relay,
+                offer_summary.other,
             });
         }
 
@@ -323,7 +449,8 @@ pub const Listener = struct {
         const connection_id = std.mem.readInt(u64, &random, .little);
 
         if (!self.reserveAccept()) {
-            return request.respond("Accept queue full", .{
+            self.trace("POST HTTP 503 (accept queue full)", .{});
+            return respond(&request, response_state, "Accept queue full", .{
                 .status = .service_unavailable,
                 .keep_alive = false,
             });
@@ -332,7 +459,8 @@ pub const Listener = struct {
         defer if (accept_reserved) self.releaseAccept();
 
         if (!self.reserveNegotiation()) {
-            return request.respond("Negotiation capacity reached", .{
+            self.trace("POST HTTP 503 (negotiation capacity)", .{});
+            return respond(&request, response_state, "Negotiation capacity reached", .{
                 .status = .service_unavailable,
                 .keep_alive = false,
             });
@@ -341,15 +469,20 @@ pub const Listener = struct {
 
         var connection_options = self.options.connection;
         connection_options.native.disable_trickle = true;
+        connection_options.trace = connection_options.trace or self.options.trace;
 
-        const connection = try conn.Connection.create(
+        const connection = conn.Connection.create(
             self.allocator,
             self.io,
             .server,
             connection_id,
-            network_id,
+            decoded_id,
             connection_options,
-        );
+        ) catch |err| {
+            self.trace("peer creation failed ({s})", .{@errorName(err)});
+            return err;
+        };
+        self.trace("peer created", .{});
 
         var transferred = false;
         defer if (!transferred) connection.destroy();
@@ -357,19 +490,61 @@ pub const Listener = struct {
         connection.applySignal(.{
             .kind = Signal.offer,
             .connection_id = connection_id,
-            .network_id = network_id,
+            .network_id = decoded_id,
             .data = body,
-        }) catch {
-            return request.respond("Negotiation failed", .{
-                .status = .bad_request,
+        }) catch |err| {
+            const status = errorStatus(err);
+            self.trace("offer rejected ({s}); HTTP {d}", .{ @errorName(err), @intFromEnum(status) });
+            return respond(&request, response_state, "", .{
+                .status = status,
                 .keep_alive = false,
             });
         };
 
+        connection.addSignalingPeerCandidate(body, stream.socket.address);
+
         var answered = false;
+        var previous_state = connection.state();
+        var previous_diagnostics: ?conn.Diagnostics = if (self.options.trace) connection.diagnostics() else null;
+        if (previous_diagnostics) |diagnostics| {
+            self.trace("peer={s}, ICE={s}, gathering={s}, reliable={s}, unreliable={s}", .{
+                @tagName(previous_state),
+                @tagName(diagnostics.ice_state),
+                @tagName(diagnostics.ice_gathering_state),
+                @tagName(diagnostics.reliable.state),
+                @tagName(diagnostics.unreliable.state),
+            });
+        }
 
         while (!answered or !connection.ready()) {
             connection.prepareWait();
+            if (previous_diagnostics) |previous| {
+                const state = connection.state();
+                const diagnostics = connection.diagnostics();
+                if (state != previous_state or
+                    diagnostics.ice_state != previous.ice_state or
+                    diagnostics.ice_gathering_state != previous.ice_gathering_state or
+                    diagnostics.reliable.state != previous.reliable.state or
+                    diagnostics.unreliable.state != previous.unreliable.state)
+                {
+                    self.trace("peer={s}, ICE={s}, gathering={s}, reliable={s}, unreliable={s}", .{
+                        @tagName(state),
+                        @tagName(diagnostics.ice_state),
+                        @tagName(diagnostics.ice_gathering_state),
+                        @tagName(diagnostics.reliable.state),
+                        @tagName(diagnostics.unreliable.state),
+                    });
+                    if (diagnostics.ice_state == .connected or diagnostics.ice_state == .completed) {
+                        var local: [256]u8 = undefined;
+                        var remote: [256]u8 = undefined;
+                        if (connection.selectedIceAddresses(&local, &remote)) |selected| {
+                            if (selected) |pair| self.trace("selected ICE local={s}, remote={s}", .{ pair.local, pair.remote });
+                        } else |_| {}
+                    }
+                    previous_state = state;
+                    previous_diagnostics = diagnostics;
+                }
+            }
             if (try connection.pollNegotiation()) |event| {
                 switch (event) {
                     .signal => |signal| {
@@ -377,7 +552,19 @@ pub const Listener = struct {
                             return error.UnexpectedSignal;
                         }
 
-                        try request.respond(signal.data, .{
+                        if (self.options.trace) {
+                            const answer_summary = summarizeSdp(signal.data);
+                            self.trace("answer bytes={d}, identity={s}, candidates={d} (host={d}, srflx={d}, relay={d}, other={d})", .{
+                                signal.data.len,
+                                if (answer_summary.identity) "present" else "missing",
+                                answer_summary.candidates,
+                                answer_summary.host,
+                                answer_summary.srflx,
+                                answer_summary.relay,
+                                answer_summary.other,
+                            });
+                        }
+                        try respond(&request, response_state, signal.data, .{
                             .keep_alive = false,
                             .extra_headers = &.{
                                 .{
@@ -388,6 +575,7 @@ pub const Listener = struct {
                         });
 
                         answered = true;
+                        self.trace("HTTP 200 application/sdp returned", .{});
                     },
 
                     .message => return error.UnexpectedMessage,
@@ -401,13 +589,78 @@ pub const Listener = struct {
             return error.ConnectionClosed;
         transferred = true;
         accept_reserved = false;
+        self.trace("both data channels open; connection accepted", .{});
     }
 };
+
+const SdpSummary = struct {
+    identity: bool = false,
+    candidates: usize = 0,
+    host: usize = 0,
+    srflx: usize = 0,
+    relay: usize = 0,
+    other: usize = 0,
+};
+
+fn validPercentEncoding(value: []const u8) bool {
+    var offset: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, value, offset, '%')) |index| {
+        if (value.len - index < 3 or
+            !std.ascii.isHex(value[index + 1]) or
+            !std.ascii.isHex(value[index + 2])) return false;
+        offset = index + 3;
+    }
+    return true;
+}
+
+fn summarizeSdp(sdp: []const u8) SdpSummary {
+    var result: SdpSummary = .{};
+    var lines = std.mem.splitScalar(u8, sdp, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "a=identity:")) result.identity = true;
+        if (!std.mem.startsWith(u8, line, "a=candidate:")) continue;
+        result.candidates += 1;
+        const type_start = std.mem.indexOf(u8, line, " typ ") orelse {
+            result.other += 1;
+            continue;
+        };
+        var fields = std.mem.tokenizeAny(u8, line[type_start + 5 ..], " \t\r");
+        const kind = fields.next() orelse "";
+        if (std.mem.eql(u8, kind, "host")) {
+            result.host += 1;
+        } else if (std.mem.eql(u8, kind, "srflx")) {
+            result.srflx += 1;
+        } else if (std.mem.eql(u8, kind, "relay")) {
+            result.relay += 1;
+        } else {
+            result.other += 1;
+        }
+    }
+    return result;
+}
+
+test "SDP trace summary exposes only identity presence and candidate counts" {
+    const summary = summarizeSdp(
+        "a=identity:secret\r\n" ++
+            "a=candidate:1 1 UDP 1 127.0.0.1 1 typ host\r\n" ++
+            "a=candidate:2 1 UDP 1 127.0.0.1 2 typ srflx\r\n" ++
+            "a=candidate:3 1 UDP 1 127.0.0.1 3 typ relay\r\n" ++
+            "a=candidate:4 1 UDP 1 127.0.0.1 4 typ prflx\r\n",
+    );
+    try std.testing.expect(summary.identity);
+    try std.testing.expectEqual(@as(usize, 4), summary.candidates);
+    try std.testing.expectEqual(@as(usize, 1), summary.host);
+    try std.testing.expectEqual(@as(usize, 1), summary.srflx);
+    try std.testing.expectEqual(@as(usize, 1), summary.relay);
+    try std.testing.expectEqual(@as(usize, 1), summary.other);
+}
 
 fn encodeStatus(status: ServerStatus, output: []u8) ![]const u8 {
     if (!std.unicode.utf8ValidateSlice(status.name) or
         !std.unicode.utf8ValidateSlice(status.version) or
         !std.unicode.utf8ValidateSlice(status.level) or
+        status.protocol == 0 or status.version.len == 0 or
+        status.game_type < 0 or status.game_type > 2 or
         status.players > status.max_players)
     {
         return error.InvalidServerStatus;
@@ -483,4 +736,44 @@ test "server status JSON is bounded and escaped" {
         .max_players = 20,
         .game_type = 0,
     }, &tiny));
+}
+
+test "HTTP capacity exhaustion returns 503 and releases reservations" {
+    const io = std.testing.io;
+    const listener = try Listener.listen(
+        std.testing.allocator,
+        io,
+        try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0"),
+        .{ .maximum_negotiations = 1, .maximum_pending_accepts = 1, .maximum_http_workers = 2, .request_timeout_ms = 1000 },
+    );
+    defer listener.destroy();
+
+    for ([_]bool{ false, true }) |negotiation| {
+        try std.testing.expect(if (negotiation) listener.reserveNegotiation() else listener.reserveAccept());
+        var reserved = true;
+        defer if (reserved) {
+            if (negotiation) listener.releaseNegotiation() else listener.releaseAccept();
+        };
+
+        const stream = try listener.server.socket.address.connect(io, .{ .mode = .stream });
+        defer stream.close(io);
+        var write_buffer: [256]u8 = undefined;
+        var writer = stream.writer(io, &write_buffer);
+        try writer.interface.writeAll(
+            "POST /v1/join/1 HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/sdp\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnope",
+        );
+        try writer.interface.flush();
+        var read_buffer: [256]u8 = undefined;
+        var reader = stream.reader(io, &read_buffer);
+        try std.testing.expectEqualStrings("HTTP/1.1 503", try reader.interface.take(12));
+        _ = try reader.interface.discardRemaining();
+        if (negotiation) listener.releaseNegotiation() else listener.releaseAccept();
+        reserved = false;
+        listener.accept_mutex.lockUncancelable(io);
+        const accepts = listener.reserved_accepts;
+        const negotiations = listener.active_negotiations;
+        listener.accept_mutex.unlock(io);
+        try std.testing.expectEqual(@as(usize, 0), accepts);
+        try std.testing.expectEqual(@as(usize, 0), negotiations);
+    }
 }

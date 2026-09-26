@@ -5,15 +5,30 @@ const connection = @import("../transport/connection.zig");
 
 pub const maximum_sdp_size = 1024 * 1024;
 
+// A u64 needs at most 20 decimal digits.
+const maximum_numeric_network_id = 20;
+
+fn networkIdText(
+    network_id: anytype,
+    buffer: *[maximum_numeric_network_id]u8,
+) ![]const u8 {
+    return switch (@typeInfo(@TypeOf(network_id))) {
+        .int, .comptime_int => std.fmt.bufPrint(buffer, "{d}", .{network_id}),
+        else => network_id,
+    };
+}
+
 pub fn exchange(
     allocator: std.mem.Allocator,
     io: std.Io,
     origin: []const u8,
-    network_id: u64,
+    network_id: anytype,
     offer: []const u8,
     output: []u8,
     timeout_ms: u32,
 ) ![]const u8 {
+    var numeric: [maximum_numeric_network_id]u8 = undefined;
+    const id = try networkIdText(network_id, &numeric);
     const Result = union(enum) {
         answer: anyerror![]const u8,
         timeout: std.Io.Cancelable!void,
@@ -31,7 +46,7 @@ pub fn exchange(
     try select.concurrent(
         .answer,
         exchangeWork,
-        .{ allocator, io, origin, network_id, offer, output },
+        .{ allocator, io, origin, id, offer, output },
     );
 
     return switch (try select.await()) {
@@ -47,11 +62,13 @@ fn exchangeWork(
     allocator: std.mem.Allocator,
     io: std.Io,
     origin: []const u8,
-    network_id: u64,
+    network_id: []const u8,
     offer: []const u8,
     output: []u8,
 ) anyerror![]const u8 {
     try validateOrigin(origin);
+
+    if (!connection.validNetworkId(network_id)) return error.InvalidNetworkId;
 
     if (offer.len == 0 or offer.len > maximum_sdp_size) {
         return error.MessageTooLarge;
@@ -60,8 +77,8 @@ fn exchangeWork(
     const base = std.mem.trimEnd(u8, origin, "/");
     const url = try std.fmt.allocPrint(
         allocator,
-        "{s}/v1/join/{d}",
-        .{ base, network_id },
+        "{s}/v1/join/{f}",
+        .{ base, std.fmt.alt(std.Uri.Component{ .raw = network_id }, .formatEscaped) },
     );
     defer allocator.free(url);
 
@@ -130,18 +147,17 @@ pub fn dial(
     allocator: std.mem.Allocator,
     io: std.Io,
     origin: []const u8,
-    network_id: u64,
+    network_id: anytype,
     options: connection.Options,
 ) !*connection.Connection {
+    var numeric: [maximum_numeric_network_id]u8 = undefined;
+    const id = try networkIdText(network_id, &numeric);
+
+    if (!connection.validNetworkId(id)) return error.InvalidNetworkId;
+
     var actual_options = options;
     actual_options.native.disable_trickle = true;
-
-    var local_buf: [20]u8 = undefined;
-    actual_options.local_network_id = try std.fmt.bufPrint(
-        &local_buf,
-        "{d}",
-        .{network_id},
-    );
+    actual_options.local_network_id = id;
 
     var random: [8]u8 = undefined;
     io.random(&random);
@@ -156,7 +172,7 @@ pub fn dial(
         io,
         .client,
         connection_id,
-        origin,
+        id,
         actual_options,
     );
     errdefer peer.destroy();
@@ -179,7 +195,7 @@ pub fn dial(
                         allocator,
                         io,
                         origin,
-                        network_id,
+                        id,
                         signal.data,
                         answer,
                         options.negotiation_timeout_ms,
@@ -188,7 +204,7 @@ pub fn dial(
                     try peer.applySignal(.{
                         .kind = Signal.answer,
                         .connection_id = connection_id,
-                        .network_id = origin,
+                        .network_id = id,
                         .data = sdp,
                     });
                 },
@@ -218,5 +234,39 @@ test "endpoint origins retain explicit default ports" {
         if (validateOrigin(origin)) |_| {
             return error.InvalidOriginAccepted;
         } else |_| {}
+    }
+}
+
+test "opaque and numeric network IDs share one representation" {
+    var numeric: [maximum_numeric_network_id]u8 = undefined;
+
+    try std.testing.expectEqualStrings(
+        "18446744073709551615",
+        try networkIdText(@as(u64, std.math.maxInt(u64)), &numeric),
+    );
+    try std.testing.expectEqualStrings("12", try networkIdText(12, &numeric));
+    try std.testing.expectEqualStrings(
+        "a3f0-9c11",
+        try networkIdText(@as([]const u8, "a3f0-9c11"), &numeric),
+    );
+    try std.testing.expectEqualStrings(
+        "18446744073709551616",
+        try networkIdText("18446744073709551616", &numeric),
+    );
+}
+
+test "endpoint exchanges reject empty, control, and oversized IDs" {
+    const allocator = std.testing.allocator;
+    var output: [64]u8 = undefined;
+
+    for ([_][]const u8{ "", "tab\there", &.{ '1', 0 }, "a" ** (connection.maximum_network_id_length + 1) }) |id| {
+        try std.testing.expectError(error.InvalidNetworkId, exchangeWork(
+            allocator,
+            undefined,
+            "http://127.0.0.1:19132",
+            id,
+            "v=0\r\n",
+            &output,
+        ));
     }
 }

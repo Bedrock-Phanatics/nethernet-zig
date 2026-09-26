@@ -5,6 +5,7 @@ pub const sdp_identity = @import("auth/sdp.zig");
 pub const Identity = sdp_identity.Identity;
 pub const IdentityKeyPair = sdp_identity.KeyPair;
 pub const identity = @import("auth/token.zig");
+pub const identity_file = @import("auth/key_file.zig");
 pub const discovery = @import("discovery/client.zig");
 pub const Discovery = discovery.Discovery;
 pub const DiscoveryOptions = discovery.Options;

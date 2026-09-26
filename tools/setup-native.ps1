@@ -1,5 +1,8 @@
 param(
-    [int]$Jobs = 4
+    [int]$Jobs = 4,
+    [ValidateSet('MbedTLS', 'OpenSSL')]
+    [string]$Backend = 'MbedTLS',
+    [string]$OpenSslRoot
 )
 
 $ErrorActionPreference = 'Stop'
@@ -57,7 +60,7 @@ if (!(Test-Path -LiteralPath .deps/libdatachannel/.git)) {
     )
 }
 
-if (!(Test-Path -LiteralPath .deps/mbedtls/.git)) {
+if ($Backend -eq 'MbedTLS' -and !(Test-Path -LiteralPath .deps/mbedtls/.git)) {
     Run-Native git @(
         'clone',
         '--branch', 'mbedtls-3.6.7',
@@ -74,36 +77,81 @@ if ($libdatachannelCommit -ne '443f6934d9007eb7076ab7825ba330f355fcbead') {
     throw 'Unexpected libdatachannel checkout.'
 }
 
-$mbedTag = & git -C .deps/mbedtls describe --tags --exact-match
-$mbedCommit = & git -C .deps/mbedtls rev-parse HEAD
-if ($mbedTag -notin @('mbedtls-3.6.7', 'v3.6.7') -or
-    $mbedCommit -ne '068ff080b369adfac81509f9b57b2afabaf82dc5') {
-    throw 'Unexpected Mbed TLS checkout.'
+if ($Backend -eq 'MbedTLS') {
+    $mbedTag = & git -C .deps/mbedtls describe --tags --exact-match
+    $mbedCommit = & git -C .deps/mbedtls rev-parse HEAD
+    if ($mbedTag -notin @('mbedtls-3.6.7', 'v3.6.7') -or
+        $mbedCommit -ne '068ff080b369adfac81509f9b57b2afabaf82dc5') {
+        throw 'Unexpected Mbed TLS checkout.'
+    }
+
+    Run-Native python @(
+        '.deps/mbedtls/scripts/config.py',
+        '-f',
+        '.deps/mbedtls/include/mbedtls/mbedtls_config.h',
+        'set',
+        'MBEDTLS_SSL_DTLS_SRTP'
+    )
 }
 
-Run-Native python @(
-    '.deps/mbedtls/scripts/config.py',
-    '-f',
-    '.deps/mbedtls/include/mbedtls/mbedtls_config.h',
-    'set',
-    'MBEDTLS_SSL_DTLS_SRTP'
-)
-
 Apply-LibdatachannelPatch (Join-Path $root 'tools/libdatachannel-bounds.patch')
-Apply-LibdatachannelPatch (Join-Path $root 'tools/libdatachannel-mbedtls-link-order.patch')
+if ($Backend -eq 'MbedTLS') {
+    Apply-LibdatachannelPatch (Join-Path $root 'tools/libdatachannel-mbedtls-link-order.patch')
+}
+
+$nativeZigCacheRoot = Join-Path $root '.deps/zig-native-cache'
+if (Test-Path -LiteralPath $nativeZigCacheRoot) {
+    Remove-Item -LiteralPath $nativeZigCacheRoot -Recurse -Force
+}
+New-Item -ItemType Directory -Force (Join-Path $nativeZigCacheRoot 'local') | Out-Null
+New-Item -ItemType Directory -Force (Join-Path $nativeZigCacheRoot 'global') | Out-Null
+
+$nativeZigLocalCache = Join-Path $nativeZigCacheRoot 'local'
+$nativeZigGlobalCache = Join-Path $nativeZigCacheRoot 'global'
 
 foreach ($tool in @{
     'cc' = 'cc'
     'cxx' = 'c++'
+}.GetEnumerator()) {
+    $wrapper = @(
+        '@echo off',
+        "set `"ZIG_LOCAL_CACHE_DIR=$nativeZigLocalCache`"",
+        "set `"ZIG_GLOBAL_CACHE_DIR=$nativeZigGlobalCache`"",
+        "zig $($tool.Value) %*",
+        'exit /b %errorlevel%'
+    ) -join "`r`n"
+
+    Set-Content -LiteralPath ".deps/zig-$($tool.Key).cmd" -Value $wrapper
+}
+
+foreach ($tool in @{
     'ar' = 'ar'
     'ranlib' = 'ranlib'
 }.GetEnumerator()) {
     Set-Content -LiteralPath ".deps/zig-$($tool.Key).cmd" `
-        -Value "@echo off`nzig $($tool.Value) %*"
+        -Value "@echo off`r`nzig $($tool.Value) %*`r`nexit /b %errorlevel%"
 }
 
 $prefix = $root.Replace('\', '/')
 $cmake = Join-Path $root $cmakeExecutable
+if ($Backend -eq 'OpenSSL') {
+    if (!$OpenSslRoot) {
+        throw 'OpenSSL builds require -OpenSslRoot pointing to an OpenSSL installation.'
+    }
+    $OpenSslRoot = (Resolve-Path -LiteralPath $OpenSslRoot).Path.Replace('\', '/')
+    if (!(Test-Path -LiteralPath "$OpenSslRoot/include/openssl/ssl.h")) {
+        throw "OpenSSL headers not found in $OpenSslRoot"
+    }
+    $nativePrefix = "$prefix/.deps/native-openssl"
+    $rtcBuild = '.deps/rtc-openssl-build'
+    $tlsOptions = @('-DUSE_MBEDTLS=OFF', "-DOPENSSL_ROOT_DIR=$OpenSslRoot")
+    $tlsPrefix = $OpenSslRoot
+} else {
+    $nativePrefix = "$prefix/.deps/native"
+    $rtcBuild = '.deps/rtc-build'
+    $tlsOptions = @('-DUSE_MBEDTLS=ON')
+    $tlsPrefix = $nativePrefix
+}
 $common = @(
     '-G', 'Ninja',
     "-DCMAKE_MAKE_PROGRAM=$prefix/.deps/python/bin/ninja.exe",
@@ -111,37 +159,48 @@ $common = @(
     "-DCMAKE_AR=$prefix/.deps/zig-ar.cmd",
     "-DCMAKE_RANLIB=$prefix/.deps/zig-ranlib.cmd",
     '-DCMAKE_BUILD_TYPE=Release',
-    "-DCMAKE_INSTALL_PREFIX=$prefix/.deps/native"
+    "-DCMAKE_INSTALL_PREFIX=$nativePrefix"
 )
 
-$mbedtlsConfigure = @(
-    '-S', '.deps/mbedtls',
-    '-B', '.deps/mbedtls-build',
-    '-DENABLE_TESTING=OFF',
-    '-DENABLE_PROGRAMS=OFF'
-) + $common
-Run-Native $cmake $mbedtlsConfigure
-Run-Native $cmake @(
-    '--build', '.deps/mbedtls-build',
-    '-j', "$Jobs",
-    '--target', 'install'
-)
+if ($Backend -eq 'MbedTLS') {
+    $mbedtlsConfigure = @(
+        '-S', '.deps/mbedtls',
+        '-B', '.deps/mbedtls-build',
+        '-DENABLE_TESTING=OFF',
+        '-DENABLE_PROGRAMS=OFF'
+    ) + $common
+    Run-Native $cmake $mbedtlsConfigure
+    Run-Native $cmake @(
+        '--build', '.deps/mbedtls-build',
+        '-j', "$Jobs",
+        '--target', 'install'
+    )
+}
 
 $libdatachannelConfigure = @(
     '-S', '.deps/libdatachannel',
-    '-B', '.deps/rtc-build',
+    '-B', $rtcBuild,
     "-DCMAKE_CXX_COMPILER=$prefix/.deps/zig-cxx.cmd",
-    "-DCMAKE_PREFIX_PATH=$prefix/.deps/native",
+    "-DCMAKE_PREFIX_PATH=$tlsPrefix",
     '-DNO_TESTS=ON',
     '-DNO_EXAMPLES=ON',
     '-DNO_MEDIA=ON',
     '-DNO_WEBSOCKET=ON',
-    '-DUSE_MBEDTLS=ON',
     '-DBUILD_SHARED_LIBS=ON'
-) + $common
+) + $tlsOptions + $common
 Run-Native $cmake $libdatachannelConfigure
 Run-Native $cmake @(
-    '--build', '.deps/rtc-build',
+    '--build', $rtcBuild,
     '-j', "$Jobs",
     '--target', 'install'
 )
+
+if ($Backend -eq 'OpenSSL') {
+    foreach ($pattern in @('libcrypto*.dll', 'libssl*.dll')) {
+        $dlls = @(Get-ChildItem -Path "$OpenSslRoot/bin/$pattern" -ErrorAction SilentlyContinue)
+        if ($dlls.Count -ne 1) {
+            throw "Expected one $pattern runtime DLL in $OpenSslRoot/bin"
+        }
+        Copy-Item -LiteralPath $dlls[0].FullName -Destination "$nativePrefix/bin"
+    }
+}

@@ -27,12 +27,15 @@ pub fn fingerprintPayload(
 ) ![]u8 {
     if (sdp.len > jwt.maximum_size) return error.IdentityTooLarge;
 
-    var fingerprints: std.ArrayList(Fingerprint) = .empty;
-    defer fingerprints.deinit(allocator);
-
+    var session: ?Fingerprint = null;
+    var media: ?Fingerprint = null;
+    var session_count: usize = 0;
+    var media_count: usize = 0;
+    var media_started = false;
     var lines = std.mem.tokenizeAny(u8, sdp, "\r\n");
 
     while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "m=")) media_started = true;
         if (!std.mem.startsWith(u8, line, "a=fingerprint:")) continue;
 
         const value = line[14..];
@@ -45,31 +48,21 @@ pub fn fingerprintPayload(
             .digest = value[space + 1 ..],
         };
 
-        var duplicate = false;
-
-        for (fingerprints.items) |existing| {
-            if (std.mem.eql(u8, existing.algorithm, fingerprint.algorithm) and
-                std.mem.eql(u8, existing.digest, fingerprint.digest))
-            {
-                duplicate = true;
-                break;
-            }
+        if (media_started) {
+            media_count += 1;
+            media = fingerprint;
+        } else {
+            session_count += 1;
+            session = fingerprint;
         }
-
-        if (duplicate) continue;
-
-        if (fingerprints.items.len >= 64) {
-            return error.IdentityTooLarge;
-        }
-
-        try fingerprints.append(allocator, fingerprint);
     }
 
-    if (fingerprints.items.len == 0) return error.InvalidIdentity;
+    const selected = if (media_count != 0) media else session;
+    if ((if (media_count != 0) media_count else session_count) != 1) return error.InvalidIdentity;
 
     return std.json.Stringify.valueAlloc(
         allocator,
-        .{ .fingerprint = fingerprints.items },
+        .{ .fingerprint = [_]Fingerprint{selected.?} },
         .{},
     );
 }
@@ -79,8 +72,6 @@ pub fn add(
     sdp: []const u8,
     identity: Identity,
 ) ![:0]u8 {
-    if (identity.domain.len == 0) return error.InvalidIdentity;
-
     const payload = try fingerprintPayload(allocator, sdp);
     defer allocator.free(payload);
 
@@ -147,6 +138,32 @@ pub fn add(
     );
 }
 
+pub fn removeIdentity(sdp: [:0]u8) [:0]u8 {
+    var offset: usize = 0;
+
+    while (offset < sdp.len) {
+        const end = std.mem.indexOfScalarPos(u8, sdp, offset, '\n') orelse sdp.len;
+        const line = std.mem.trimEnd(u8, sdp[offset..end], "\r");
+
+        if (std.mem.startsWith(u8, line, "m=")) break;
+
+        if (std.mem.startsWith(u8, line, "a=identity:")) {
+            const next = if (end == sdp.len) sdp.len else end + 1;
+            const remaining = sdp.len - next;
+            std.mem.copyForwards(u8, sdp[offset..][0..remaining], sdp[next..]);
+
+            const length = offset + remaining;
+            sdp[length] = 0;
+            return sdp[0..length :0];
+        }
+
+        if (end == sdp.len) break;
+        offset = end + 1;
+    }
+
+    return sdp;
+}
+
 pub fn verify(
     allocator: std.mem.Allocator,
     sdp: []const u8,
@@ -181,10 +198,11 @@ pub fn verify(
     defer root.deinit();
 
     const provider = try jwt.field(root.value, "idp");
-    const domain = try jwt.string(try jwt.field(provider, "domain"));
+
+    _ = try jwt.string(try jwt.field(provider, "domain"));
     const protocol = try jwt.string(try jwt.field(provider, "protocol"));
 
-    if (domain.len == 0 or !std.mem.eql(u8, protocol, "default")) {
+    if (!std.mem.eql(u8, protocol, "default")) {
         return error.InvalidIdentity;
     }
 
@@ -231,6 +249,13 @@ test "SDP identity requires a valid fingerprint and explicit verifier acceptance
     try std.testing.expectError(error.InvalidIdentity, fingerprintPayload(allocator, "a=fingerprint: 00:11\r\n"));
     try std.testing.expectError(error.InvalidIdentity, fingerprintPayload(allocator, "a=fingerprint:sha-256 \r\n"));
 
+    const duplicate = "a=fingerprint:sha-256 00:11\r\na=fingerprint:sha-256 00:11\r\n";
+    try std.testing.expectError(error.InvalidIdentity, fingerprintPayload(allocator, duplicate));
+    try std.testing.expectError(error.InvalidIdentity, fingerprintPayload(
+        allocator,
+        "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" ++ duplicate,
+    ));
+
     const Rejector = struct {
         fn reject(_: ?*anyopaque, _: []const u8) anyerror!?Key {
             return null;
@@ -261,13 +286,19 @@ test "identity insertion ignores m equals inside attribute values" {
         "a=x:term=value\r\n" ++
         "a=fingerprint:sha-256 00:11\r\n" ++
         "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n";
-    const signed = try add(allocator, source, .{ .key = key, .token = token });
+    const signed = try add(allocator, source, .{ .key = key, .token = token, .domain = "" });
     defer allocator.free(signed);
     try std.testing.expect(std.mem.indexOf(u8, signed, "a=x:term=value\r\n") != null);
     try std.testing.expect(
         std.mem.indexOf(u8, signed, "a=identity:").? <
             std.mem.indexOf(u8, signed, "m=application").?,
     );
+    try std.testing.expect((try verify(allocator, signed, 1000, .server, null)) != null);
+    const start = std.mem.indexOf(u8, signed, "a=identity:").? + "a=identity:".len;
+    const end = std.mem.indexOfPos(u8, signed, start, "\r\n").?;
+    const assertion = try jwt.decode64(allocator, signed[start..end]);
+    defer allocator.free(assertion);
+    try std.testing.expect(std.mem.indexOf(u8, assertion, "\"domain\":\"\"") != null);
 }
 
 test "duplicate SDP identity assertions are rejected" {
@@ -313,7 +344,7 @@ test "SDP identity assertions must be session level" {
     try std.testing.expectError(error.InvalidIdentity, verify(allocator, media_level, 1000, .server, null));
 }
 
-test "SDP identity nesting, fingerprint deduplication and proof binding" {
+test "SDP identity uses media fingerprint and binds its proof" {
     const allocator = std.testing.allocator;
     const key = try jwt.Scheme.KeyPair.generateDeterministic(.{2} ** 48);
 
@@ -324,13 +355,13 @@ test "SDP identity nesting, fingerprint deduplication and proof binding" {
         "v=0\r\n" ++
         "a=fingerprint:sha-256 00:11\r\n" ++
         "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" ++
-        "a=fingerprint:sha-256 00:11\r\n";
+        "a=fingerprint:sha-256 22:33\r\n";
 
     const payload = try fingerprintPayload(allocator, source);
     defer allocator.free(payload);
 
     try std.testing.expectEqualStrings(
-        "{\"fingerprint\":[{\"algorithm\":\"sha-256\",\"digest\":\"00:11\"}]}",
+        "{\"fingerprint\":[{\"algorithm\":\"sha-256\",\"digest\":\"22:33\"}]}",
         payload,
     );
 
@@ -344,10 +375,118 @@ test "SDP identity nesting, fingerprint deduplication and proof binding" {
         (try verify(allocator, signed, 1000, .server, null)) != null,
     );
 
-    const offset = std.mem.indexOf(u8, signed, "00:11").?;
+    const offset = std.mem.indexOf(u8, signed, "22:33").?;
     signed[offset] = 'f';
 
     if (verify(allocator, signed, 1000, .server, null)) |_| {
         return error.TamperingAccepted;
     } else |_| {}
+}
+
+test "identity envelopes with an empty idp domain are accepted" {
+    const allocator = std.testing.allocator;
+    const key = try jwt.Scheme.KeyPair.generateDeterministic(.{7} ** 48);
+    const token = try jwt.serverToken(allocator, key, 1000);
+    defer allocator.free(token);
+
+    const signed = try add(
+        allocator,
+        "v=0\r\na=fingerprint:sha-256 00:11\r\n",
+        .{ .key = key, .token = token, .domain = "" },
+    );
+    defer allocator.free(signed);
+
+    try std.testing.expect(std.mem.indexOf(u8, signed, "a=identity:") != null);
+    try std.testing.expect((try verify(allocator, signed, 1000, .server, null)) != null);
+}
+
+test "identity envelopes with a malformed idp are rejected" {
+    const allocator = std.testing.allocator;
+
+    for ([_][]const u8{
+        "{\"assertion\":\"{}\",\"idp\":{\"domain\":\"self\",\"protocol\":\"other\"}}",
+        "{\"assertion\":\"{}\",\"idp\":{\"domain\":\"self\"}}",
+        "{\"assertion\":\"{}\",\"idp\":{\"domain\":0,\"protocol\":\"default\"}}",
+        "{\"assertion\":\"{}\",\"idp\":\"self\"}",
+        "{\"assertion\":\"{}\"}",
+    }) |envelope| {
+        const encoded = try allocator.alloc(
+            u8,
+            std.base64.standard.Encoder.calcSize(envelope.len),
+        );
+        defer allocator.free(encoded);
+        _ = std.base64.standard.Encoder.encode(encoded, envelope);
+
+        const sdp = try std.fmt.allocPrint(
+            allocator,
+            "v=0\r\na=fingerprint:sha-256 00:11\r\na=identity:{s}\r\n",
+            .{encoded},
+        );
+        defer allocator.free(sdp);
+
+        try std.testing.expectError(
+            error.InvalidIdentity,
+            verify(allocator, sdp, 1000, .server, null),
+        );
+    }
+}
+
+test "stripping an identity preserves every other SDP byte" {
+    const allocator = std.testing.allocator;
+
+    const Case = struct { input: [:0]const u8, expected: [:0]const u8 };
+    const cases = [_]Case{
+        .{
+            .input = "v=0\r\na=identity:abc\r\na=fingerprint:sha-256 00:11\r\n" ++
+                "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" ++
+                "a=max-message-size:262144\r\na=setup:active\r\na=mid:0\r\n",
+            .expected = "v=0\r\na=fingerprint:sha-256 00:11\r\n" ++
+                "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" ++
+                "a=max-message-size:262144\r\na=setup:active\r\na=mid:0\r\n",
+        },
+        .{
+            .input = "v=0\na=identity:abc\na=ice-ufrag:x\n",
+            .expected = "v=0\na=ice-ufrag:x\n",
+        },
+        .{
+            .input = "v=0\r\na=identity:abc",
+            .expected = "v=0\r\n",
+        },
+        .{
+            .input = "v=0\r\na=fingerprint:sha-256 00:11\r\n",
+            .expected = "v=0\r\na=fingerprint:sha-256 00:11\r\n",
+        },
+        .{
+            .input = "v=0\r\nm=application 9\r\na=identity:abc\r\n",
+            .expected = "v=0\r\nm=application 9\r\na=identity:abc\r\n",
+        },
+    };
+
+    for (cases) |case| {
+        const buffer = try allocator.dupeZ(u8, case.input);
+        defer allocator.free(buffer);
+        try std.testing.expectEqualStrings(case.expected, removeIdentity(buffer));
+    }
+}
+
+test "a verified identity is stripped before the description is used" {
+    const allocator = std.testing.allocator;
+    const key = try jwt.Scheme.KeyPair.generateDeterministic(.{8} ** 48);
+    const token = try jwt.serverToken(allocator, key, 1000);
+    defer allocator.free(token);
+
+    const source =
+        "v=0\r\n" ++
+        "a=fingerprint:sha-256 00:11\r\n" ++
+        "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" ++
+        "a=ice-ufrag:abcd\r\na=max-message-size:262144\r\n";
+
+    const signed = try add(allocator, source, .{ .key = key, .token = token });
+    defer allocator.free(signed);
+
+    try std.testing.expect((try verify(allocator, signed, 1000, .server, null)) != null);
+
+    const cleaned = removeIdentity(signed);
+    try std.testing.expect(std.mem.indexOf(u8, cleaned, "a=identity:") == null);
+    try std.testing.expectEqualStrings(source, cleaned);
 }

@@ -93,9 +93,18 @@ pub fn build(b: *std.Build) void {
         "native-sanitizer",
         "Link a matching instrumented native dependency build",
     );
+    const native_test_filter = b.option(
+        []const u8,
+        "native-test-filter",
+        "Run only matching native tests",
+    );
+    const native_filters: []const []const u8 = if (native_test_filter) |filter| &.{filter} else &.{};
+    const handshake_pairs = b.option(usize, "handshake-pairs", "Concurrent native test pairs (1-100)") orelse 8;
+    if (handshake_pairs == 0 or handshake_pairs > 100) @panic("handshake-pairs must be 1-100");
 
     const build_options = b.addOptions();
     build_options.addOption(usize, "fuzz_iterations", fuzz_iterations);
+    build_options.addOption(usize, "handshake_pairs", handshake_pairs);
 
     const nethernet = b.addModule("nethernet", .{
         .root_source_file = b.path("src/root.zig"),
@@ -142,20 +151,33 @@ pub fn build(b: *std.Build) void {
         optimize,
     );
     integration_module.addImport("nethernet", nethernet);
-    const integration_tests = b.addTest(.{ .root_module = integration_module });
+    integration_module.addOptions("build_options", build_options);
+    const integration_tests = b.addTest(.{
+        .root_module = integration_module,
+        .filters = native_filters,
+    });
     const run_integration = b.addRunArtifact(integration_tests);
     addNativeRuntime(b, run_integration, target, native_prefix);
+
+    const library_tests = b.addTest(.{
+        .root_module = nethernet,
+        .filters = native_filters,
+    });
+    const run_library_tests = b.addRunArtifact(library_tests);
+    addNativeRuntime(b, run_library_tests, target, native_prefix);
 
     const integration_step = b.step(
         "test-integration",
         "Run real WebRTC, endpoint, LAN, and network integration tests",
     );
+    integration_step.dependOn(&run_library_tests.step);
     integration_step.dependOn(&run_integration.step);
     b.step("test-native", "Alias for test-integration").dependOn(integration_step);
 
     inline for (.{
         .{ "client", "examples/client.zig" },
         .{ "server", "examples/server.zig" },
+        .{ "minecraft", "examples/minecraft.zig" },
     }) |example| {
         const example_module = createModule(b, example[1], target, optimize);
         example_module.addImport("nethernet", nethernet);
@@ -167,12 +189,12 @@ pub fn build(b: *std.Build) void {
     }
 
     if (target.result.os.tag == .windows) {
-        const dll = b.addInstallFileWithDir(
-            .{ .cwd_relative = b.pathJoin(&.{ native_prefix, "bin", "libdatachannel.dll" }) },
-            .bin,
-            "libdatachannel.dll",
-        );
-        b.getInstallStep().dependOn(&dll.step);
+        b.installDirectory(.{
+            .source_dir = .{ .cwd_relative = b.pathJoin(&.{ native_prefix, "bin" }) },
+            .install_dir = .bin,
+            .install_subdir = "",
+            .include_extensions = &.{".dll"},
+        });
     }
 
     const wake_bench_module = createModule(
@@ -265,6 +287,11 @@ pub fn build(b: *std.Build) void {
         .name = "transport-stress",
         .root_module = stress_module,
     });
+    const stress_tests = b.addTest(.{ .root_module = stress_module, .filters = &.{"benchmark "} });
+    const run_stress_tests = b.addRunArtifact(stress_tests);
+    addNativeRuntime(b, run_stress_tests, target, native_prefix);
+    b.step("test-bench", "Check benchmark diagnostics").dependOn(&run_stress_tests.step);
+
     const install_stress = b.addInstallArtifact(stress, .{});
     const stress_install_step = b.step(
         "stress-install",

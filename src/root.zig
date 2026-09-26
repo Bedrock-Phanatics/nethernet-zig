@@ -1,9 +1,12 @@
 const core = @import("core.zig");
 pub const credentials = core.credentials;
 pub const identity = core.identity;
+pub const sdp_identity = core.sdp_identity;
+pub const identity_file = core.identity_file;
 pub const framing = core.framing;
 pub const Reliability = core.Reliability;
 pub const Signal = core.Signal;
+pub const parseSignalErrorCode = core.signal.parseErrorCode;
 pub const ServerData = core.ServerData;
 pub const ErrorCode = core.ErrorCode;
 pub const Identity = core.Identity;
@@ -37,3 +40,6 @@ const peer = @import("transport/peer.zig");
 pub const Peer = peer.Peer;
 pub const State = peer.State;
 
+test {
+    @import("std").testing.refAllDecls(@This());
+}

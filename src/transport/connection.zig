@@ -13,8 +13,91 @@ pub const ChannelState = native.ChannelState;
 pub const ChannelDiagnostics = native.ChannelDiagnostics;
 pub const SelectedIceAddresses = native.SelectedIceAddresses;
 
-const maximum_network_id_length = 4096;
+pub const maximum_network_id_length = 4096;
 const maximum_signal_size = 1024 * 1024;
+const maximum_pending_candidate_bytes = 64 * 1024;
+const maximum_pending_candidates = 32;
+
+pub fn validNetworkId(text: []const u8) bool {
+    if (text.len == 0 or text.len > maximum_network_id_length) return false;
+    for (text) |byte| {
+        if (byte < 0x20 or byte == 0x7f) return false;
+    }
+    return true;
+}
+
+fn signalingPeerCandidate(
+    offer: []const u8,
+    peer_address: std.Io.net.IpAddress,
+    output: *[256]u8,
+) ?[:0]const u8 {
+    var address_buffer: [64]u8 = undefined;
+    const formatted = std.fmt.bufPrint(&address_buffer, "{f}", .{peer_address}) catch return null;
+    const host = switch (peer_address) {
+        .ip4 => formatted[0 .. std.mem.lastIndexOfScalar(u8, formatted, ':') orelse return null],
+        .ip6 => formatted[1 .. std.mem.indexOfScalar(u8, formatted, ']') orelse return null],
+    };
+
+    var peer_ip = peer_address;
+    peer_ip.setPort(0);
+    var host_port: ?u16 = null;
+    var lines = std.mem.splitScalar(u8, offer, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "a=candidate:")) continue;
+        var fields = std.mem.tokenizeAny(u8, line, " \t\r");
+        _ = fields.next() orelse continue;
+        const component = std.fmt.parseInt(u16, fields.next() orelse continue, 10) catch continue;
+        const protocol = fields.next() orelse continue;
+        _ = fields.next() orelse continue;
+        const candidate_host = fields.next() orelse continue;
+        const port = std.fmt.parseInt(u16, fields.next() orelse continue, 10) catch continue;
+        if (!std.mem.eql(u8, fields.next() orelse continue, "typ")) continue;
+        const kind = fields.next() orelse continue;
+        if (std.Io.net.IpAddress.parse(candidate_host, 0)) |candidate_ip| {
+            if (candidate_ip.eql(&peer_ip)) return null;
+        } else |_| {}
+        if (host_port == null and component == 1 and port != 0 and
+            std.ascii.eqlIgnoreCase(protocol, "udp") and std.mem.eql(u8, kind, "host"))
+        {
+            host_port = port;
+        }
+    }
+
+    const candidate = std.fmt.bufPrint(
+        output[0 .. output.len - 1],
+        "candidate:signaling 1 udp 1694498815 {s} {d} typ srflx raddr 0.0.0.0 rport 0",
+        .{ host, host_port orelse return null },
+    ) catch return null;
+    output[candidate.len] = 0;
+    return output[0..candidate.len :0];
+}
+
+test "signaling peer candidate uses the offered UDP host port" {
+    const peer = try std.Io.net.IpAddress.parseLiteral("198.51.100.8:19132");
+    var output: [256]u8 = undefined;
+    const offer =
+        "a=candidate:a 1 udp 2130706431 192.168.1.4 45678 typ host\r\n" ++
+        "a=candidate:b 1 tcp 1 192.168.1.4 9 typ host\r\n";
+    try std.testing.expectEqualStrings(
+        "candidate:signaling 1 udp 1694498815 198.51.100.8 45678 typ srflx raddr 0.0.0.0 rport 0",
+        signalingPeerCandidate(offer, peer, &output).?,
+    );
+    try std.testing.expect(signalingPeerCandidate(
+        offer ++ "a=candidate:c 1 udp 1 198.51.100.8 12345 typ srflx\r\n",
+        peer,
+        &output,
+    ) == null);
+    try std.testing.expect(signalingPeerCandidate(
+        "a=candidate:b 1 tcp 1 192.168.1.4 9 typ host\r\n",
+        peer,
+        &output,
+    ) == null);
+    const ipv6 = try std.Io.net.IpAddress.parseLiteral("[2001:db8::8]:19132");
+    try std.testing.expectEqualStrings(
+        "candidate:signaling 1 udp 1694498815 2001:db8::8 45678 typ srflx raddr 0.0.0.0 rport 0",
+        signalingPeerCandidate(offer, ipv6, &output).?,
+    );
+}
 
 pub const Role = enum { client, server };
 pub const Diagnostics = struct {
@@ -37,6 +120,7 @@ pub const Address = struct {
 
 pub const Message = struct {
     reliability: framing.Reliability,
+    /// Borrowed data. Invalid after the next poll, receive, or destroy.
     data: []const u8,
 };
 
@@ -50,26 +134,27 @@ pub const Options = struct {
     reassembly_timeout_ms: u32 = 30000,
     graceful_shutdown_timeout_ms: u32 = 2000,
     maximum_remote_candidates: usize = 32,
+    trace: bool = false,
+    /// A configured verifier still requires an identity.
     allow_anonymous: bool = false,
     identity: ?auth.Identity = null,
     server_identity_key: ?auth.KeyPair = null,
     server_identity_domain: []const u8 = "self",
+    /// These callbacks verify token issuers, not just key ownership.
     verify_server: ?auth.Verifier = null,
     verify_client: ?auth.Verifier = null,
 };
 
 fn verifierForRole(options: Options, role: Role) ?auth.Verifier {
     return if (role == .client)
-        options.verify_server orelse options.verify_client
+        options.verify_server
     else
         options.verify_client;
 }
 
 fn remoteIdentityRequired(options: Options, role: Role) bool {
-    return switch (role) {
-        .client => verifierForRole(options, role) != null,
-        .server => !options.allow_anonymous,
-    };
+    if (verifierForRole(options, role) != null) return true;
+    return !options.allow_anonymous;
 }
 
 fn validateOptions(options: Options) !void {
@@ -79,7 +164,6 @@ fn validateOptions(options: Options) !void {
         options.connection_timeout_ms == 0 or
         options.reassembly_timeout_ms == 0 or
         options.graceful_shutdown_timeout_ms == 0 or
-        options.server_identity_domain.len == 0 or
         options.server_identity_domain.len > 255)
     {
         return error.InvalidConfiguration;
@@ -121,6 +205,11 @@ const Assembly = struct {
     decoder: framing.Reassembler,
     started: ?std.Io.Timestamp = null,
 
+    fn clear(self: *Assembly, allocator: std.mem.Allocator) void {
+        self.buffer.deinit(allocator);
+        self.* = .{ .decoder = framing.Reassembler.init(&.{}, self.decoder.reliability) };
+    }
+
     fn push(
         self: *Assembly,
         allocator: std.mem.Allocator,
@@ -138,6 +227,7 @@ const Assembly = struct {
         if (self.decoder.used == 0) {
             if (self.decoder.failed) return error.ConnectionClosed;
             if (try framing.singleFragmentPayload(data, self.decoder.reliability)) |payload| {
+                if (self.buffer.capacity > framing.maximum_segment_payload) self.clear(allocator);
                 return payload;
             }
         }
@@ -175,16 +265,23 @@ pub const Connection = struct {
     local_id: []u8,
     options: Options,
 
+    /// The peer's signing key does not prove its issuer is trusted.
     public_key: ?auth.Key = null,
+    identity_issuer_verified: bool = false,
     started: std.Io.Timestamp,
     answered: ?std.Io.Timestamp = null,
     established: bool = false,
     remote_candidates: RemoteCandidates = .{},
     remote_candidate_count: std.atomic.Value(usize) = .init(0),
+    pending_candidates: std.ArrayList([:0]u8) = .empty,
+    pending_candidate_bytes: usize = 0,
+    remote_description_set: bool = false,
 
     packet_scratch: []u8,
     negotiation_scratch: ?[]u8,
     send_buffer: []u8,
+    // Protects the send buffer and counters.
+    send_mutex: std.Io.Mutex = .init,
     assemblies: [2]Assembly = .{
         .{ .decoder = framing.Reassembler.init(&.{}, .reliable) },
         .{ .decoder = framing.Reassembler.init(&.{}, .unreliable) },
@@ -194,6 +291,7 @@ pub const Connection = struct {
     signal_buffer: ?[:0]u8 = null,
 
     received_messages: u64 = 0,
+    first_payload_traced: bool = false,
     sent_messages: u64 = 0,
     received_bytes: u64 = 0,
     sent_bytes: u64 = 0,
@@ -237,6 +335,7 @@ pub const Connection = struct {
 
         var native_options = options.native;
         native_options.maximum_message_size = options.maximum_message_size;
+        native_options.trace = native_options.trace or options.trace;
 
         const peer = try native.Peer.create(allocator, io, native_options);
         errdefer peer.destroy();
@@ -256,6 +355,8 @@ pub const Connection = struct {
             .started = std.Io.Clock.awake.now(io),
         };
 
+        self.options.local_network_id = local_id;
+
         if (role == .server and self.options.identity == null) {
             const key = self.options.server_identity_key orelse
                 jwt.Scheme.KeyPair.generate(io);
@@ -274,10 +375,11 @@ pub const Connection = struct {
     }
 
     pub fn destroy(self: *Connection) void {
+        self.clearPendingCandidates();
         self.peer.destroy();
 
         for (&self.assemblies) |*assembly| {
-            assembly.buffer.deinit(self.allocator);
+            assembly.clear(self.allocator);
         }
 
         if (self.owned_token) |token| self.allocator.free(token);
@@ -292,10 +394,32 @@ pub const Connection = struct {
     }
 
     pub fn close(self: *Connection) void {
+        self.clearPendingCandidates();
         self.peer.close();
     }
 
+    fn clearPendingCandidates(self: *Connection) void {
+        for (self.pending_candidates.items) |candidate| self.allocator.free(candidate);
+        self.pending_candidates.deinit(self.allocator);
+        self.pending_candidates = .empty;
+        self.pending_candidate_bytes = 0;
+    }
+
+    fn queueCandidate(self: *Connection, candidate: []const u8) !void {
+        if (candidate.len > 16384 or std.mem.indexOfScalar(u8, candidate, 0) != null)
+            return error.MalformedSignal;
+        if (self.pending_candidates.items.len >= maximum_pending_candidates or
+            candidate.len > maximum_pending_candidate_bytes - self.pending_candidate_bytes)
+            return error.TooManyRemoteCandidates;
+
+        const copy = try self.allocator.dupeZ(u8, candidate);
+        errdefer self.allocator.free(copy);
+        try self.pending_candidates.append(self.allocator, copy);
+        self.pending_candidate_bytes += candidate.len;
+    }
+
     pub fn closeGracefully(self: *Connection) !void {
+        defer self.clearPendingCandidates();
         try self.peer.closeGracefully(self.options.graceful_shutdown_timeout_ms);
     }
     pub fn ready(self: *Connection) bool {
@@ -338,6 +462,21 @@ pub const Connection = struct {
         try self.peer.offer();
     }
 
+    pub fn addSignalingPeerCandidate(
+        self: *Connection,
+        offer: []const u8,
+        peer_address: std.Io.net.IpAddress,
+    ) void {
+        if (self.role != .server) return;
+        var buffer: [256]u8 = undefined;
+        const candidate = signalingPeerCandidate(offer, peer_address, &buffer) orelse return;
+        self.remote_candidates.addTrickled(self.options.maximum_remote_candidates) catch return;
+        self.remote_candidate_count.store(self.remote_candidates.count, .release);
+        self.peer.remoteCandidate(candidate) catch |err| {
+            if (self.options.trace) std.debug.print("nethernet signaling peer candidate rejected ({s})\n", .{@errorName(err)});
+        };
+    }
+
     pub fn applySignal(self: *Connection, signal: Signal) !void {
         const matches_connection =
             signal.connection_id == self.id and
@@ -346,6 +485,11 @@ pub const Connection = struct {
         if (!matches_connection) return error.UnexpectedSignal;
 
         errdefer self.close();
+
+        switch (self.state()) {
+            .failed, .closed => return error.ConnectionClosed,
+            else => {},
+        }
 
         if (std.mem.eql(u8, signal.kind, Signal.failure)) {
             return error.RemoteFailure;
@@ -368,6 +512,9 @@ pub const Connection = struct {
         }
         self.remote_candidate_count.store(self.remote_candidates.count, .release);
 
+        if (is_candidate and !self.remote_description_set)
+            return self.queueCandidate(signal.data);
+
         const terminated = try self.allocator.dupeZ(u8, signal.data);
         defer self.allocator.free(terminated);
 
@@ -381,24 +528,44 @@ pub const Connection = struct {
         const identity_kind: auth.IdentityKind =
             if (self.role == .client) .server else .client;
 
+        if (self.options.trace) native.traceSdp("remote signed", signal.data);
+
         const verifier = verifierForRole(self.options, self.role);
-        const key = try auth.verify(
+        const key = auth.verify(
             self.allocator,
             signal.data,
             std.Io.Clock.real.now(self.io).toSeconds(),
             identity_kind,
             verifier,
-        );
+        ) catch |err| {
+            if (self.options.trace) std.debug.print("nethernet identity: rejected ({s})\n", .{@errorName(err)});
+            return err;
+        };
 
-        if (key == null and remoteIdentityRequired(self.options, self.role))
+        if (key == null and remoteIdentityRequired(self.options, self.role)) {
+            if (self.options.trace) std.debug.print("nethernet identity: missing or unverified, required\n", .{});
             return error.IdentityNotAllowed;
-
-        try self.peer.remoteDescription(
-            terminated,
-            if (is_offer) .offer else .answer,
-        );
+        }
 
         self.public_key = key;
+        self.identity_issuer_verified = key != null and verifier != null;
+        if (self.options.trace) std.debug.print("nethernet identity: {s}\n", .{if (key == null) "anonymous allowed" else if (verifier != null) "proof and issuer verified" else "proof verified"});
+
+        const native_sdp = auth.removeIdentity(terminated);
+        if (self.options.trace) native.traceSdp("remote stripped", native_sdp);
+        self.peer.remoteDescription(
+            native_sdp,
+            if (is_offer) .offer else .answer,
+        ) catch |err| {
+            if (self.options.trace) std.debug.print("nethernet remote description: failed ({s})\n", .{@errorName(err)});
+            return err;
+        };
+        if (self.options.trace) std.debug.print("nethernet remote description: accepted\n", .{});
+
+        self.remote_description_set = true;
+        for (self.pending_candidates.items) |candidate| try self.peer.remoteCandidate(candidate);
+        self.clearPendingCandidates();
+
         self.answered = std.Io.Clock.awake.now(self.io);
     }
 
@@ -411,7 +578,10 @@ pub const Connection = struct {
     }
 
     fn pollInternal(self: *Connection, signals_only: bool) !?Event {
-        errdefer self.close();
+        errdefer {
+            for (&self.assemblies) |*assembly| assembly.clear(self.allocator);
+            self.close();
+        }
 
         const now = std.Io.Clock.awake.now(self.io);
 
@@ -456,18 +626,35 @@ pub const Connection = struct {
             self.negotiation_scratch orelse return error.InvalidState
         else
             self.packet_scratch;
-        const event = try self.peer.pollRestricted(scratch, signals_only) orelse return null;
+        const event = try self.peer.pollRestricted(scratch, signals_only) orelse {
+            for (&self.assemblies) |*assembly| {
+                if (assembly.decoder.used == 0 and
+                    assembly.buffer.capacity > framing.maximum_segment_payload)
+                    assembly.clear(self.allocator);
+            }
+            return null;
+        };
 
         switch (event) {
             .offer, .answer, .candidate => |data| {
                 var body = data;
 
+                if (self.options.trace and event != .candidate)
+                    native.traceSdp("local before identity", data);
+
                 if (event != .candidate) {
                     if (self.options.identity) |identity| {
-                        self.signal_buffer = try auth.add(self.allocator, data, identity);
+                        self.signal_buffer = auth.add(self.allocator, data, identity) catch |err| {
+                            if (self.options.trace) std.debug.print("nethernet local identity: signing failed ({s})\n", .{@errorName(err)});
+                            return err;
+                        };
                         body = self.signal_buffer.?;
+                        if (self.options.trace) std.debug.print("nethernet local identity: signed\n", .{});
                     }
                 }
+
+                if (self.options.trace and event != .candidate)
+                    native.traceSdp("local signaled", body);
 
                 const kind = if (event == .offer)
                     Signal.offer
@@ -499,6 +686,12 @@ pub const Connection = struct {
 
                 self.received_messages +|= 1;
                 self.received_bytes +|= message.len;
+                if (self.options.trace and !self.first_payload_traced) {
+                    self.first_payload_traced = true;
+                    std.debug.print("nethernet WebRTC: first Bedrock payload channel={s}, bytes={d}\n", .{
+                        if (reliable) "reliable" else "unreliable", message.len,
+                    });
+                }
 
                 return .{
                     .message = .{
@@ -580,6 +773,9 @@ pub const Connection = struct {
             return error.MessageTooLarge;
         }
 
+        self.send_mutex.lockUncancelable(self.io);
+        defer self.send_mutex.unlock(self.io);
+
         try self.peer.send(data, reliability, self.send_buffer);
 
         if (data.len != 0) self.sent_messages +|= 1;
@@ -630,20 +826,24 @@ test "remote identity verifiers are selected by connection role" {
     };
     try std.testing.expect(verifierForRole(options, .client).?.verify == Verifiers.server);
     try std.testing.expect(verifierForRole(options, .server).?.verify == Verifiers.client);
-    try std.testing.expect(
-        verifierForRole(
-            .{ .verify_client = .{ .verify = Verifiers.client } },
-            .client,
-        ).?.verify == Verifiers.client,
-    );
+    try std.testing.expect(verifierForRole(.{
+        .verify_client = .{ .verify = Verifiers.client },
+    }, .client) == null);
 
     try std.testing.expect(remoteIdentityRequired(options, .client));
     try std.testing.expect(remoteIdentityRequired(.{
         .verify_client = .{ .verify = Verifiers.client },
     }, .client));
-    try std.testing.expect(!remoteIdentityRequired(.{}, .client));
+    try std.testing.expect(remoteIdentityRequired(.{}, .client));
+    try std.testing.expect(!remoteIdentityRequired(.{ .allow_anonymous = true }, .client));
     try std.testing.expect(remoteIdentityRequired(.{}, .server));
     try std.testing.expect(!remoteIdentityRequired(.{ .allow_anonymous = true }, .server));
+
+    try std.testing.expect(remoteIdentityRequired(.{
+        .allow_anonymous = true,
+        .verify_client = .{ .verify = Verifiers.client },
+    }, .server));
+    try validateOptions(.{ .server_identity_domain = "" });
 }
 
 fn connectionCreationFailureScenario(allocator: std.mem.Allocator) !void {
@@ -710,6 +910,9 @@ test "incomplete reassembly expires and closes connection" {
     );
 
     try std.testing.expectError(error.ReassemblyTimeout, connection.receive());
+    try std.testing.expectEqual(@as(usize, 0), connection.assemblies[0].buffer.capacity);
+    try std.testing.expectEqual(@as(usize, 0), connection.assemblies[0].decoder.storage.len);
+    try std.testing.expect(connection.assemblies[0].started == null);
 }
 
 test "cancel and close unblock receive" {
@@ -756,6 +959,59 @@ test "buffers follow message limit and negotiation scratch is released" {
     try std.testing.expect(connection.negotiation_scratch == null);
 }
 
+test "completed reassembly releases large buffers and reuses small ones" {
+    const allocator = std.testing.allocator;
+    const connection = try Connection.create(allocator, std.testing.io, .client, 1, "remote", .{});
+    defer connection.destroy();
+    connection.established = true;
+
+    const frame = try allocator.alloc(u8, framing.maximum_segment_payload / 2 + 2);
+    defer allocator.free(frame);
+    @memset(frame[1..], 42);
+
+    for ([_]usize{ 2, frame.len }) |size| {
+        frame[0] = 1;
+        try connection.peer.queue.push(3, frame[0..size]);
+        frame[0] = 0;
+        try connection.peer.queue.push(3, frame[0..size]);
+        const message = try connection.receive();
+        try std.testing.expectEqual(2 * (size - 1), message.data.len);
+        for (message.data) |byte| try std.testing.expectEqual(@as(u8, 42), byte);
+        const capacity = connection.assemblies[0].buffer.capacity;
+        try std.testing.expect(capacity >= message.data.len);
+        const address = @intFromPtr(message.data.ptr);
+        frame[0] = 1;
+        try connection.peer.queue.push(3, frame[0..size]);
+        frame[0] = 0;
+        try connection.peer.queue.push(3, frame[0..size]);
+        const reused = try connection.receive();
+        try std.testing.expectEqual(address, @intFromPtr(reused.data.ptr));
+        try std.testing.expect((try connection.poll()) == null);
+        try std.testing.expectEqual(
+            if (size == 2) capacity else @as(usize, 0),
+            connection.assemblies[0].buffer.capacity,
+        );
+        try std.testing.expectEqual(@as(usize, 0), connection.assemblies[0].decoder.used);
+        try std.testing.expect(connection.assemblies[0].started == null);
+    }
+}
+
+test "invalid reassembly releases partial storage before destroy" {
+    const connection = try Connection.create(std.testing.allocator, std.testing.io, .client, 1, "remote", .{});
+    defer connection.destroy();
+    connection.established = true;
+    try connection.peer.queue.push(3, &.{ 255, 42 });
+    try std.testing.expect((try connection.poll()) == null);
+    try std.testing.expectEqual(@as(usize, 1024), connection.assemblies[0].buffer.capacity);
+    try connection.peer.queue.push(3, &.{ 253, 43 });
+    try std.testing.expectError(error.FragmentOutOfSequence, connection.poll());
+    try std.testing.expectEqual(@as(usize, 0), connection.assemblies[0].buffer.capacity);
+    try std.testing.expectEqual(@as(usize, 0), connection.assemblies[0].decoder.storage.len);
+    try std.testing.expectEqual(@as(usize, 0), connection.assemblies[0].decoder.used);
+    try std.testing.expect(connection.assemblies[0].started == null);
+    try std.testing.expectError(error.ConnectionClosed, connection.poll());
+}
+
 test "single-fragment assembly borrows poll storage without allocation" {
     var assembly = Assembly{
         .decoder = framing.Reassembler.init(&.{}, .reliable),
@@ -766,6 +1022,13 @@ test "single-fragment assembly borrows poll storage without allocation" {
     const message = (try assembly.push(std.testing.allocator, std.testing.io, &fragment, 3)).?;
     try std.testing.expectEqual(@intFromPtr(fragment[1..].ptr), @intFromPtr(message.ptr));
     try std.testing.expectEqual(@as(usize, 0), assembly.buffer.capacity);
+
+    try assembly.buffer.ensureTotalCapacityPrecise(std.testing.allocator, framing.maximum_segment_payload + 1);
+    assembly.decoder.storage = assembly.buffer.allocatedSlice();
+    const next = (try assembly.push(std.testing.allocator, std.testing.io, &fragment, 3)).?;
+    try std.testing.expectEqual(@intFromPtr(fragment[1..].ptr), @intFromPtr(next.ptr));
+    try std.testing.expectEqual(@as(usize, 0), assembly.buffer.capacity);
+    try std.testing.expectEqual(@as(usize, 0), assembly.decoder.storage.len);
 }
 
 test "connection and encoder maximum message limits agree" {
@@ -775,6 +1038,7 @@ test "connection and encoder maximum message limits agree" {
         framing.maximum_reliable_message_size,
         .reliable,
         options.maximum_message_size,
+        framing.maximum_segment_payload,
     );
 
     options.maximum_message_size = framing.maximum_reliable_message_size + 1;
@@ -785,8 +1049,183 @@ test "connection and encoder maximum message limits agree" {
             framing.maximum_reliable_message_size + 1,
             .reliable,
             options.maximum_message_size,
+            framing.maximum_segment_payload,
         ),
     );
+}
+
+test "candidates before an answer are bounded and released" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const candidate = "candidate:1 1 udp 2122260223 127.0.0.1 9999 typ host";
+
+    const connection = try Connection.create(
+        allocator,
+        io,
+        .client,
+        7,
+        "remote",
+        .{ .maximum_remote_candidates = 40 },
+    );
+    defer connection.destroy();
+    try connection.start();
+
+    for (0..maximum_pending_candidates) |_| {
+        try connection.applySignal(.{
+            .kind = Signal.candidate,
+            .connection_id = 7,
+            .network_id = "remote",
+            .data = candidate,
+        });
+    }
+    try std.testing.expectEqual(maximum_pending_candidates, connection.pending_candidates.items.len);
+    try std.testing.expectEqual(maximum_pending_candidates * candidate.len, connection.pending_candidate_bytes);
+    try std.testing.expectError(error.TooManyRemoteCandidates, connection.applySignal(.{
+        .kind = Signal.candidate,
+        .connection_id = 7,
+        .network_id = "remote",
+        .data = candidate,
+    }));
+    try std.testing.expectEqual(@as(usize, 0), connection.pending_candidates.items.len);
+    try std.testing.expectEqual(@as(usize, 0), connection.pending_candidate_bytes);
+    try std.testing.expectEqual(native.State.closed, connection.state());
+
+    const limited = try Connection.create(
+        allocator,
+        io,
+        .client,
+        8,
+        "remote",
+        .{ .maximum_remote_candidates = 40 },
+    );
+    defer limited.destroy();
+
+    const large = [_]u8{'x'} ** 16384;
+    for (0..maximum_pending_candidate_bytes / large.len) |_| {
+        try limited.applySignal(.{
+            .kind = Signal.candidate,
+            .connection_id = 8,
+            .network_id = "remote",
+            .data = &large,
+        });
+    }
+    try std.testing.expectError(error.TooManyRemoteCandidates, limited.applySignal(.{
+        .kind = Signal.candidate,
+        .connection_id = 8,
+        .network_id = "remote",
+        .data = &large,
+    }));
+    try std.testing.expectEqual(@as(usize, 0), limited.pending_candidates.items.len);
+}
+
+test "late signals cannot refill a terminal connection's candidate queue" {
+    for ([_]native.State{ .failed, .closed }) |terminal| {
+        const connection = try Connection.create(std.testing.allocator, std.testing.io, .client, 7, "remote", .{});
+        defer connection.destroy();
+        const candidate: Signal = .{
+            .kind = Signal.candidate,
+            .connection_id = 7,
+            .network_id = "remote",
+            .data = "candidate:1 1 udp 2122260223 127.0.0.1 9999 typ host",
+        };
+        try connection.applySignal(candidate);
+        if (terminal == .closed) {
+            connection.close();
+        } else {
+            connection.peer.mutex.lockUncancelable(connection.io);
+            connection.peer.state = terminal;
+            connection.peer.mutex.unlock(connection.io);
+        }
+
+        for ([_][]const u8{ Signal.candidate, Signal.answer, Signal.offer, Signal.failure }) |kind| {
+            var late = candidate;
+            late.kind = kind;
+            try std.testing.expectError(error.ConnectionClosed, connection.applySignal(late));
+            try std.testing.expectEqual(@as(usize, 0), connection.pending_candidates.items.len);
+            try std.testing.expectEqual(@as(usize, 0), connection.pending_candidate_bytes);
+            try std.testing.expectEqual(@as(usize, 1), connection.remoteIceCandidateCount());
+            try std.testing.expectEqual(native.State.closed, connection.state());
+        }
+    }
+}
+
+test "candidate before answer replays after the remote description" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const options: Options = .{
+        .allow_anonymous = true,
+        .negotiation_timeout_ms = 5000,
+        .connection_timeout_ms = 5000,
+    };
+
+    const client = try Connection.create(allocator, io, .client, 9, "server", options);
+    defer client.destroy();
+    const server = try Connection.create(allocator, io, .server, 9, "client", options);
+    defer server.destroy();
+    try client.start();
+
+    var offer: ?[]u8 = null;
+    defer if (offer) |value| allocator.free(value);
+    while (offer == null) {
+        client.prepareWait();
+        if (try client.pollNegotiation()) |event| switch (event) {
+            .signal => |signal| if (std.mem.eql(u8, signal.kind, Signal.offer)) {
+                offer = try allocator.dupe(u8, signal.data);
+            },
+            .message => return error.UnexpectedMessage,
+        };
+        if (offer == null) try client.wait(true);
+    }
+    try server.applySignal(.{
+        .kind = Signal.offer,
+        .connection_id = 9,
+        .network_id = "client",
+        .data = offer.?,
+    });
+
+    var answer: ?[]u8 = null;
+    defer if (answer) |value| allocator.free(value);
+    var candidate: ?[]u8 = null;
+    defer if (candidate) |value| allocator.free(value);
+    while (answer == null or candidate == null) {
+        server.prepareWait();
+        if (try server.pollNegotiation()) |event| switch (event) {
+            .signal => |signal| {
+                if (std.mem.eql(u8, signal.kind, Signal.answer) and answer == null)
+                    answer = try allocator.dupe(u8, signal.data);
+                if (std.mem.eql(u8, signal.kind, Signal.candidate) and candidate == null)
+                    candidate = try allocator.dupe(u8, signal.data);
+            },
+            .message => return error.UnexpectedMessage,
+        };
+        if (answer == null or candidate == null) try server.wait(true);
+    }
+
+    try client.applySignal(.{
+        .kind = Signal.candidate,
+        .connection_id = 9,
+        .network_id = "server",
+        .data = candidate.?,
+    });
+    try std.testing.expectEqual(@as(usize, 1), client.pending_candidates.items.len);
+    try client.applySignal(.{
+        .kind = Signal.answer,
+        .connection_id = 9,
+        .network_id = "server",
+        .data = answer.?,
+    });
+    try std.testing.expect(client.remote_description_set);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_candidates.items.len);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_candidate_bytes);
+
+    try client.applySignal(.{
+        .kind = Signal.candidate,
+        .connection_id = 9,
+        .network_id = "server",
+        .data = candidate.?,
+    });
+    try std.testing.expectEqual(@as(usize, 0), client.pending_candidates.items.len);
+    try std.testing.expectEqual(@as(usize, 2), client.remoteIceCandidateCount());
 }
 
 test "remote ICE candidates accept exactly the configured limit" {
@@ -861,4 +1300,255 @@ test "diagnostics total buffered bytes handles unavailable channels" {
         .remote_ice_candidates = 3,
     };
     try std.testing.expectEqual(@as(usize, 20), diagnostics.bufferedOutgoingBytes());
+}
+
+test "applied descriptions reach the transport without an identity attribute" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    const connection = try Connection.create(
+        allocator,
+        io,
+        .server,
+        7,
+        "remote",
+        .{ .allow_anonymous = true },
+    );
+    defer connection.destroy();
+
+    const key = try jwt.Scheme.KeyPair.generateDeterministic(.{13} ** 48);
+    const token = try jwt.serverToken(
+        allocator,
+        key,
+        std.Io.Clock.real.now(io).toSeconds(),
+    );
+    defer allocator.free(token);
+
+    const source =
+        "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n" ++
+        "a=fingerprint:sha-256 00:11\r\na=ice-ufrag:abcd\r\na=ice-pwd:0123456789abcdef\r\n" ++
+        "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" ++
+        "a=max-message-size:262144\r\na=setup:actpass\r\na=mid:0\r\na=sctp-port:5000\r\n";
+
+    const signed = try auth.add(allocator, source, .{ .key = key, .token = token });
+    defer allocator.free(signed);
+
+    const Observer = struct {
+        var seen: [4096]u8 = undefined;
+        var length: usize = 0;
+
+        fn record(sdp: []const u8) void {
+            length = sdp.len;
+            @memcpy(seen[0..sdp.len], sdp);
+        }
+    };
+    Observer.length = 0;
+    connection.peer.remote_description_test_hook = Observer.record;
+
+    connection.applySignal(.{
+        .kind = Signal.offer,
+        .connection_id = 7,
+        .network_id = "remote",
+        .data = signed,
+    }) catch {};
+
+    const observed = Observer.seen[0..Observer.length];
+    try std.testing.expect(std.mem.indexOf(u8, observed, "a=identity:") == null);
+    try std.testing.expectEqualStrings(source, observed);
+}
+
+test "a transient disconnect neither closes nor stops the connection" {
+    const connection = try Connection.create(
+        std.testing.allocator,
+        std.testing.io,
+        .client,
+        1,
+        "remote",
+        .{},
+    );
+    defer connection.destroy();
+
+    connection.established = true;
+    connection.peer.state = .connected;
+
+    connection.peer.state = .disconnected;
+    try connection.peer.queue.push(3, &.{ 0, 42 });
+
+    const event = (try connection.poll()).?;
+    try std.testing.expectEqualSlices(u8, &.{42}, event.message.data);
+    try std.testing.expectEqual(native.State.disconnected, connection.state());
+
+    connection.peer.state = .connected;
+    try std.testing.expect((try connection.poll()) == null);
+    try std.testing.expectEqual(native.State.connected, connection.state());
+
+    connection.peer.state = .failed;
+    try std.testing.expectError(error.ConnectionClosed, connection.poll());
+    try std.testing.expectEqual(native.State.closed, connection.state());
+}
+
+fn signedOffer(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    key: jwt.Scheme.KeyPair,
+) ![:0]u8 {
+    const token = try jwt.serverToken(
+        allocator,
+        key,
+        std.Io.Clock.real.now(io).toSeconds(),
+    );
+    defer allocator.free(token);
+
+    return auth.add(
+        allocator,
+        "v=0\r\na=fingerprint:sha-256 00:11\r\n" ++
+            "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n",
+        .{ .key = key, .token = token },
+    );
+}
+
+test "an application verifier cannot be bypassed by the remote identity" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    const key = try jwt.Scheme.KeyPair.generateDeterministic(.{16} ** 48);
+    const offer = try signedOffer(allocator, io, key);
+    defer allocator.free(offer);
+
+    const unsigned = "v=0\r\na=fingerprint:sha-256 00:11\r\n" ++
+        "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n";
+
+    const Verifiers = struct {
+        var accepted: jwt.Scheme.PublicKey = undefined;
+
+        fn reject(_: ?*anyopaque, _: []const u8) anyerror!?auth.Key {
+            return null;
+        }
+        fn fail(_: ?*anyopaque, _: []const u8) anyerror!?auth.Key {
+            return error.IdentityRefused;
+        }
+        fn substitute(_: ?*anyopaque, _: []const u8) anyerror!?auth.Key {
+            const other = try jwt.Scheme.KeyPair.generateDeterministic(.{17} ** 48);
+            return other.public_key;
+        }
+        fn accept(_: ?*anyopaque, _: []const u8) anyerror!?auth.Key {
+            return accepted;
+        }
+    };
+    Verifiers.accepted = key.public_key;
+
+    const Case = struct {
+        verify: *const fn (?*anyopaque, []const u8) anyerror!?auth.Key,
+        data: []const u8,
+    };
+
+    for ([_]Case{
+        .{ .verify = Verifiers.reject, .data = offer },
+        .{ .verify = Verifiers.fail, .data = offer },
+        .{ .verify = Verifiers.substitute, .data = offer },
+        .{ .verify = Verifiers.accept, .data = unsigned },
+    }) |case| {
+        const connection = try Connection.create(allocator, io, .server, 7, "remote", .{
+            .allow_anonymous = true,
+            .verify_client = .{ .verify = case.verify },
+        });
+        defer connection.destroy();
+
+        if (connection.applySignal(.{
+            .kind = Signal.offer,
+            .connection_id = 7,
+            .network_id = "remote",
+            .data = case.data,
+        })) |_| {
+            return error.VerifierBypassed;
+        } else |_| {}
+
+        try std.testing.expect(connection.public_key == null);
+        try std.testing.expect(!connection.identity_issuer_verified);
+    }
+
+    const connection = try Connection.create(allocator, io, .server, 7, "remote", .{
+        .verify_client = .{ .verify = Verifiers.accept },
+    });
+    defer connection.destroy();
+
+    connection.peer.remote_description_test_hook = struct {
+        fn ignore(_: []const u8) void {}
+    }.ignore;
+
+    connection.applySignal(.{
+        .kind = Signal.offer,
+        .connection_id = 7,
+        .network_id = "remote",
+        .data = offer,
+    }) catch {};
+
+    try std.testing.expect(connection.public_key != null);
+    try std.testing.expect(connection.identity_issuer_verified);
+}
+
+test "proof of possession alone is not issuer verification" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    const key = try jwt.Scheme.KeyPair.generateDeterministic(.{18} ** 48);
+    const offer = try signedOffer(allocator, io, key);
+    defer allocator.free(offer);
+
+    const connection = try Connection.create(allocator, io, .server, 7, "remote", .{
+        .allow_anonymous = true,
+    });
+    defer connection.destroy();
+
+    connection.applySignal(.{
+        .kind = Signal.offer,
+        .connection_id = 7,
+        .network_id = "remote",
+        .data = offer,
+    }) catch {};
+
+    try std.testing.expect(connection.public_key != null);
+    try std.testing.expect(!connection.identity_issuer_verified);
+}
+
+test "network IDs are opaque but bounded" {
+    for ([_][]const u8{
+        "1",
+        "18446744073709551615",
+        "18446744073709551616",
+        "a3f0-9c11",
+        "{1}",
+        "..a",
+        ".",
+        "..",
+        "a/b?c#d% e",
+        "\xff\xfe",
+        "a" ** maximum_network_id_length,
+    }) |id| try std.testing.expect(validNetworkId(id));
+
+    for ([_][]const u8{
+        "",
+        "tab\there",
+        &.{ '1', 0 },
+        "a" ** (maximum_network_id_length + 1),
+    }) |id| try std.testing.expect(!validNetworkId(id));
+}
+
+test "stored options never outlive a caller's local network ID buffer" {
+    var scratch: [20]u8 = undefined;
+    const id = try std.fmt.bufPrint(&scratch, "{d}", .{12345});
+
+    const connection = try Connection.create(
+        std.testing.allocator,
+        std.testing.io,
+        .client,
+        1,
+        "remote",
+        .{ .local_network_id = id },
+    );
+    defer connection.destroy();
+
+    @memset(&scratch, 0);
+    try std.testing.expectEqualStrings("12345", connection.options.local_network_id);
+    try std.testing.expectEqualStrings("12345", connection.localAddress().network_id);
 }

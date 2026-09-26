@@ -58,14 +58,6 @@ const Reader = struct {
     fn string(self: *Reader) Error![]const u8 {
         return self.take(try self.uint());
     }
-
-    fn fixed(self: *Reader) Error!i32 {
-        return std.mem.readInt(
-            i32,
-            (try self.take(4))[0..4],
-            .little,
-        );
-    }
 };
 
 const Writer = struct {
@@ -107,16 +99,14 @@ const Writer = struct {
         try self.uint(@intCast(value.len));
         try self.put(value);
     }
-
-    fn fixed(self: *Writer, value: i32) Error!void {
-        var bytes: [4]u8 = undefined;
-        std.mem.writeInt(i32, &bytes, value, .little);
-        try self.put(&bytes);
-    }
 };
+
+pub const wire_version: u8 = 7;
 
 pub const ServerData = struct {
     server_name: []const u8 = "",
+    protocol: i32 = 0,
+    version: []const u8 = "",
     level_name: []const u8 = "",
     game_type: i32 = 0,
     player_count: i32 = 0,
@@ -126,18 +116,19 @@ pub const ServerData = struct {
     accepts_online_auth: bool = false,
     accepts_self_signed_auth: bool = false,
     nonce: []const u8 = "",
-    transport_layer: i32 = 2,
     connection_type: i32 = 4,
 
     pub fn encode(self: ServerData, output: []u8) Error![]const u8 {
         var writer = Writer{ .data = output };
 
-        try writer.byte(6);
+        try writer.byte(wire_version);
         try writer.string(self.server_name);
+        try writer.int(self.protocol);
+        try writer.string(self.version);
         try writer.string(self.level_name);
+        try writer.int(self.player_count);
+        try writer.int(self.max_player_count);
         try writer.int(self.game_type);
-        try writer.fixed(self.player_count);
-        try writer.fixed(self.max_player_count);
 
         inline for (.{
             self.editor_world,
@@ -149,7 +140,6 @@ pub const ServerData = struct {
         }
 
         try writer.string(self.nonce);
-        try writer.int(self.transport_layer);
         try writer.int(self.connection_type);
 
         return output[0..writer.offset];
@@ -158,22 +148,23 @@ pub const ServerData = struct {
     pub fn decode(input: []const u8) Error!ServerData {
         var reader = Reader{ .data = input };
 
-        if (try reader.byte() != 6) {
+        if (try reader.byte() != wire_version) {
             return error.MalformedPacket;
         }
 
         const result: ServerData = .{
             .server_name = try reader.string(),
+            .protocol = try reader.int(),
+            .version = try reader.string(),
             .level_name = try reader.string(),
+            .player_count = try reader.int(),
+            .max_player_count = try reader.int(),
             .game_type = try reader.int(),
-            .player_count = try reader.fixed(),
-            .max_player_count = try reader.fixed(),
             .editor_world = try reader.boolean(),
             .hardcore = try reader.boolean(),
             .accepts_online_auth = try reader.boolean(),
             .accepts_self_signed_auth = try reader.boolean(),
             .nonce = try reader.string(),
-            .transport_layer = try reader.int(),
             .connection_type = try reader.int(),
         };
 
@@ -184,7 +175,6 @@ pub const ServerData = struct {
         return result;
     }
 
-    /// String fields remain tied to the RakNet pong input.
     pub fn fromPong(pong: []const u8) Error!ServerData {
         var fields = std.mem.splitScalar(u8, pong, ';');
         var parts: [9][]const u8 = undefined;
@@ -197,6 +187,12 @@ pub const ServerData = struct {
 
         return .{
             .server_name = parts[1],
+            .protocol = std.fmt.parseInt(
+                i32,
+                std.mem.trim(u8, parts[2], " \t"),
+                10,
+            ) catch return error.MalformedPacket,
+            .version = parts[3],
             .level_name = parts[7],
             .player_count = std.fmt.parseInt(
                 i32,
@@ -220,9 +216,9 @@ pub const ServerData = struct {
     }
 };
 
-test "version six advertisement matches wire fixture" {
+test "version seven advertisement matches wire fixture" {
     const expected = [_]u8{
-        6,
+        7,
         6,
         's',
         'e',
@@ -230,21 +226,24 @@ test "version six advertisement matches wire fixture" {
         'v',
         'e',
         'r',
+        0xc0,
+        0x0c,
+        6,
+        '1',
+        '.',
+        '2',
+        '6',
+        '.',
+        '5',
         5,
         'w',
         'o',
         'r',
         'l',
         'd',
+        2,
+        16,
         4,
-        1,
-        0,
-        0,
-        0,
-        8,
-        0,
-        0,
-        0,
         0,
         1,
         1,
@@ -255,12 +254,13 @@ test "version six advertisement matches wire fixture" {
         'n',
         'c',
         'e',
-        4,
         8,
     };
 
     const value = ServerData{
         .server_name = "server",
+        .protocol = 800,
+        .version = "1.26.5",
         .level_name = "world",
         .game_type = 2,
         .player_count = 1,
@@ -281,10 +281,17 @@ test "version six advertisement matches wire fixture" {
 
     const decoded = try ServerData.decode(&expected);
 
-    try std.testing.expectEqualStrings(
-        value.server_name,
-        decoded.server_name,
-    );
+    try std.testing.expectEqualStrings(value.server_name, decoded.server_name);
+    try std.testing.expectEqualStrings(value.version, decoded.version);
+    try std.testing.expectEqualStrings(value.level_name, decoded.level_name);
+    try std.testing.expectEqualStrings(value.nonce, decoded.nonce);
+    try std.testing.expectEqual(value.protocol, decoded.protocol);
+    try std.testing.expectEqual(value.player_count, decoded.player_count);
+    try std.testing.expectEqual(value.max_player_count, decoded.max_player_count);
+    try std.testing.expectEqual(value.game_type, decoded.game_type);
+    try std.testing.expectEqual(value.connection_type, decoded.connection_type);
+    try std.testing.expect(!decoded.editor_world);
+    try std.testing.expect(decoded.hardcore);
 
     for (0..expected.len) |length| {
         try std.testing.expectError(
@@ -293,9 +300,16 @@ test "version six advertisement matches wire fixture" {
         );
     }
 
+    var downgraded = expected;
+    downgraded[0] = 6;
     try std.testing.expectError(
         error.MalformedPacket,
-        ServerData.decode(&.{ 6, 255, 255, 255, 255, 127 }),
+        ServerData.decode(&downgraded),
+    );
+
+    try std.testing.expectError(
+        error.MalformedPacket,
+        ServerData.decode(&.{ 7, 255, 255, 255, 255, 127 }),
     );
 }
 
@@ -304,13 +318,14 @@ test "advertisements reject noncanonical booleans and malformed pong counts" {
     const wire = try (ServerData{}).encode(&encoded);
     var malformed: [64]u8 = undefined;
     @memcpy(malformed[0..wire.len], wire);
-    malformed[14] = 2;
+    malformed[8] = 2;
     try std.testing.expectError(error.MalformedPacket, ServerData.decode(malformed[0..wire.len]));
 
     for ([_][]const u8{
         "MCPE;server;1;2;;4;5;world;CREATIVE",
         "MCPE;server;1;2;bad;4;5;world;CREATIVE",
         "MCPE;server;1;2;3;999999999999;5;world;CREATIVE",
+        "MCPE;server;bad;2;3;4;5;world;CREATIVE",
     }) |pong| try std.testing.expectError(error.MalformedPacket, ServerData.fromPong(pong));
 }
 
@@ -325,7 +340,10 @@ test "signed varint boundaries and pong conversion" {
         std.math.maxInt(i32),
     }) |value| {
         const data = ServerData{
+            .protocol = value,
             .game_type = value,
+            .player_count = value,
+            .max_player_count = value,
             .connection_type = value,
         };
 
@@ -333,7 +351,10 @@ test "signed varint boundaries and pong conversion" {
             try data.encode(&buffer),
         );
 
+        try std.testing.expectEqual(value, decoded.protocol);
         try std.testing.expectEqual(value, decoded.game_type);
+        try std.testing.expectEqual(value, decoded.player_count);
+        try std.testing.expectEqual(value, decoded.max_player_count);
         try std.testing.expectEqual(value, decoded.connection_type);
     }
 
@@ -343,4 +364,6 @@ test "signed varint boundaries and pong conversion" {
 
     try std.testing.expectEqual(@as(i32, 1), pong.game_type);
     try std.testing.expectEqual(@as(i32, 3), pong.player_count);
+    try std.testing.expectEqual(@as(i32, 1), pong.protocol);
+    try std.testing.expectEqualStrings("2", pong.version);
 }

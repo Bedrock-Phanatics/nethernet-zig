@@ -63,11 +63,7 @@ pub const Discovery = struct {
         const buffers = try allocator.alloc(u8, codec.maximum_datagram * 4);
         errdefer allocator.free(buffers);
 
-        const socket = try address.bind(io, .{
-            .mode = .dgram,
-            .protocol = .udp,
-            .allow_broadcast = true,
-        });
+        const socket = try @import("socket.zig").bind(io, address);
         errdefer socket.close(io);
 
         var actual_options = options;
