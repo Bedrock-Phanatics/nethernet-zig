@@ -121,6 +121,7 @@ pub const Address = struct {
 
 pub const Message = struct {
     reliability: framing.Reliability,
+    /// Borrowed until the next poll/receive call or destroy().
     data: []const u8,
 };
 
@@ -206,6 +207,11 @@ const Assembly = struct {
     decoder: framing.Reassembler,
     started: ?std.Io.Timestamp = null,
 
+    fn clear(self: *Assembly, allocator: std.mem.Allocator) void {
+        self.buffer.deinit(allocator);
+        self.* = .{ .decoder = framing.Reassembler.init(&.{}, self.decoder.reliability) };
+    }
+
     fn push(
         self: *Assembly,
         allocator: std.mem.Allocator,
@@ -223,6 +229,7 @@ const Assembly = struct {
         if (self.decoder.used == 0) {
             if (self.decoder.failed) return error.ConnectionClosed;
             if (try framing.singleFragmentPayload(data, self.decoder.reliability)) |payload| {
+                if (self.buffer.capacity > framing.maximum_segment_payload) self.clear(allocator);
                 return payload;
             }
         }
@@ -375,7 +382,7 @@ pub const Connection = struct {
         self.peer.destroy();
 
         for (&self.assemblies) |*assembly| {
-            assembly.buffer.deinit(self.allocator);
+            assembly.clear(self.allocator);
         }
 
         if (self.owned_token) |token| self.allocator.free(token);
@@ -574,7 +581,10 @@ pub const Connection = struct {
     }
 
     fn pollInternal(self: *Connection, signals_only: bool) !?Event {
-        errdefer self.close();
+        errdefer {
+            for (&self.assemblies) |*assembly| assembly.clear(self.allocator);
+            self.close();
+        }
 
         const now = std.Io.Clock.awake.now(self.io);
 
@@ -619,7 +629,15 @@ pub const Connection = struct {
             self.negotiation_scratch orelse return error.InvalidState
         else
             self.packet_scratch;
-        const event = try self.peer.pollRestricted(scratch, signals_only) orelse return null;
+        const event = try self.peer.pollRestricted(scratch, signals_only) orelse {
+            // Reuse large buffers during a burst, then release them once drained.
+            for (&self.assemblies) |*assembly| {
+                if (assembly.decoder.used == 0 and
+                    assembly.buffer.capacity > framing.maximum_segment_payload)
+                    assembly.clear(self.allocator);
+            }
+            return null;
+        };
 
         switch (event) {
             .offer, .answer, .candidate => |data| {
@@ -896,6 +914,9 @@ test "incomplete reassembly expires and closes connection" {
     );
 
     try std.testing.expectError(error.ReassemblyTimeout, connection.receive());
+    try std.testing.expectEqual(@as(usize, 0), connection.assemblies[0].buffer.capacity);
+    try std.testing.expectEqual(@as(usize, 0), connection.assemblies[0].decoder.storage.len);
+    try std.testing.expect(connection.assemblies[0].started == null);
 }
 
 test "cancel and close unblock receive" {
@@ -942,6 +963,59 @@ test "buffers follow message limit and negotiation scratch is released" {
     try std.testing.expect(connection.negotiation_scratch == null);
 }
 
+test "completed reassembly releases large buffers and reuses small ones" {
+    const allocator = std.testing.allocator;
+    const connection = try Connection.create(allocator, std.testing.io, .client, 1, "remote", .{});
+    defer connection.destroy();
+    connection.established = true;
+
+    const frame = try allocator.alloc(u8, framing.maximum_segment_payload / 2 + 2);
+    defer allocator.free(frame);
+    @memset(frame[1..], 42);
+
+    for ([_]usize{ 2, frame.len }) |size| {
+        frame[0] = 1;
+        try connection.peer.queue.push(3, frame[0..size]);
+        frame[0] = 0;
+        try connection.peer.queue.push(3, frame[0..size]);
+        const message = try connection.receive();
+        try std.testing.expectEqual(2 * (size - 1), message.data.len);
+        for (message.data) |byte| try std.testing.expectEqual(@as(u8, 42), byte);
+        const capacity = connection.assemblies[0].buffer.capacity;
+        try std.testing.expect(capacity >= message.data.len);
+        const address = @intFromPtr(message.data.ptr);
+        frame[0] = 1;
+        try connection.peer.queue.push(3, frame[0..size]);
+        frame[0] = 0;
+        try connection.peer.queue.push(3, frame[0..size]);
+        const reused = try connection.receive();
+        try std.testing.expectEqual(address, @intFromPtr(reused.data.ptr));
+        try std.testing.expect((try connection.poll()) == null);
+        try std.testing.expectEqual(
+            if (size == 2) capacity else @as(usize, 0),
+            connection.assemblies[0].buffer.capacity,
+        );
+        try std.testing.expectEqual(@as(usize, 0), connection.assemblies[0].decoder.used);
+        try std.testing.expect(connection.assemblies[0].started == null);
+    }
+}
+
+test "invalid reassembly releases partial storage before destroy" {
+    const connection = try Connection.create(std.testing.allocator, std.testing.io, .client, 1, "remote", .{});
+    defer connection.destroy();
+    connection.established = true;
+    try connection.peer.queue.push(3, &.{ 255, 42 });
+    try std.testing.expect((try connection.poll()) == null);
+    try std.testing.expectEqual(@as(usize, 1024), connection.assemblies[0].buffer.capacity);
+    try connection.peer.queue.push(3, &.{ 253, 43 });
+    try std.testing.expectError(error.FragmentOutOfSequence, connection.poll());
+    try std.testing.expectEqual(@as(usize, 0), connection.assemblies[0].buffer.capacity);
+    try std.testing.expectEqual(@as(usize, 0), connection.assemblies[0].decoder.storage.len);
+    try std.testing.expectEqual(@as(usize, 0), connection.assemblies[0].decoder.used);
+    try std.testing.expect(connection.assemblies[0].started == null);
+    try std.testing.expectError(error.ConnectionClosed, connection.poll());
+}
+
 test "single-fragment assembly borrows poll storage without allocation" {
     var assembly = Assembly{
         .decoder = framing.Reassembler.init(&.{}, .reliable),
@@ -952,6 +1026,13 @@ test "single-fragment assembly borrows poll storage without allocation" {
     const message = (try assembly.push(std.testing.allocator, std.testing.io, &fragment, 3)).?;
     try std.testing.expectEqual(@intFromPtr(fragment[1..].ptr), @intFromPtr(message.ptr));
     try std.testing.expectEqual(@as(usize, 0), assembly.buffer.capacity);
+
+    try assembly.buffer.ensureTotalCapacityPrecise(std.testing.allocator, framing.maximum_segment_payload + 1);
+    assembly.decoder.storage = assembly.buffer.allocatedSlice();
+    const next = (try assembly.push(std.testing.allocator, std.testing.io, &fragment, 3)).?;
+    try std.testing.expectEqual(@intFromPtr(fragment[1..].ptr), @intFromPtr(next.ptr));
+    try std.testing.expectEqual(@as(usize, 0), assembly.buffer.capacity);
+    try std.testing.expectEqual(@as(usize, 0), assembly.decoder.storage.len);
 }
 
 test "connection and encoder maximum message limits agree" {
