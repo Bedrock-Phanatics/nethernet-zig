@@ -92,12 +92,19 @@ fn exchangeWork(
         output[0..@min(output.len, maximum_sdp_size)],
     );
 
+    var uri = try std.Uri.parse(url);
+    var host_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
+    const host = (try uri.getHost(&host_buffer)).bytes;
+    const ipv6 = host.len >= 2 and host[0] == '[' and host[host.len - 1] == ']';
+    if (ipv6) uri.host = .{ .raw = host[1 .. host.len - 1] };
+
     const result = try client.fetch(.{
-        .location = .{ .url = url },
+        .location = .{ .uri = uri },
         .method = .POST,
         .payload = offer,
         .response_writer = &writer,
         .headers = .{
+            .host = if (ipv6) .{ .override = base[uri.scheme.len + 3 ..] } else .default,
             .content_type = .{ .override = "application/sdp" },
             .user_agent = .{ .override = "libhttpclient/1.0.0.0" },
         },
@@ -235,6 +242,52 @@ test "endpoint origins retain explicit default ports" {
             return error.InvalidOriginAccepted;
         } else |_| {}
     }
+}
+
+test "IPv6 endpoint exchange preserves the Host header" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    var server = try (try std.Io.net.IpAddress.parseIp6("::1", 0)).listen(io, .{});
+    defer server.deinit(io);
+
+    const host = try std.fmt.allocPrint(allocator, "[::1]:{d}", .{server.socket.address.getPort()});
+    defer allocator.free(host);
+    const origin = try std.fmt.allocPrint(allocator, "http://{s}/", .{host});
+    defer allocator.free(origin);
+
+    const Serve = struct {
+        fn run(server_ptr: *std.Io.net.Server, expected_host: []const u8) !void {
+            const stream = try server_ptr.accept(std.testing.io);
+            defer stream.close(std.testing.io);
+            var input: [4096]u8 = undefined;
+            var output: [4096]u8 = undefined;
+            var reader = stream.reader(std.testing.io, &input);
+            var writer = stream.writer(std.testing.io, &output);
+            var http = std.http.Server.init(&reader.interface, &writer.interface);
+            var request = try http.receiveHead();
+            try std.testing.expectEqual(.POST, request.head.method);
+            try std.testing.expectEqualStrings("/v1/join/opaque%2Fid", request.head.target);
+            var headers = request.iterateHeaders();
+            var found_host = false;
+            while (headers.next()) |header| {
+                if (std.ascii.eqlIgnoreCase("host", header.name)) {
+                    try std.testing.expectEqualStrings(expected_host, header.value);
+                    found_host = true;
+                }
+            }
+            try std.testing.expect(found_host);
+            var body_buffer: [64]u8 = undefined;
+            const body = request.readerExpectNone(&body_buffer);
+            try std.testing.expectEqualStrings("v=0\r\n", try body.take(5));
+            try request.respond("v=0\r\n", .{ .keep_alive = false });
+        }
+    };
+    var pending = try io.concurrent(Serve.run, .{ &server, host });
+    defer _ = pending.cancel(io) catch {};
+    var output: [64]u8 = undefined;
+    const answer = try exchange(allocator, io, origin, "opaque/id", "v=0\r\n", &output, 3000);
+    try std.testing.expectEqualStrings("v=0\r\n", answer);
+    try pending.await(io);
 }
 
 test "opaque and numeric network IDs share one representation" {
