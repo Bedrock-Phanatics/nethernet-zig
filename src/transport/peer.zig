@@ -857,6 +857,8 @@ pub const Peer = struct {
         errdefer if (!transferred) {
             _ = c.rtcDeleteDataChannel(channel);
         };
+        if (self.acquireNativeHandles() == null) return error.ConnectionClosed;
+        defer self.releaseNativeHandles();
 
         var label_buffer: [64]u8 = undefined;
         const length = c.rtcGetDataChannelLabel(
@@ -903,7 +905,9 @@ pub const Peer = struct {
 
         self.mutex.lockUncancelable(self.io);
 
-        if (self.stopping or self.channels[index] >= 0) {
+        if (self.stopping or self.state == .closed or self.state == .failed or
+            self.channels[index] >= 0)
+        {
             self.mutex.unlock(self.io);
             return error.InvalidChannel;
         }
@@ -933,7 +937,7 @@ pub const Peer = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
-        if (self.stopping or self.state == .failed) return;
+        if (self.stopping or self.state == .failed or self.state == .closed) return;
 
         if (tag == 4 and self.options.drop_unreliable_on_pressure and
             data.len >= 2 and data[0] == 0)
@@ -1011,7 +1015,7 @@ pub const Peer = struct {
         if (state == c.RTC_FAILED) {
             self.drain_queued_on_close = false;
         }
-        if (self.state != .failed) {
+        if (self.state != .failed and self.state != .closed) {
             self.state = mapped;
             self.notify();
         }
@@ -1037,6 +1041,7 @@ pub const Peer = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
+        if (self.stopping) return;
         self.ice_state = mapped;
         self.notify();
     }
@@ -1057,6 +1062,7 @@ pub const Peer = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
+        if (self.stopping) return;
         self.gathered = state == c.RTC_GATHERING_COMPLETE;
         self.gathering_state = mapped;
         self.notify();
@@ -1071,7 +1077,7 @@ pub const Peer = struct {
 
         self.attach(channel) catch {
             self.mutex.lockUncancelable(self.io);
-            if (!self.stopping) {
+            if (!self.stopping and self.state != .closed) {
                 self.state = .failed;
                 self.drain_queued_on_close = false;
                 self.notify();
@@ -1129,7 +1135,7 @@ pub const Peer = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
-        if (self.stopping) return;
+        if (self.stopping or self.state == .closed) return;
 
         const known_channel = self.channels[0] == channel or self.channels[1] == channel;
         if (!known_channel) {
@@ -1152,7 +1158,7 @@ pub const Peer = struct {
         if (self.options.trace) std.debug.print("nethernet WebRTC: channel error={s}\n", .{std.mem.span(message)});
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        if (self.stopping) return;
+        if (self.stopping or self.state == .closed) return;
         self.state = .failed;
         self.drain_queued_on_close = false;
         self.notify();
@@ -1538,10 +1544,11 @@ test "failure and close stay terminal after a disconnection" {
         try std.testing.expectError(error.ConnectionClosed, peer.poll(&output));
 
         Peer.onState(peer.id, c.RTC_CONNECTED, peer);
-        if (terminal == c.RTC_FAILED) {
-            try std.testing.expectEqual(State.failed, peer.getState());
-            try std.testing.expectError(error.ConnectionClosed, peer.poll(&output));
-        }
+        try std.testing.expectEqual(
+            if (terminal == c.RTC_FAILED) State.failed else State.closed,
+            peer.getState(),
+        );
+        try std.testing.expectError(error.ConnectionClosed, peer.poll(&output));
     }
 }
 
@@ -1656,9 +1663,18 @@ test "native handle lease keeps handles live until close can delete them" {
 test "native queries report unavailable after close" {
     const peer = try Peer.create(std.testing.allocator, std.testing.io, .{});
     defer peer.destroy();
+    const before = peer.diagnostics();
     peer.close();
+    peer.close();
+    Peer.onState(-1, c.RTC_CONNECTED, peer);
+    Peer.onIceState(-1, c.RTC_ICE_CONNECTED, peer);
+    Peer.onGathered(-1, c.RTC_GATHERING_COMPLETE, peer);
+    Peer.onBufferedAmountLow(-1, peer);
 
     const diagnostics = peer.diagnostics();
+    try std.testing.expectEqual(State.closed, peer.getState());
+    try std.testing.expectEqual(before.ice_state, diagnostics.ice_state);
+    try std.testing.expectEqual(before.gathering_state, diagnostics.gathering_state);
     try std.testing.expectEqual(ChannelState.unavailable, diagnostics.reliable.state);
     try std.testing.expectEqual(ChannelState.unavailable, diagnostics.unreliable.state);
 
@@ -1678,6 +1694,19 @@ test "duplicate remote data channel is deleted and fails the peer" {
     try std.testing.expectEqual(State.failed, peer.getState());
     try std.testing.expectEqual(accepted, peer.channels[0]);
     try std.testing.expectEqual(@as(c_int, -1), peer.channels[1]);
+}
+
+test "late remote channel cannot revive a closed peer" {
+    const peer = try Peer.create(std.testing.allocator, std.testing.io, .{});
+    defer peer.destroy();
+
+    Peer.onState(peer.id, c.RTC_CLOSED, peer);
+    const channel = try testDataChannel(peer, "ReliableDataChannel");
+    Peer.onChannel(peer.id, channel, peer);
+
+    try expectChannelDeleted(channel);
+    try std.testing.expectEqual(State.closed, peer.getState());
+    try std.testing.expectEqualSlices(c_int, &.{ -1, -1 }, &peer.channels);
 }
 
 test "remote data channel flood retains no rejected C API handles" {

@@ -15,6 +15,8 @@ pub const SelectedIceAddresses = native.SelectedIceAddresses;
 
 pub const maximum_network_id_length = 4096;
 const maximum_signal_size = 1024 * 1024;
+const maximum_pending_candidate_bytes = 64 * 1024;
+const maximum_pending_candidates = 32;
 
 /// Bounds an opaque network ID before it is stored or URL encoded.
 pub fn validNetworkId(text: []const u8) bool {
@@ -267,6 +269,9 @@ pub const Connection = struct {
     established: bool = false,
     remote_candidates: RemoteCandidates = .{},
     remote_candidate_count: std.atomic.Value(usize) = .init(0),
+    pending_candidates: std.ArrayList([:0]u8) = .empty,
+    pending_candidate_bytes: usize = 0,
+    remote_description_set: bool = false,
 
     packet_scratch: []u8,
     negotiation_scratch: ?[]u8,
@@ -366,6 +371,7 @@ pub const Connection = struct {
     }
 
     pub fn destroy(self: *Connection) void {
+        self.clearPendingCandidates();
         self.peer.destroy();
 
         for (&self.assemblies) |*assembly| {
@@ -384,10 +390,32 @@ pub const Connection = struct {
     }
 
     pub fn close(self: *Connection) void {
+        self.clearPendingCandidates();
         self.peer.close();
     }
 
+    fn clearPendingCandidates(self: *Connection) void {
+        for (self.pending_candidates.items) |candidate| self.allocator.free(candidate);
+        self.pending_candidates.deinit(self.allocator);
+        self.pending_candidates = .empty;
+        self.pending_candidate_bytes = 0;
+    }
+
+    fn queueCandidate(self: *Connection, candidate: []const u8) !void {
+        if (candidate.len > 16384 or std.mem.indexOfScalar(u8, candidate, 0) != null)
+            return error.MalformedSignal;
+        if (self.pending_candidates.items.len >= maximum_pending_candidates or
+            candidate.len > maximum_pending_candidate_bytes - self.pending_candidate_bytes)
+            return error.TooManyRemoteCandidates;
+
+        const copy = try self.allocator.dupeZ(u8, candidate);
+        errdefer self.allocator.free(copy);
+        try self.pending_candidates.append(self.allocator, copy);
+        self.pending_candidate_bytes += candidate.len;
+    }
+
     pub fn closeGracefully(self: *Connection) !void {
+        defer self.clearPendingCandidates();
         try self.peer.closeGracefully(self.options.graceful_shutdown_timeout_ms);
     }
     pub fn ready(self: *Connection) bool {
@@ -475,6 +503,9 @@ pub const Connection = struct {
         }
         self.remote_candidate_count.store(self.remote_candidates.count, .release);
 
+        if (is_candidate and !self.remote_description_set)
+            return self.queueCandidate(signal.data);
+
         const terminated = try self.allocator.dupeZ(u8, signal.data);
         defer self.allocator.free(terminated);
 
@@ -521,6 +552,10 @@ pub const Connection = struct {
             return err;
         };
         if (self.options.trace) std.debug.print("nethernet remote description: accepted\n", .{});
+
+        self.remote_description_set = true;
+        for (self.pending_candidates.items) |candidate| try self.peer.remoteCandidate(candidate);
+        self.clearPendingCandidates();
 
         self.answered = std.Io.Clock.awake.now(self.io);
     }
@@ -935,6 +970,149 @@ test "connection and encoder maximum message limits agree" {
             framing.maximum_segment_payload,
         ),
     );
+}
+
+test "candidates before an answer are bounded and released" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const candidate = "candidate:1 1 udp 2122260223 127.0.0.1 9999 typ host";
+
+    const connection = try Connection.create(
+        allocator,
+        io,
+        .client,
+        7,
+        "remote",
+        .{ .maximum_remote_candidates = 40 },
+    );
+    defer connection.destroy();
+    try connection.start();
+
+    for (0..maximum_pending_candidates) |_| {
+        try connection.applySignal(.{
+            .kind = Signal.candidate,
+            .connection_id = 7,
+            .network_id = "remote",
+            .data = candidate,
+        });
+    }
+    try std.testing.expectEqual(maximum_pending_candidates, connection.pending_candidates.items.len);
+    try std.testing.expectEqual(maximum_pending_candidates * candidate.len, connection.pending_candidate_bytes);
+    try std.testing.expectError(error.TooManyRemoteCandidates, connection.applySignal(.{
+        .kind = Signal.candidate,
+        .connection_id = 7,
+        .network_id = "remote",
+        .data = candidate,
+    }));
+    try std.testing.expectEqual(@as(usize, 0), connection.pending_candidates.items.len);
+    try std.testing.expectEqual(@as(usize, 0), connection.pending_candidate_bytes);
+    try std.testing.expectEqual(native.State.closed, connection.state());
+
+    const limited = try Connection.create(
+        allocator,
+        io,
+        .client,
+        8,
+        "remote",
+        .{ .maximum_remote_candidates = 40 },
+    );
+    defer limited.destroy();
+
+    const large = [_]u8{'x'} ** 16384;
+    for (0..maximum_pending_candidate_bytes / large.len) |_| {
+        try limited.applySignal(.{
+            .kind = Signal.candidate,
+            .connection_id = 8,
+            .network_id = "remote",
+            .data = &large,
+        });
+    }
+    try std.testing.expectError(error.TooManyRemoteCandidates, limited.applySignal(.{
+        .kind = Signal.candidate,
+        .connection_id = 8,
+        .network_id = "remote",
+        .data = &large,
+    }));
+    try std.testing.expectEqual(@as(usize, 0), limited.pending_candidates.items.len);
+}
+
+test "candidate before answer replays after the remote description" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const options: Options = .{
+        .allow_anonymous = true,
+        .negotiation_timeout_ms = 5000,
+        .connection_timeout_ms = 5000,
+    };
+
+    const client = try Connection.create(allocator, io, .client, 9, "server", options);
+    defer client.destroy();
+    const server = try Connection.create(allocator, io, .server, 9, "client", options);
+    defer server.destroy();
+    try client.start();
+
+    var offer: ?[]u8 = null;
+    defer if (offer) |value| allocator.free(value);
+    while (offer == null) {
+        client.prepareWait();
+        if (try client.pollNegotiation()) |event| switch (event) {
+            .signal => |signal| if (std.mem.eql(u8, signal.kind, Signal.offer)) {
+                offer = try allocator.dupe(u8, signal.data);
+            },
+            .message => return error.UnexpectedMessage,
+        };
+        if (offer == null) try client.wait(true);
+    }
+    try server.applySignal(.{
+        .kind = Signal.offer,
+        .connection_id = 9,
+        .network_id = "client",
+        .data = offer.?,
+    });
+
+    var answer: ?[]u8 = null;
+    defer if (answer) |value| allocator.free(value);
+    var candidate: ?[]u8 = null;
+    defer if (candidate) |value| allocator.free(value);
+    while (answer == null or candidate == null) {
+        server.prepareWait();
+        if (try server.pollNegotiation()) |event| switch (event) {
+            .signal => |signal| {
+                if (std.mem.eql(u8, signal.kind, Signal.answer) and answer == null)
+                    answer = try allocator.dupe(u8, signal.data);
+                if (std.mem.eql(u8, signal.kind, Signal.candidate) and candidate == null)
+                    candidate = try allocator.dupe(u8, signal.data);
+            },
+            .message => return error.UnexpectedMessage,
+        };
+        if (answer == null or candidate == null) try server.wait(true);
+    }
+
+    try client.applySignal(.{
+        .kind = Signal.candidate,
+        .connection_id = 9,
+        .network_id = "server",
+        .data = candidate.?,
+    });
+    try std.testing.expectEqual(@as(usize, 1), client.pending_candidates.items.len);
+    try client.applySignal(.{
+        .kind = Signal.answer,
+        .connection_id = 9,
+        .network_id = "server",
+        .data = answer.?,
+    });
+    try std.testing.expect(client.remote_description_set);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_candidates.items.len);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_candidate_bytes);
+
+    try client.applySignal(.{
+        .kind = Signal.candidate,
+        .connection_id = 9,
+        .network_id = "server",
+        .data = candidate.?,
+    });
+    try std.testing.expectEqual(@as(usize, 0), client.pending_candidates.items.len);
+    try std.testing.expectEqual(@as(usize, 2), client.remoteIceCandidateCount());
 }
 
 test "remote ICE candidates accept exactly the configured limit" {
