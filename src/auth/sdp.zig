@@ -27,12 +27,15 @@ pub fn fingerprintPayload(
 ) ![]u8 {
     if (sdp.len > jwt.maximum_size) return error.IdentityTooLarge;
 
-    var fingerprints: std.ArrayList(Fingerprint) = .empty;
-    defer fingerprints.deinit(allocator);
-
+    var session: ?Fingerprint = null;
+    var media: ?Fingerprint = null;
+    var session_count: usize = 0;
+    var media_count: usize = 0;
+    var media_started = false;
     var lines = std.mem.tokenizeAny(u8, sdp, "\r\n");
 
     while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "m=")) media_started = true;
         if (!std.mem.startsWith(u8, line, "a=fingerprint:")) continue;
 
         const value = line[14..];
@@ -45,31 +48,21 @@ pub fn fingerprintPayload(
             .digest = value[space + 1 ..],
         };
 
-        var duplicate = false;
-
-        for (fingerprints.items) |existing| {
-            if (std.mem.eql(u8, existing.algorithm, fingerprint.algorithm) and
-                std.mem.eql(u8, existing.digest, fingerprint.digest))
-            {
-                duplicate = true;
-                break;
-            }
+        if (media_started) {
+            media_count += 1;
+            media = fingerprint;
+        } else {
+            session_count += 1;
+            session = fingerprint;
         }
-
-        if (duplicate) continue;
-
-        if (fingerprints.items.len >= 64) {
-            return error.IdentityTooLarge;
-        }
-
-        try fingerprints.append(allocator, fingerprint);
     }
 
-    if (fingerprints.items.len == 0) return error.InvalidIdentity;
+    const selected = if (media_count != 0) media else session;
+    if ((if (media_count != 0) media_count else session_count) != 1) return error.InvalidIdentity;
 
     return std.json.Stringify.valueAlloc(
         allocator,
-        .{ .fingerprint = fingerprints.items },
+        .{ .fingerprint = [_]Fingerprint{selected.?} },
         .{},
     );
 }
@@ -256,6 +249,13 @@ test "SDP identity requires a valid fingerprint and explicit verifier acceptance
     try std.testing.expectError(error.InvalidIdentity, fingerprintPayload(allocator, "a=fingerprint: 00:11\r\n"));
     try std.testing.expectError(error.InvalidIdentity, fingerprintPayload(allocator, "a=fingerprint:sha-256 \r\n"));
 
+    const duplicate = "a=fingerprint:sha-256 00:11\r\na=fingerprint:sha-256 00:11\r\n";
+    try std.testing.expectError(error.InvalidIdentity, fingerprintPayload(allocator, duplicate));
+    try std.testing.expectError(error.InvalidIdentity, fingerprintPayload(
+        allocator,
+        "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" ++ duplicate,
+    ));
+
     const Rejector = struct {
         fn reject(_: ?*anyopaque, _: []const u8) anyerror!?Key {
             return null;
@@ -344,7 +344,7 @@ test "SDP identity assertions must be session level" {
     try std.testing.expectError(error.InvalidIdentity, verify(allocator, media_level, 1000, .server, null));
 }
 
-test "SDP identity nesting, fingerprint deduplication and proof binding" {
+test "SDP identity uses media fingerprint and binds its proof" {
     const allocator = std.testing.allocator;
     const key = try jwt.Scheme.KeyPair.generateDeterministic(.{2} ** 48);
 
@@ -355,13 +355,13 @@ test "SDP identity nesting, fingerprint deduplication and proof binding" {
         "v=0\r\n" ++
         "a=fingerprint:sha-256 00:11\r\n" ++
         "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" ++
-        "a=fingerprint:sha-256 00:11\r\n";
+        "a=fingerprint:sha-256 22:33\r\n";
 
     const payload = try fingerprintPayload(allocator, source);
     defer allocator.free(payload);
 
     try std.testing.expectEqualStrings(
-        "{\"fingerprint\":[{\"algorithm\":\"sha-256\",\"digest\":\"00:11\"}]}",
+        "{\"fingerprint\":[{\"algorithm\":\"sha-256\",\"digest\":\"22:33\"}]}",
         payload,
     );
 
@@ -375,7 +375,7 @@ test "SDP identity nesting, fingerprint deduplication and proof binding" {
         (try verify(allocator, signed, 1000, .server, null)) != null,
     );
 
-    const offset = std.mem.indexOf(u8, signed, "00:11").?;
+    const offset = std.mem.indexOf(u8, signed, "22:33").?;
     signed[offset] = 'f';
 
     if (verify(allocator, signed, 1000, .server, null)) |_| {
