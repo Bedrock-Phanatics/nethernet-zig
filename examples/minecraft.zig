@@ -1,8 +1,8 @@
 const std = @import("std");
 const nethernet = @import("nethernet");
 
-const default_protocol: u32 = 2211;
-const default_version = "1.26.60.24";
+const default_protocol: u32 = 2193;
+const default_version = "1.26.51";
 
 const usage =
     \\usage: minecraft [address] [--identity <path>] [--offline] [--trace] [--protocol <number>] [--version <string>]
@@ -11,8 +11,8 @@ const usage =
     \\  --identity <path> PKCS#8 P-384 identity, default nethernet-identity.der
     \\  --offline         accept clients that present no identity
     \\  --trace           print safe HTTP and WebRTC negotiation stages
-    \\  --protocol <number> advertised Bedrock protocol, default 2211
-    \\  --version <string>  advertised Bedrock version, default 1.26.60.24
+    \\  --protocol <number> advertised Bedrock protocol, default 2193
+    \\  --version <string>  advertised Bedrock version, default 1.26.51
     \\
 ;
 

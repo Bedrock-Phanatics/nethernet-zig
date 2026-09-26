@@ -37,14 +37,13 @@ address, a forwarded port (pin the range with `port_range_begin` /
 `.native = .{ .ice_servers = &.{"stun:host:3478"} }`. Public infrastructure
 stays opt-in rather than being enabled behind your back.
 
-`EndpointListener` advertises itself over HTTP only when a `status_provider` is
-set. Without one, `GET /v1/join` answers `503`, which vanilla reads as "no
-NetherNet here"; an empty `200` would break Mojang's JSON status contract.
+`EndpointListener` returns an empty `200` for `GET /v1/join` without a
+`status_provider`, matching Axolotl's fallback. With a provider it returns JSON
+status, including the advertised Bedrock protocol and version.
 
 Network IDs are opaque strings throughout. `dialEndpoint` also accepts an
-integer, for the decimal IDs vanilla currently uses, but nothing assumes that
-format, so IDs beyond `u64` work. An ID must survive one URI path segment
-unchanged: printable ASCII without `/`, `?`, `#`, `%` or a dot segment.
+integer and percent-encodes the ID in the request path. IDs are bounded to
+4096 bytes and cannot contain control characters.
 
 ## Requirements
 
