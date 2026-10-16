@@ -289,30 +289,19 @@ pub fn claimPublicKey(
     const claims = try parse(allocator, decoded_payload);
     defer claims.deinit();
 
-    switch (kind) {
-        .client => {
-            const expiration = try integer(try field(claims.value, "exp"));
+    if (claims.value != .object) return error.InvalidIdentity;
+    if (claims.value.object.get("exp")) |value| {
+        if (@as(i128, try integer(value)) < @as(i128, now) - clock_skew_seconds)
+            return error.ExpiredIdentity;
+    } else if (kind == .client) {
+        return error.InvalidIdentity;
+    }
 
-            if (@as(i128, expiration) < @as(i128, now) - clock_skew_seconds) {
-                return error.ExpiredIdentity;
-            }
-
-            for ([_][]const u8{ "nbf", "iat" }) |name| {
-                if (claims.value.object.get(name)) |value| {
-                    if (@as(i128, try integer(value)) >
-                        @as(i128, now) + clock_skew_seconds)
-                    {
-                        return error.InvalidIdentity;
-                    }
-                }
-            }
-        },
-
-        .server => {
-            for ([_][]const u8{ "exp", "nbf", "iat" }) |name| {
-                if (claims.value.object.get(name)) |value| _ = try integer(value);
-            }
-        },
+    for ([_][]const u8{ "nbf", "iat" }) |name| {
+        if (claims.value.object.get(name)) |value| {
+            if (@as(i128, try integer(value)) > @as(i128, now) + clock_skew_seconds)
+                return error.InvalidIdentity;
+        }
     }
 
     const claim = try field(claims.value, "cpk");
@@ -388,9 +377,9 @@ test "server identity, temporal claims, detached signatures, and tampering" {
         .server,
     );
 
-    _ = try claimPublicKey(allocator, token, 500, .server);
+    try std.testing.expectError(error.InvalidIdentity, claimPublicKey(allocator, token, 500, .server));
     _ = try claimPublicKey(allocator, token, 1120, .server);
-    _ = try claimPublicKey(allocator, token, 1121, .server);
+    try std.testing.expectError(error.ExpiredIdentity, claimPublicKey(allocator, token, 1121, .server));
 
     const signature = try sign(
         allocator,
@@ -512,9 +501,9 @@ test "client and server identity validation policies" {
     const self_signed = try testToken(allocator, key, "ES384", server_claims);
     defer allocator.free(self_signed);
 
-    _ = try claimPublicKey(allocator, self_signed, 1060, .server);
+    try std.testing.expectError(error.InvalidIdentity, claimPublicKey(allocator, self_signed, 1060, .server));
     _ = try claimPublicKey(allocator, self_signed, 2060, .server);
-    _ = try claimPublicKey(allocator, self_signed, 2061, .server);
+    try std.testing.expectError(error.ExpiredIdentity, claimPublicKey(allocator, self_signed, 2061, .server));
 
     const other_key = try Scheme.KeyPair.generateDeterministic(.{5} ** 48);
     const wrongly_signed = try testToken(
@@ -525,7 +514,7 @@ test "client and server identity validation policies" {
     );
     defer allocator.free(wrongly_signed);
 
-    if (claimPublicKey(allocator, wrongly_signed, 1000, .server)) |_| {
+    if (claimPublicKey(allocator, wrongly_signed, 2000, .server)) |_| {
         return error.InvalidSignatureAccepted;
     } else |_| {}
 
@@ -722,9 +711,17 @@ test "server token temporal claims are optional but must be well formed" {
     const cases = [_]Case{
         .{ .temporal = "", .expected = null },
         .{ .temporal = "\"iat\":1,", .expected = null },
-        .{ .temporal = "\"iat\":4000000000,", .expected = null },
+        .{ .temporal = "\"iat\":1060,", .expected = null },
+        .{ .temporal = "\"iat\":1061,", .expected = error.InvalidIdentity },
+        .{ .temporal = "\"iat\":4000000000,", .expected = error.InvalidIdentity },
+        .{ .temporal = "\"nbf\":1060,", .expected = null },
+        .{ .temporal = "\"nbf\":1061,", .expected = error.InvalidIdentity },
         .{ .temporal = "\"exp\":2000,", .expected = null },
-        .{ .temporal = "\"exp\":900,", .expected = null },
+        .{ .temporal = "\"exp\":940,", .expected = null },
+        .{ .temporal = "\"exp\":939,", .expected = error.ExpiredIdentity },
+        .{ .temporal = "\"exp\":900,", .expected = error.ExpiredIdentity },
+        .{ .temporal = "\"exp\":-9223372036854775808,", .expected = error.ExpiredIdentity },
+        .{ .temporal = "\"nbf\":9223372036854775807,", .expected = error.InvalidIdentity },
         .{ .temporal = "\"iat\":\"soon\",", .expected = error.InvalidIdentity },
         .{ .temporal = "\"exp\":null,", .expected = error.InvalidIdentity },
         .{ .temporal = "\"nbf\":[],", .expected = error.InvalidIdentity },
@@ -770,4 +767,16 @@ test "server token temporal claims are optional but must be well formed" {
         error.InvalidIdentity,
         claimPublicKey(allocator, forged, 1000, .client),
     );
+}
+
+test "identity claims must be a JSON object" {
+    const allocator = std.testing.allocator;
+    const key = try Scheme.KeyPair.generateDeterministic(.{16} ** 48);
+    for ([_][]const u8{ "null", "[]", "true", "0", "\"claims\"" }) |claims| {
+        const token = try testToken(allocator, key, "ES384", claims);
+        defer allocator.free(token);
+        for ([_]IdentityKind{ .client, .server }) |kind| {
+            try std.testing.expectError(error.InvalidIdentity, claimPublicKey(allocator, token, 1000, kind));
+        }
+    }
 }

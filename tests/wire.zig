@@ -1,6 +1,33 @@
 const std = @import("std");
 const discovery = @import("nethernet_core").discovery_codec;
 
+test "identity verifies an independently signed multi-fingerprint assertion" {
+    const auth = @import("nethernet_core").sdp_identity;
+    const allocator = std.testing.allocator;
+    // Python cryptography 50.0.1 signed this fixture with the test-only P-384 scalar 1.
+    const fixture = try std.json.parseFromSlice(
+        struct { sdp: []const u8, payload: []const u8, public_key: []const u8 },
+        allocator,
+        @embedFile("fixtures/identity.json"),
+        .{},
+    );
+    defer fixture.deinit();
+
+    const payload = try auth.fingerprintPayload(allocator, fixture.value.sdp);
+    defer allocator.free(payload);
+    try std.testing.expectEqualStrings(fixture.value.payload, payload);
+
+    const key = (try auth.verify(allocator, fixture.value.sdp, 1000, .server, null)) orelse
+        return error.MissingIdentity;
+    var expected: [97]u8 = undefined;
+    try std.testing.expectEqualSlices(
+        u8,
+        try std.fmt.hexToBytes(&expected, fixture.value.public_key),
+        &key.toUncompressedSec1(),
+    );
+    try std.testing.expectError(error.ExpiredIdentity, auth.verify(allocator, fixture.value.sdp, 2061, .server, null));
+}
+
 test "discovery packets match encrypted wire fixtures" {
     const Vector = struct { kind: []const u8, payload: []const u8, wire: []const u8 };
     const vectors = try std.json.parseFromSlice(
