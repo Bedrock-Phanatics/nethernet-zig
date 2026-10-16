@@ -43,7 +43,7 @@ test "listener survives TLS handshakes, truncated requests and malformed HTTP" {
         allocator,
         io,
         try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0"),
-        .{ .maximum_negotiations = 2 },
+        .{ .connection = .{ .allow_anonymous = true }, .maximum_negotiations = 2 },
     );
     defer listener.destroy();
 
@@ -290,7 +290,7 @@ test "status response carries exactly the fields Bedrock expects" {
         allocator,
         io,
         try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0"),
-        .{ .status_provider = .{ .get = Provider.get } },
+        .{ .connection = .{ .allow_anonymous = true }, .status_provider = .{ .get = Provider.get } },
     );
     defer listener.destroy();
 
@@ -369,7 +369,7 @@ test "repeated listener create and destroy does not leak handles" {
             allocator,
             io,
             try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0"),
-            .{ .maximum_http_workers = 2, .maximum_negotiations = 1 },
+            .{ .connection = .{ .allow_anonymous = true }, .maximum_http_workers = 2, .maximum_negotiations = 1 },
         );
         listener.close();
         listener.close();
@@ -428,7 +428,7 @@ test "network IDs at and beyond the limit are handled over real HTTP" {
         allocator,
         io,
         try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0"),
-        .{ .maximum_negotiations = 2 },
+        .{ .connection = .{ .allow_anonymous = true }, .maximum_negotiations = 2 },
     );
     defer listener.destroy();
 

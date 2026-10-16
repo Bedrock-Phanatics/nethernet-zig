@@ -34,6 +34,11 @@ pub fn exercise(input: []u8) void {
         parsed.deinit();
     } else |_| {}
 
+    if (core.identity_issuer.Keys.init(allocator, input, "https://issuer.test/", "test-audience")) |keys| {
+        defer keys.deinit();
+        _ = keys.verify(allocator, input, 1000) catch {};
+    } else |_| {}
+
     if (sdp_identity.fingerprintPayload(allocator, input)) |payload| {
         allocator.free(payload);
     } else |_| {}

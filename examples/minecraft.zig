@@ -3,14 +3,14 @@ const builtin = @import("builtin");
 const nethernet = @import("nethernet");
 
 const usage =
-    \\usage: minecraft [address] --protocol <number> --version <string> [--identity <path>] [--offline] [--trace]
+    \\usage: minecraft [address] [--protocol <number>] [--version <string>] [--identity <path>] [--offline] [--trace]
     \\
     \\  address           TCP signaling address, default 0.0.0.0:19132 (also IPv6 on Windows)
     \\  --identity <path> PKCS#8 P-384 identity, default nethernet-identity.der
-    \\  --offline         accept clients that present no identity
+    \\  --offline         disable issuer verification and allow anonymous clients
     \\  --trace           print safe HTTP and WebRTC negotiation stages
-    \\  --protocol <number> required: protocol for the exact client build
-    \\  --version <string>  required: version for the exact client build
+    \\  --protocol <number> advertised gameplay protocol, default 2193
+    \\  --version <string>  advertised version, default 1.26.51
     \\
 ;
 
@@ -30,8 +30,8 @@ const banner =
 
 const Status = struct {
     queries: std.atomic.Value(usize) = .init(0),
-    protocol: u32 = 0,
-    version: []const u8 = "",
+    protocol: u32 = 2193,
+    version: []const u8 = "1.26.51",
 
     fn get(context: ?*anyopaque) !nethernet.EndpointServerStatus {
         const self: *Status = @ptrCast(@alignCast(context.?));
@@ -99,12 +99,10 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    if (status.protocol == 0 or status.version.len == 0) {
-        std.debug.print("Both --protocol and --version must match the exact client build.\n{s}", .{usage});
-        return error.MissingClientMetadata;
-    }
-
     if (trace) nethernet.Peer.enableNativeTrace();
+
+    var authority = if (offline) null else try Authority.init(init.gpa, init.io);
+    defer if (authority) |*value| value.keys.deinit();
 
     const key = try nethernet.identity_file.loadOrCreate(
         init.io,
@@ -127,6 +125,7 @@ pub fn main(init: std.process.Init) !void {
             .connection = .{
                 .server_identity_key = key,
                 .allow_anonymous = offline,
+                .verify_client = if (authority) |*value| .{ .context = value, .verify = Authority.verify } else null,
             },
             .status_provider = .{ .context = &status, .get = Status.get },
             .trace = trace,
@@ -219,3 +218,49 @@ fn stage(number: usize, name: []const u8, reached: bool, failures: *usize) void 
         if (reached) "ok" else "FAILED",
     });
 }
+
+const Authority = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    keys: nethernet.identity_issuer.Keys,
+
+    fn init(allocator: std.mem.Allocator, io: std.Io) !Authority {
+        const Result = union(enum) { keys: anyerror!nethernet.identity_issuer.Keys, timeout: std.Io.Cancelable!void };
+        var results: [2]Result = undefined;
+        var select = std.Io.Select(Result).init(io, &results);
+        defer while (select.cancel()) |pending| {
+            if (pending == .keys) {
+                const keys = pending.keys catch continue;
+                keys.deinit();
+            }
+        };
+        try select.concurrent(.timeout, std.Io.sleep, .{ io, std.Io.Duration.fromSeconds(15), .awake });
+        try select.concurrent(.keys, fetch, .{ allocator, io });
+        const keys = switch (try select.await()) {
+            .keys => |result| try result,
+            .timeout => |result| {
+                try result;
+                return error.IssuerFetchTimeout;
+            },
+        };
+        return .{ .allocator = allocator, .io = io, .keys = keys };
+    }
+
+    fn fetch(allocator: std.mem.Allocator, io: std.Io) !nethernet.identity_issuer.Keys {
+        var client: std.http.Client = .{ .allocator = allocator, .io = io };
+        defer client.deinit();
+        var buffer: [64 * 1024]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        const result = try client.fetch(.{
+            .location = .{ .url = "https://authorization.franchise.minecraft-services.net/.well-known/keys" },
+            .response_writer = &writer,
+        });
+        if (result.status != .ok) return error.IssuerFetchFailed;
+        return nethernet.identity_issuer.Keys.init(allocator, writer.buffered(), "https://authorization.franchise.minecraft-services.net/", "api://auth-minecraft-services/multiplayer");
+    }
+
+    fn verify(context: ?*anyopaque, token: []const u8) !?nethernet.sdp_identity.Key {
+        const self: *Authority = @ptrCast(@alignCast(context.?));
+        return try self.keys.verify(self.allocator, token, std.Io.Clock.real.now(self.io).toSeconds());
+    }
+};

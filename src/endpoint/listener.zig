@@ -53,6 +53,7 @@ pub const Listener = struct {
         address: std.Io.net.IpAddress,
         options: Options,
     ) !*Listener {
+        try conn.validateServerIdentity(options.connection);
         if (options.maximum_negotiations == 0 or
             options.maximum_negotiations > 1024 or
             options.maximum_http_workers == 0 or
@@ -744,7 +745,7 @@ test "HTTP capacity exhaustion returns 503 and releases reservations" {
         std.testing.allocator,
         io,
         try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0"),
-        .{ .maximum_negotiations = 1, .maximum_pending_accepts = 1, .maximum_http_workers = 2, .request_timeout_ms = 1000 },
+        .{ .connection = .{ .allow_anonymous = true }, .maximum_negotiations = 1, .maximum_pending_accepts = 1, .maximum_http_workers = 2, .request_timeout_ms = 1000 },
     );
     defer listener.destroy();
 

@@ -26,6 +26,7 @@ pub const Listener = struct {
         discovery: *Discovery,
         options: Options,
     ) !*Listener {
+        try conn.validateServerIdentity(options.connection);
         if (options.maximum_negotiations == 0 or
             options.maximum_negotiations_per_peer == 0 or
             options.maximum_negotiations_per_peer > options.maximum_negotiations)

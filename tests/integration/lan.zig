@@ -211,7 +211,7 @@ test "LAN accept cancels and close detaches the wakeup" {
     );
     defer discovery.destroy();
 
-    const listener = try Listener.listen(allocator, discovery, .{});
+    const listener = try Listener.listen(allocator, discovery, .{ .connection = .{ .allow_anonymous = true } });
     defer listener.destroy();
 
     var pending = try io.concurrent(Listener.accept, .{listener});

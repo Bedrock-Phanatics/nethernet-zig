@@ -83,6 +83,7 @@ test "HTTP endpoint returns JSON only for valid available metadata" {
                 .context = &state,
                 .get = TestStatusProvider.get,
             },
+            .connection = .{ .allow_anonymous = true },
         },
     );
     defer listener.destroy();
@@ -240,7 +241,7 @@ test "HTTP rejects invalid routes, network IDs, empty SDP and oversized bodies" 
 
 test "HTTP rejects malformed percent escapes before negotiating" {
     const io = std.testing.io;
-    const listener = try Listener.listen(std.testing.allocator, io, try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0"), .{});
+    const listener = try Listener.listen(std.testing.allocator, io, try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0"), .{ .connection = .{ .allow_anonymous = true } });
     defer listener.destroy();
 
     for ([_][]const u8{ "%", "%2", "%GG", "%+1", "%-1", "%0G", "%00", "%09", "%7f" }) |id| {
@@ -262,7 +263,11 @@ test "HTTP reports identity rejection and peer creation failures" {
     const address = try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0");
 
     for ([_]struct { options: nethernet.EndpointListenerOptions, status: []const u8 }{
-        .{ .options = .{}, .status = "403" },
+        .{ .options = .{ .connection = .{ .verify_client = .{ .verify = struct {
+            fn reject(_: ?*anyopaque, _: []const u8) !?nethernet.sdp_identity.Key {
+                return null;
+            }
+        }.reject } } }, .status = "403" },
         .{ .options = .{ .connection = .{
             .allow_anonymous = true,
             .native = .{ .port_range_begin = 30000 },
@@ -294,7 +299,7 @@ test "HTTP times out a stalled request with a response" {
         allocator,
         io,
         try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0"),
-        .{ .request_timeout_ms = 100 },
+        .{ .connection = .{ .allow_anonymous = true }, .request_timeout_ms = 100 },
     );
     defer listener.destroy();
 

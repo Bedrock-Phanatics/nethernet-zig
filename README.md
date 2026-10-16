@@ -135,16 +135,25 @@ received: hello
 [examples/minecraft.zig](examples/minecraft.zig) tests transport connections and
 receives Bedrock payloads. It does not implement login or gameplay.
 
-`--protocol` and `--version` are required and must match the exact client build.
-Check [Mojang's protocol metadata](https://mojang.github.io/bedrock-protocol-docs/changelog/).
-For preview/beta 1.26.60.28 on Windows:
+The example defaults to protocol 2193 and version 1.26.51 from
+[Mojang's protocol metadata](https://mojang.github.io/bedrock-protocol-docs/changelog/).
+These are advertised gameplay metadata, not a claim of tested client compatibility.
+Hosting applications should supply their own supported protocol and version.
+Use `--protocol` and `--version` to override the example defaults.
 
 ```powershell
-.\zig-out\bin\minecraft.exe --protocol 2216 --version 1.26.60-beta.28 --identity nethernet-identity.der --trace
+.\zig-out\bin\minecraft.exe --trace
 ```
 
 Connect through Add Server to `127.0.0.1:19132`. Keep the identity file between
 runs. The Windows default accepts both IPv4 and IPv6.
+
+The example fetches Minecraft's trusted RSA signing keys over HTTPS at startup
+and verifies client token signatures, issuer, audience, expiration, and the
+fingerprint binding. Startup fails if the keys cannot be fetched within 15 seconds.
+This single-connection smoke test takes one key snapshot per run. Long-running
+hosts must refresh trusted keys on rotation. `--offline` explicitly disables
+issuer verification and permits anonymous clients.
 
 With `--trace`, expect `GET /v1/join HTTP 200 application/json`, followed by
 `POST /v1/join/{networkId} received`. A successful transport connection reaches
@@ -153,6 +162,17 @@ With `--trace`, expect `GET /v1/join HTTP 200 application/json`, followed by
 For vanilla-facing applications, provide `status_provider` in
 `EndpointListenerOptions`. GET returns JSON metadata, 503 when unavailable, or
 500 when invalid. POST requires `Content-Type: application/sdp`.
+
+Authenticated listeners require `connection.verify_client`. Without it, startup
+returns `MissingClientVerifier`, unless `allow_anonymous` is explicitly enabled.
+`identity_issuer.Keys` verifies RS256 tokens against a host-supplied JWKS snapshot,
+issuer, and audience. Keep the snapshot and its issuer/audience strings alive
+while verifying, and synchronize replacement with active verifiers. Never fetch
+keys from URLs supplied by an untrusted token.
+
+A self-signed server identity proves key possession, not server trust. Clients
+can use `verify_server` to pin a known key. Keep the server's identity file across
+restarts. Transport authentication does not replace gameplay authorization.
 
 ## Networking
 

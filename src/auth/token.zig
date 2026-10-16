@@ -42,7 +42,7 @@ pub fn decode64(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
     return output;
 }
 
-fn split(text: []const u8) ![3][]const u8 {
+pub fn split(text: []const u8) ![3][]const u8 {
     if (text.len > maximum_size) return error.IdentityTooLarge;
 
     var iterator = std.mem.splitScalar(u8, text, '.');

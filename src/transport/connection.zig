@@ -157,6 +157,16 @@ fn remoteIdentityRequired(options: Options, role: Role) bool {
     return !options.allow_anonymous;
 }
 
+pub fn validateServerIdentity(options: Options) !void {
+    if (!options.allow_anonymous and options.verify_client == null)
+        return error.MissingClientVerifier;
+}
+
+test "authenticated servers require an issuer verifier" {
+    try std.testing.expectError(error.MissingClientVerifier, validateServerIdentity(.{}));
+    try validateServerIdentity(.{ .allow_anonymous = true });
+}
+
 fn validateOptions(options: Options) !void {
     if (options.maximum_message_size == 0 or
         options.maximum_message_size > framing.maximum_reliable_message_size or
@@ -305,6 +315,7 @@ pub const Connection = struct {
         options: Options,
     ) !*Connection {
         try validateOptions(options);
+        if (role == .server) try validateServerIdentity(options);
 
         if (remote_id.len > maximum_network_id_length or
             options.local_network_id.len > maximum_network_id_length)
@@ -853,7 +864,7 @@ fn connectionCreationFailureScenario(allocator: std.mem.Allocator) !void {
         .server,
         1,
         "remote",
-        .{ .local_network_id = "local" },
+        .{ .local_network_id = "local", .allow_anonymous = true },
     );
     defer connection.destroy();
 
