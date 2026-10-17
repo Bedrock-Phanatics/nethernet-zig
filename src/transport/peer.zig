@@ -14,6 +14,110 @@ const c = @cImport({
 
 pub const maximum_signal_size = 1024 * 1024;
 
+fn sdpTraceLineKind(line: []const u8) enum { identity, ice_password, plain } {
+    if (std.mem.startsWith(u8, line, "a=identity:")) return .identity;
+    if (std.mem.startsWith(u8, line, "a=ice-pwd:")) return .ice_password;
+    return .plain;
+}
+
+pub fn traceSdp(stage: []const u8, sdp: []const u8) void {
+    std.debug.print("nethernet SDP {s}: {d} bytes\n", .{ stage, sdp.len });
+    var lines = std.mem.splitScalar(u8, sdp, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trimEnd(u8, raw_line, "\r");
+        switch (sdpTraceLineKind(line)) {
+            .identity => std.debug.print("nethernet SDP {s}: a=identity:<redacted> ({d} bytes)\n", .{ stage, line.len }),
+            .ice_password => std.debug.print("nethernet SDP {s}: a=ice-pwd:<redacted> ({d} bytes)\n", .{ stage, line.len }),
+            .plain => if (line.len != 0) std.debug.print("nethernet SDP {s}: {s}\n", .{ stage, line }),
+        }
+    }
+}
+
+test "SDP tracing redacts authentication values" {
+    try std.testing.expectEqual(.identity, sdpTraceLineKind("a=identity:secret"));
+    try std.testing.expectEqual(.ice_password, sdpTraceLineKind("a=ice-pwd:secret"));
+    try std.testing.expectEqual(.plain, sdpTraceLineKind("a=candidate:example"));
+}
+
+fn nativeTransportStage(message: []const u8) ?[]const u8 {
+    for ([_][]const u8{
+        "Initializing DTLS transport (MbedTLS)",
+        "Initializing DTLS transport (OpenSSL)",
+        "Starting DTLS transport",
+        "DTLS handshake finished",
+        "DTLS handshake failed",
+        "DTLS closed",
+        "SCTP connecting",
+        "SCTP connected",
+        "SCTP disconnected",
+        "SCTP connection failed",
+    }) |stage| {
+        if (std.mem.indexOf(u8, message, stage) != null) return stage;
+    }
+    return null;
+}
+
+fn onNativeLog(_: c.rtcLogLevel, message: [*c]const u8) callconv(.c) void {
+    const stage = nativeTransportStage(std.mem.span(message)) orelse return;
+    std.debug.print("nethernet WebRTC: {s}\n", .{stage});
+}
+
+test "native transport tracing emits milestones without log contents" {
+    try std.testing.expectEqualStrings("DTLS handshake failed", nativeTransportStage("handshake: DTLS handshake failed, secret=hidden").?);
+    try std.testing.expect(nativeTransportStage("Setting remote description: a=ice-pwd:secret") == null);
+    try std.testing.expect(nativeTransportStage("Setting remote description: a=identity:secret") == null);
+}
+
+fn uppercaseLocalFingerprintDigests(sdp: []u8) void {
+    var start: usize = 0;
+    while (start < sdp.len) {
+        const end = std.mem.indexOfScalarPos(u8, sdp, start, '\n') orelse sdp.len;
+        if (std.mem.startsWith(u8, sdp[start..end], "a=fingerprint:")) {
+            const value_start = start + "a=fingerprint:".len;
+            if (std.mem.indexOfScalar(u8, sdp[value_start..end], ' ')) |space| {
+                var pos = value_start + space + 1;
+                while (pos < end) : (pos += 1) {
+                    const byte = sdp[pos];
+                    if (byte >= 'a' and byte <= 'f') {
+                        sdp[pos] = byte - ('a' - 'A');
+                    } else if (!((byte >= '0' and byte <= '9') or
+                        (byte >= 'A' and byte <= 'F') or byte == ':'))
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+        start = end + 1;
+    }
+}
+
+fn hasUsableLocalCandidate(sdp: []const u8) bool {
+    var lines = std.mem.tokenizeAny(u8, sdp, "\r\n");
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "a=candidate:")) continue;
+        var fields = std.mem.tokenizeAny(u8, line, " \t");
+        _ = fields.next() orelse continue;
+        const component = std.fmt.parseInt(u16, fields.next() orelse continue, 10) catch continue;
+        if (component != 1 or
+            !std.ascii.eqlIgnoreCase(fields.next() orelse continue, "udp")) continue;
+        _ = std.fmt.parseInt(u32, fields.next() orelse continue, 10) catch continue;
+        const address = fields.next() orelse continue;
+        const port = std.fmt.parseInt(u16, fields.next() orelse continue, 10) catch continue;
+        if (port == 0 or !std.mem.eql(u8, fields.next() orelse continue, "typ")) continue;
+        const kind = fields.next() orelse continue;
+        if (!std.mem.eql(u8, kind, "host") and
+            !std.mem.eql(u8, kind, "srflx") and
+            !std.mem.eql(u8, kind, "prflx") and
+            !std.mem.eql(u8, kind, "relay")) continue;
+        if (std.mem.eql(u8, address, "0.0.0.0") or
+            std.mem.eql(u8, address, "::")) continue;
+        if (std.Io.net.IpAddress.parseIp4(address, port)) |_| return true else |_| {}
+        if (std.Io.net.IpAddress.parseIp6(address, port)) |_| return true else |_| {}
+    }
+    return false;
+}
+
 pub const CallbackStats = struct {
     dropped_unreliable_packets: u64,
     queue_high_water_bytes: usize,
@@ -83,11 +187,16 @@ pub const Event = union(enum) {
 };
 
 pub const Options = struct {
+    trace: bool = false,
     queue_bytes: usize = maximum_signal_size,
     queue_entries: usize = 512,
-    maximum_buffered_send: usize = 16 * 1024 * 1024 + 255,
+    maximum_buffered_send: usize = framing.default_maximum_message_size + framing.maximum_segments,
     maximum_message_size: usize = framing.default_maximum_message_size,
     ice_servers: []const [*:0]const u8 = &.{},
+    bind_address: ?[:0]const u8 = null,
+    port_range_begin: u16 = 0,
+    port_range_end: u16 = 0,
+    enable_ice_udp_mux: bool = false,
     disable_trickle: bool = false,
     drop_unreliable_on_pressure: bool = false,
     unreliable_reserve_bytes: usize = framing.maximum_segment_payload + 1,
@@ -95,6 +204,10 @@ pub const Options = struct {
 };
 
 pub const Peer = struct {
+    pub fn enableNativeTrace() void {
+        c.rtcInitLogger(c.RTC_LOG_DEBUG, onNativeLog);
+    }
+
     allocator: std.mem.Allocator,
     io: std.Io,
 
@@ -105,6 +218,8 @@ pub const Peer = struct {
     active_native_queries: usize = 0,
     native_delete_complete: bool = false,
     queue_pop_test_hook: if (builtin.is_test) ?*const fn (*Peer) void else void =
+        if (builtin.is_test) null else {},
+    remote_description_test_hook: if (builtin.is_test) ?*const fn ([]const u8) void else void =
         if (builtin.is_test) null else {},
 
     wakeup: Wakeup = .{},
@@ -123,12 +238,16 @@ pub const Peer = struct {
     options: Options,
     queue: Queue,
     dropped_unreliable_packets: u64 = 0,
+    segment_payload: std.atomic.Value(usize) = .init(0),
 
     pub fn create(allocator: std.mem.Allocator, io: std.Io, options: Options) !*Peer {
         if (options.queue_bytes < framing.maximum_segment_payload + 1 or
             options.queue_entries < 2 or
             options.maximum_buffered_send == 0 or
             options.ice_servers.len > 64 or
+            (options.port_range_begin == 0) != (options.port_range_end == 0) or
+            options.port_range_begin > options.port_range_end or
+            (options.bind_address != null and options.bind_address.?.len == 0) or
             (options.drop_unreliable_on_pressure and
                 (options.unreliable_reserve_bytes > options.queue_bytes or
                     options.unreliable_reserve_entries >= options.queue_entries)))
@@ -158,8 +277,19 @@ pub const Peer = struct {
         var config = std.mem.zeroes(c.rtcConfiguration);
         config.disableAutoNegotiation = true;
         config.maxMessageSize = framing.maximum_segment_payload + 1;
+        config.mtu = 1200;
         config.iceServers = @ptrCast(@constCast(options.ice_servers.ptr));
         config.iceServersCount = @intCast(options.ice_servers.len);
+        config.portRangeBegin = options.port_range_begin;
+        config.portRangeEnd = options.port_range_end;
+        config.enableIceUdpMux = options.enable_ice_udp_mux;
+        if (options.bind_address) |address| config.bindAddress = address.ptr;
+        if (options.trace) {
+            std.debug.print("nethernet WebRTC: config mtu={d}, maxMessageSize={d}, iceTcp={any}, udpMux={any}, autoNegotiation={any}\n", .{
+                config.mtu,             config.maxMessageSize,          config.enableIceTcp,
+                config.enableIceUdpMux, !config.disableAutoNegotiation,
+            });
+        }
 
         self.id = c.rtcCreatePeerConnection(&config);
         if (self.id < 0) return error.WebRtcFailure;
@@ -227,7 +357,7 @@ pub const Peer = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.stopping or self.state == .closed) return .closed;
-        if (self.state == .failed or self.state == .disconnected) return .failed;
+        if (self.state == .failed) return .failed;
         return .open;
     }
 
@@ -330,7 +460,7 @@ pub const Peer = struct {
         return .{ .id = self.id, .channels = self.channels };
     }
 
-    fn acquireReadyChannels(self: *Peer) ?[2]c_int {
+    fn acquireReadyChannels(self: *Peer) ?NativeHandles {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
@@ -341,7 +471,24 @@ pub const Peer = struct {
         }
 
         self.active_native_queries += 1;
-        return self.channels;
+        return .{ .id = self.id, .channels = self.channels };
+    }
+
+    fn negotiatedSegmentPayload(self: *Peer, id: c_int) !usize {
+        const cached = self.segment_payload.load(.acquire);
+        if (cached != 0) return cached;
+
+        const negotiated = c.rtcGetRemoteMaxMessageSize(id);
+        try check(negotiated);
+        if (negotiated <= 1) return error.InvalidState;
+
+        const segment = @min(
+            @as(usize, @intCast(negotiated)),
+            framing.maximum_segment_payload + 1,
+        ) - 1;
+
+        self.segment_payload.store(segment, .release);
+        return segment;
     }
 
     fn releaseNativeHandles(self: *Peer) void {
@@ -427,13 +574,13 @@ pub const Peer = struct {
     }
 
     pub fn ready(self: *Peer) bool {
-        const channels = self.acquireReadyChannels() orelse return false;
+        const handles = self.acquireReadyChannels() orelse return false;
         defer self.releaseNativeHandles();
 
-        return channels[0] >= 0 and
-            channels[1] >= 0 and
-            c.rtcIsOpen(channels[0]) and
-            c.rtcIsOpen(channels[1]);
+        return handles.channels[0] >= 0 and
+            handles.channels[1] >= 0 and
+            c.rtcIsOpen(handles.channels[0]) and
+            c.rtcIsOpen(handles.channels[1]);
     }
 
     pub fn offer(self: *Peer) !void {
@@ -477,7 +624,9 @@ pub const Peer = struct {
         self.notify();
         self.mutex.unlock(self.io);
 
-        try check(c.rtcSetLocalDescription(handles.id, "offer"));
+        const local_result = c.rtcSetLocalDescription(handles.id, "offer");
+        if (self.options.trace) std.debug.print("nethernet WebRTC: set local offer result={d}\n", .{local_result});
+        try check(local_result);
     }
 
     pub fn remoteDescription(
@@ -500,15 +649,22 @@ pub const Peer = struct {
             return error.MalformedSignal;
         }
 
+        if (builtin.is_test) {
+            if (self.remote_description_test_hook) |hook| hook(sdp);
+        }
+
         const handles = self.acquireNativeHandles() orelse
             return error.ConnectionClosed;
         defer self.releaseNativeHandles();
 
-        try check(c.rtcSetRemoteDescription(
+        const result = c.rtcSetRemoteDescription(
             handles.id,
             sdp,
             if (kind == .offer) "offer" else "answer",
-        ));
+        );
+        if (result == c.RTC_ERR_INVALID) return error.MalformedSignal;
+        if (self.options.trace) std.debug.print("nethernet WebRTC: set remote {s} result={d}\n", .{ if (kind == .offer) "offer" else "answer", result });
+        try check(result);
 
         if (kind == .offer) {
             self.description_kind = .answer;
@@ -518,7 +674,9 @@ pub const Peer = struct {
             self.notify();
             self.mutex.unlock(self.io);
 
-            try check(c.rtcSetLocalDescription(handles.id, "answer"));
+            const local_result = c.rtcSetLocalDescription(handles.id, "answer");
+            if (self.options.trace) std.debug.print("nethernet WebRTC: set local answer result={d}\n", .{local_result});
+            try check(local_result);
         }
     }
 
@@ -533,7 +691,9 @@ pub const Peer = struct {
             return error.ConnectionClosed;
         defer self.releaseNativeHandles();
 
-        try check(c.rtcAddRemoteCandidate(handles.id, candidate, "0"));
+        const result = c.rtcAddRemoteCandidate(handles.id, candidate, "0");
+        if (self.options.trace) std.debug.print("nethernet WebRTC: remote candidate {s}; result={d}\n", .{ candidate, result });
+        try check(result);
     }
 
     pub fn poll(self: *Peer, output: []u8) !?Event {
@@ -585,9 +745,11 @@ pub const Peer = struct {
                 return error.WebRtcFailure;
             }
 
-            self.description_sent = true;
-
             const data = output[0 .. @as(usize, @intCast(result)) - 1];
+            if (self.options.trace) traceSdp("native local gathered", data);
+            if (!hasUsableLocalCandidate(data)) return error.NoLocalIceCandidate;
+            self.description_sent = true;
+            uppercaseLocalFingerprintDigests(data);
 
             return if (self.description_kind == .offer)
                 .{ .offer = data }
@@ -604,6 +766,7 @@ pub const Peer = struct {
         else
             try self.queue.pop(output)) orelse return null;
 
+        if (entry.tag <= 1) uppercaseLocalFingerprintDigests(output[0..entry.data.len]);
         return switch (entry.tag) {
             0 => .{ .offer = entry.data },
             1 => .{ .answer = entry.data },
@@ -616,7 +779,7 @@ pub const Peer = struct {
 
     fn canPollLocked(self: *Peer, signals_only: bool) bool {
         const closed = self.stopping or self.state == .closed or
-            self.state == .failed or self.state == .disconnected;
+            self.state == .failed;
         if (!closed) return true;
         return !self.stopping and !signals_only and
             self.drain_queued_on_close and self.queue.count != 0;
@@ -628,22 +791,27 @@ pub const Peer = struct {
         reliability: framing.Reliability,
         scratch: []u8,
     ) !void {
-        var encoder = try framing.Encoder.init(
-            data,
-            reliability,
-            self.options.maximum_message_size,
-        );
-
-        const channels = self.acquireReadyChannels() orelse
+        const handles = self.acquireReadyChannels() orelse
             return error.InvalidState;
         var handles_acquired = true;
         defer if (handles_acquired) self.releaseNativeHandles();
+
+        const channels = handles.channels;
 
         if (channels[0] < 0 or channels[1] < 0 or
             !c.rtcIsOpen(channels[0]) or !c.rtcIsOpen(channels[1]))
         {
             return error.InvalidState;
         }
+
+        const segment = try self.negotiatedSegmentPayload(handles.id);
+
+        var encoder = try framing.Encoder.init(
+            data,
+            reliability,
+            self.options.maximum_message_size,
+            segment,
+        );
 
         const channel = channels[@intFromEnum(reliability)];
         const buffered = c.rtcGetBufferedAmount(channel);
@@ -652,7 +820,7 @@ pub const Peer = struct {
         const fragment_count = if (data.len == 0)
             0
         else
-            (data.len - 1) / framing.maximum_segment_payload + 1;
+            (data.len - 1) / segment + 1;
 
         const send_size = data.len + fragment_count;
         const buffered_size: usize = @intCast(buffered);
@@ -664,7 +832,7 @@ pub const Peer = struct {
         }
 
         if (data.len != 0 and
-            scratch.len < @as(usize, @min(data.len, framing.maximum_segment_payload)) + 1)
+            scratch.len < @as(usize, @min(data.len, segment)) + 1)
         {
             return error.NoSpaceLeft;
         }
@@ -688,6 +856,8 @@ pub const Peer = struct {
         errdefer if (!transferred) {
             _ = c.rtcDeleteDataChannel(channel);
         };
+        if (self.acquireNativeHandles() == null) return error.ConnectionClosed;
+        defer self.releaseNativeHandles();
 
         var label_buffer: [64]u8 = undefined;
         const length = c.rtcGetDataChannelLabel(
@@ -712,9 +882,31 @@ pub const Peer = struct {
             else
                 return error.InvalidChannel;
 
+        var protocol: [1]u8 = undefined;
+        const protocol_length = c.rtcGetDataChannelProtocol(channel, &protocol, protocol.len);
+        if (protocol_length == c.RTC_ERR_TOO_SMALL) return error.InvalidChannel;
+        try check(protocol_length);
+        if (protocol_length != 1 or protocol[0] != 0) return error.InvalidChannel;
+
+        var reliability: c.rtcReliability = undefined;
+        try check(c.rtcGetDataChannelReliability(channel, &reliability));
+        if (reliability.unordered != (index == 1) or
+            reliability.unreliable != (index == 1) or
+            reliability.maxPacketLifeTime != 0 or
+            reliability.maxRetransmits != 0)
+        {
+            return error.InvalidChannel;
+        }
+        if (self.options.trace) std.debug.print("nethernet WebRTC: channel label={s}, unordered={any}, unreliable={any}, maxRetransmits={d}, maxPacketLifeTime={d}\n", .{
+            label,                      reliability.unordered,         reliability.unreliable,
+            reliability.maxRetransmits, reliability.maxPacketLifeTime,
+        });
+
         self.mutex.lockUncancelable(self.io);
 
-        if (self.stopping or self.channels[index] >= 0) {
+        if (self.stopping or self.state == .closed or self.state == .failed or
+            self.channels[index] >= 0)
+        {
             self.mutex.unlock(self.io);
             return error.InvalidChannel;
         }
@@ -744,7 +936,7 @@ pub const Peer = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
-        if (self.stopping or self.state == .failed) return;
+        if (self.stopping or self.state == .failed or self.state == .closed) return;
 
         if (tag == 4 and self.options.drop_unreliable_on_pressure and
             data.len >= 2 and data[0] == 0)
@@ -774,6 +966,8 @@ pub const Peer = struct {
     ) callconv(.c) void {
         const self = from(ptr);
 
+        if (self.options.trace) traceSdp("native local callback", std.mem.span(sdp));
+
         if (!self.options.disable_trickle) {
             self.enqueue(
                 if (std.mem.eql(u8, std.mem.span(kind), "offer")) 0 else 1,
@@ -790,6 +984,8 @@ pub const Peer = struct {
     ) callconv(.c) void {
         const self = from(ptr);
 
+        if (self.options.trace) std.debug.print("nethernet WebRTC: local candidate {s}\n", .{std.mem.span(value)});
+
         if (!self.options.disable_trickle) {
             self.enqueue(2, std.mem.span(value));
         }
@@ -801,23 +997,25 @@ pub const Peer = struct {
         ptr: ?*anyopaque,
     ) callconv(.c) void {
         const self = from(ptr);
+        const mapped: State = switch (state) {
+            c.RTC_NEW => .new,
+            c.RTC_CONNECTING => .connecting,
+            c.RTC_CONNECTED => .connected,
+            c.RTC_DISCONNECTED => .disconnected,
+            c.RTC_FAILED => .failed,
+            else => .closed,
+        };
+        if (self.options.trace) std.debug.print("nethernet WebRTC: peer state={s}\n", .{@tagName(mapped)});
 
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
         if (self.stopping) return;
-        if (state == c.RTC_FAILED or state == c.RTC_DISCONNECTED) {
+        if (state == c.RTC_FAILED) {
             self.drain_queued_on_close = false;
         }
-        if (self.state != .failed) {
-            self.state = switch (state) {
-                c.RTC_NEW => .new,
-                c.RTC_CONNECTING => .connecting,
-                c.RTC_CONNECTED => .connected,
-                c.RTC_DISCONNECTED => .disconnected,
-                c.RTC_FAILED => .failed,
-                else => .closed,
-            };
+        if (self.state != .failed and self.state != .closed) {
+            self.state = mapped;
             self.notify();
         }
     }
@@ -828,11 +1026,7 @@ pub const Peer = struct {
         ptr: ?*anyopaque,
     ) callconv(.c) void {
         const self = from(ptr);
-
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-
-        self.ice_state = switch (state) {
+        const mapped: IceState = switch (state) {
             c.RTC_ICE_NEW => .new,
             c.RTC_ICE_CHECKING => .checking,
             c.RTC_ICE_CONNECTED => .connected,
@@ -841,6 +1035,13 @@ pub const Peer = struct {
             c.RTC_ICE_DISCONNECTED => .disconnected,
             else => .closed,
         };
+        if (self.options.trace) std.debug.print("nethernet WebRTC: ICE state={s}\n", .{@tagName(mapped)});
+
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+
+        if (self.stopping) return;
+        self.ice_state = mapped;
         self.notify();
     }
 
@@ -850,16 +1051,19 @@ pub const Peer = struct {
         ptr: ?*anyopaque,
     ) callconv(.c) void {
         const self = from(ptr);
-
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-
-        self.gathered = state == c.RTC_GATHERING_COMPLETE;
-        self.gathering_state = switch (state) {
+        const mapped: GatheringState = switch (state) {
             c.RTC_GATHERING_NEW => .new,
             c.RTC_GATHERING_INPROGRESS => .in_progress,
             else => .complete,
         };
+        if (self.options.trace) std.debug.print("nethernet WebRTC: gathering state={s}\n", .{@tagName(mapped)});
+
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+
+        if (self.stopping) return;
+        self.gathered = state == c.RTC_GATHERING_COMPLETE;
+        self.gathering_state = mapped;
         self.notify();
     }
 
@@ -872,7 +1076,7 @@ pub const Peer = struct {
 
         self.attach(channel) catch {
             self.mutex.lockUncancelable(self.io);
-            if (!self.stopping) {
+            if (!self.stopping and self.state != .closed) {
                 self.state = .failed;
                 self.drain_queued_on_close = false;
                 self.notify();
@@ -918,6 +1122,7 @@ pub const Peer = struct {
     }
     fn onOpen(_: c_int, ptr: ?*anyopaque) callconv(.c) void {
         const self = from(ptr);
+        if (self.options.trace) std.debug.print("nethernet WebRTC: channel open\n", .{});
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         self.notify();
@@ -929,14 +1134,14 @@ pub const Peer = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
-        if (self.stopping) return;
+        if (self.stopping or self.state == .closed) return;
 
         const known_channel = self.channels[0] == channel or self.channels[1] == channel;
         if (!known_channel) {
             self.state = .failed;
             self.drain_queued_on_close = false;
             self.notify();
-        } else if (self.state != .failed and self.state != .disconnected) {
+        } else if (self.state != .failed) {
             self.state = .failed;
             self.drain_queued_on_close = true;
             self.notify();
@@ -945,18 +1150,61 @@ pub const Peer = struct {
 
     fn onError(
         _: c_int,
-        _: [*c]const u8,
+        message: [*c]const u8,
         ptr: ?*anyopaque,
     ) callconv(.c) void {
         const self = from(ptr);
+        if (self.options.trace) std.debug.print("nethernet WebRTC: channel error={s}\n", .{std.mem.span(message)});
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        if (self.stopping) return;
+        if (self.stopping or self.state == .closed) return;
         self.state = .failed;
         self.drain_queued_on_close = false;
         self.notify();
     }
 };
+
+test "local fingerprint normalization preserves algorithms and other SDP text" {
+    const sdp =
+        "v=0\r\n" ++
+        "a=fingerprint:sha-256 ab:0c:DE\r\n" ++
+        "a=x:face\r\n" ++
+        "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" ++
+        "a=fingerprint:sha-512 01:fe:02\r\n" ++
+        "a=fingerprint:sha-384 aa:bb trailing-face\r\n";
+    var buffer = sdp.*;
+    uppercaseLocalFingerprintDigests(&buffer);
+    try std.testing.expectEqualStrings(
+        "v=0\r\n" ++
+            "a=fingerprint:sha-256 AB:0C:DE\r\n" ++
+            "a=x:face\r\n" ++
+            "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" ++
+            "a=fingerprint:sha-512 01:FE:02\r\n" ++
+            "a=fingerprint:sha-384 AA:BB trailing-face\r\n",
+        &buffer,
+    );
+}
+
+test "non-trickle SDP requires a usable local ICE candidate" {
+    try std.testing.expect(!hasUsableLocalCandidate(""));
+    try std.testing.expect(!hasUsableLocalCandidate(
+        "a=candidate:1 2 UDP 1 127.0.0.1 40000 typ host\r\n" ++
+            "a=candidate:2 1 TCP 1 127.0.0.1 40001 typ host\r\n" ++
+            "a=candidate:3 1 UDP 1 host.local 40002 typ host\r\n" ++
+            "a=candidate:4 1 UDP 1 0.0.0.0 40003 typ host\r\n" ++
+            "a=candidate:5 1 UDP 1 127.0.0.1 0 typ relay\r\n" ++
+            "a=candidate:6 1 UDP invalid 127.0.0.1 40004 typ host\r\n",
+    ));
+    try std.testing.expect(hasUsableLocalCandidate(
+        "a=candidate:1 1 UDP 1 192.0.2.1 40000 typ host\r\n",
+    ));
+    try std.testing.expect(hasUsableLocalCandidate(
+        "a=candidate:1 1 udp 1 2001:db8::1 40000 typ relay\r\n",
+    ));
+    try std.testing.expect(hasUsableLocalCandidate(
+        "a=candidate:1 1 UDP 1 192.0.2.1 40000 typ srflx\r\n",
+    ));
+}
 
 fn gracefulDrain(
     comptime T: type,
@@ -1120,6 +1368,44 @@ test "unknown remote data channel is deleted and fails the peer" {
     try std.testing.expectEqualSlices(c_int, &.{ -1, -1 }, &peer.channels);
 }
 
+test "data channels require vanilla reliability and protocol" {
+    const peer = try Peer.create(std.testing.allocator, std.testing.io, .{});
+    defer peer.destroy();
+
+    var init = std.mem.zeroes(c.rtcDataChannelInit);
+    init.reliability.unordered = true;
+    const wrong_reliable = c.rtcCreateDataChannelEx(peer.id, "ReliableDataChannel", &init);
+    try check(wrong_reliable);
+    try std.testing.expectError(error.InvalidChannel, peer.attach(wrong_reliable));
+    try expectChannelDeleted(wrong_reliable);
+
+    const wrong_unreliable = try testDataChannel(peer, "UnreliableDataChannel");
+    try std.testing.expectError(error.InvalidChannel, peer.attach(wrong_unreliable));
+    try expectChannelDeleted(wrong_unreliable);
+
+    init = std.mem.zeroes(c.rtcDataChannelInit);
+    init.protocol = "other";
+    const wrong_protocol = c.rtcCreateDataChannelEx(peer.id, "ReliableDataChannel", &init);
+    try check(wrong_protocol);
+    try std.testing.expectError(error.InvalidChannel, peer.attach(wrong_protocol));
+    try expectChannelDeleted(wrong_protocol);
+
+    init = std.mem.zeroes(c.rtcDataChannelInit);
+    init.reliability.unordered = true;
+    init.reliability.unreliable = true;
+    init.reliability.maxRetransmits = 1;
+    const retransmitting = c.rtcCreateDataChannelEx(peer.id, "UnreliableDataChannel", &init);
+    try check(retransmitting);
+    try std.testing.expectError(error.InvalidChannel, peer.attach(retransmitting));
+    try expectChannelDeleted(retransmitting);
+
+    init.reliability.maxRetransmits = 0;
+    const valid = c.rtcCreateDataChannelEx(peer.id, "UnreliableDataChannel", &init);
+    try check(valid);
+    try peer.attach(valid);
+    try std.testing.expectEqual(valid, peer.channels[1]);
+}
+
 test "message callback rejects an unregistered channel" {
     const peer = try Peer.create(std.testing.allocator, std.testing.io, .{});
     defer peer.destroy();
@@ -1214,17 +1500,55 @@ test "state failure after channel close revokes queued drain" {
     try std.testing.expectError(error.ConnectionClosed, peer.poll(&output));
 }
 
-test "disconnection before channel close forbids draining" {
+test "a transient disconnection keeps the connection usable" {
     const peer = try Peer.create(std.testing.allocator, std.testing.io, .{});
     defer peer.destroy();
-    const channel = try testAttachedChannel(peer);
+    _ = try testAttachedChannel(peer);
+
+    Peer.onState(peer.id, c.RTC_CONNECTED, peer);
+    try std.testing.expectEqual(State.connected, peer.getState());
+
+    Peer.onState(peer.id, c.RTC_DISCONNECTED, peer);
+    try std.testing.expectEqual(State.disconnected, peer.getState());
 
     peer.enqueue(3, &.{ 0, 42 });
-    Peer.onState(peer.id, c.RTC_DISCONNECTED, peer);
-    Peer.onClosed(channel, peer);
-
     var output: [2]u8 = undefined;
-    try std.testing.expectError(error.ConnectionClosed, peer.poll(&output));
+    const event = (try peer.poll(&output)).?;
+    try std.testing.expectEqualSlices(u8, &.{ 0, 42 }, event.reliable_fragment);
+    try std.testing.expect((try peer.poll(&output)) == null);
+
+    try std.testing.expectError(
+        error.InvalidState,
+        peer.send("x", .reliable, &output),
+    );
+
+    Peer.onState(peer.id, c.RTC_CONNECTED, peer);
+    try std.testing.expectEqual(State.connected, peer.getState());
+    try std.testing.expect(peer.acquireReadyChannels() != null);
+    peer.releaseNativeHandles();
+}
+
+test "failure and close stay terminal after a disconnection" {
+    for ([_]c.rtcState{ c.RTC_FAILED, c.RTC_CLOSED }) |terminal| {
+        const peer = try Peer.create(std.testing.allocator, std.testing.io, .{});
+        defer peer.destroy();
+        _ = try testAttachedChannel(peer);
+
+        Peer.onState(peer.id, c.RTC_CONNECTED, peer);
+        Peer.onState(peer.id, c.RTC_DISCONNECTED, peer);
+        Peer.onState(peer.id, terminal, peer);
+
+        peer.enqueue(3, &.{ 0, 42 });
+        var output: [2]u8 = undefined;
+        try std.testing.expectError(error.ConnectionClosed, peer.poll(&output));
+
+        Peer.onState(peer.id, c.RTC_CONNECTED, peer);
+        try std.testing.expectEqual(
+            if (terminal == c.RTC_FAILED) State.failed else State.closed,
+            peer.getState(),
+        );
+        try std.testing.expectError(error.ConnectionClosed, peer.poll(&output));
+    }
 }
 
 test "channel error before or after close forbids queued drain" {
@@ -1338,9 +1662,18 @@ test "native handle lease keeps handles live until close can delete them" {
 test "native queries report unavailable after close" {
     const peer = try Peer.create(std.testing.allocator, std.testing.io, .{});
     defer peer.destroy();
+    const before = peer.diagnostics();
     peer.close();
+    peer.close();
+    Peer.onState(-1, c.RTC_CONNECTED, peer);
+    Peer.onIceState(-1, c.RTC_ICE_CONNECTED, peer);
+    Peer.onGathered(-1, c.RTC_GATHERING_COMPLETE, peer);
+    Peer.onBufferedAmountLow(-1, peer);
 
     const diagnostics = peer.diagnostics();
+    try std.testing.expectEqual(State.closed, peer.getState());
+    try std.testing.expectEqual(before.ice_state, diagnostics.ice_state);
+    try std.testing.expectEqual(before.gathering_state, diagnostics.gathering_state);
     try std.testing.expectEqual(ChannelState.unavailable, diagnostics.reliable.state);
     try std.testing.expectEqual(ChannelState.unavailable, diagnostics.unreliable.state);
 
@@ -1360,6 +1693,19 @@ test "duplicate remote data channel is deleted and fails the peer" {
     try std.testing.expectEqual(State.failed, peer.getState());
     try std.testing.expectEqual(accepted, peer.channels[0]);
     try std.testing.expectEqual(@as(c_int, -1), peer.channels[1]);
+}
+
+test "late remote channel cannot revive a closed peer" {
+    const peer = try Peer.create(std.testing.allocator, std.testing.io, .{});
+    defer peer.destroy();
+
+    Peer.onState(peer.id, c.RTC_CLOSED, peer);
+    const channel = try testDataChannel(peer, "ReliableDataChannel");
+    Peer.onChannel(peer.id, channel, peer);
+
+    try expectChannelDeleted(channel);
+    try std.testing.expectEqual(State.closed, peer.getState());
+    try std.testing.expectEqualSlices(c_int, &.{ -1, -1 }, &peer.channels);
 }
 
 test "remote data channel flood retains no rejected C API handles" {
@@ -1462,4 +1808,93 @@ test "default callback queue accepts a maximum-sized signaling event" {
     peer.enqueue(0, signal);
     try std.testing.expectEqual(State.new, peer.getState());
     try std.testing.expectEqual(maximum_signal_size, peer.queue.used_bytes);
+}
+
+test "ICE port ranges and bind addresses are validated" {
+    const allocator = std.testing.allocator;
+
+    try std.testing.expectError(error.InvalidConfiguration, Peer.create(
+        allocator,
+        undefined,
+        .{ .port_range_begin = 30000 },
+    ));
+    try std.testing.expectError(error.InvalidConfiguration, Peer.create(
+        allocator,
+        undefined,
+        .{ .port_range_end = 30000 },
+    ));
+    try std.testing.expectError(error.InvalidConfiguration, Peer.create(
+        allocator,
+        undefined,
+        .{ .port_range_begin = 30010, .port_range_end = 30000 },
+    ));
+    try std.testing.expectError(error.InvalidConfiguration, Peer.create(
+        allocator,
+        undefined,
+        .{ .bind_address = "" },
+    ));
+}
+
+test "late ICE and channel callbacks leave a closed peer terminal" {
+    const peer = try Peer.create(std.testing.allocator, std.testing.io, .{});
+    defer peer.destroy();
+    peer.close();
+    const ice_state = peer.ice_state;
+    const gathering_state = peer.gathering_state;
+
+    Peer.onState(-1, c.RTC_CONNECTED, peer);
+    Peer.onIceState(-1, c.RTC_ICE_CONNECTED, peer);
+    Peer.onGathered(-1, c.RTC_GATHERING_COMPLETE, peer);
+    Peer.onCandidate(-1, "candidate:1 1 udp 1 127.0.0.1 9999 typ host", "0", peer);
+    Peer.onDescription(-1, "v=0\r\n", "answer", peer);
+    Peer.onBufferedAmountLow(-1, peer);
+    Peer.onOpen(-1, peer);
+    Peer.onClosed(-1, peer);
+    Peer.onError(-1, "late failure", peer);
+    peer.close();
+
+    try std.testing.expectEqual(State.closed, peer.getState());
+    try std.testing.expectEqual(ice_state, peer.ice_state);
+    try std.testing.expectEqual(gathering_state, peer.gathering_state);
+    try std.testing.expectEqual(@as(usize, 0), peer.queue.count);
+    try std.testing.expectEqual(@as(c_int, -1), peer.id);
+}
+
+test "bounded ICE mutations and callback sequences preserve terminal states" {
+    const source = "a=candidate:1 1 UDP 1 192.0.2.1 40000 typ host\r\n";
+    for (0..source.len) |offset| {
+        for ([_]u8{ 0, 10, 13, 32, 58, 127, 255 }) |value| {
+            var damaged = source.*;
+            damaged[offset] = value;
+            _ = hasUsableLocalCandidate(&damaged);
+            _ = hasUsableLocalCandidate(damaged[0..offset]);
+        }
+    }
+
+    var random = std.Random.DefaultPrng.init(0xCA11BAC);
+    for (0..16) |_| {
+        const peer = try Peer.create(std.testing.allocator, std.testing.io, .{ .queue_entries = 4 });
+        defer peer.destroy();
+        var data: [256]u8 = undefined;
+        for (0..128) |step| {
+            const before = peer.getState();
+            switch (random.random().uintLessThan(u8, 6)) {
+                0 => Peer.onState(0, random.random().uintLessThan(c.rtcState, 6), peer),
+                1 => Peer.onIceState(0, random.random().uintLessThan(c.rtcIceState, 7), peer),
+                2 => Peer.onGathered(0, random.random().uintLessThan(c.rtcGatheringState, 3), peer),
+                3 => Peer.onBufferedAmountLow(0, peer),
+                4 => {
+                    random.random().bytes(&data);
+                    peer.enqueue(3, data[0..random.random().uintLessThan(usize, data.len + 1)]);
+                },
+                else => Peer.onError(0, null, peer),
+            }
+            if (before == .failed or before == .closed)
+                try std.testing.expectEqual(before, peer.getState());
+            try std.testing.expect(peer.queue.count <= peer.queue.entries.len);
+            try std.testing.expect(peer.queue.used_bytes <= peer.queue.bytes.len);
+            if (step == 64) peer.close();
+        }
+        try std.testing.expectEqual(State.closed, peer.getState());
+    }
 }

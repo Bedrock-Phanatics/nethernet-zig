@@ -54,6 +54,8 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.16.0
+          # Restored Windows caches can reference missing Zig runtime libraries.
+          use-cache: false
       - run: powershell -ExecutionPolicy Bypass -File tools/setup-native.ps1
       - run: zig build -Doptimize=ReleaseSafe
       - run: zig build test-integration -Doptimize=ReleaseSafe

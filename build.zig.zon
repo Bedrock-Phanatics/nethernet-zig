@@ -1,6 +1,6 @@
 .{
     .name = .nethernet,
-    .version = "0.2.0",
+    .version = "0.2.3",
     .fingerprint = 0x8b6cc58fa8d39a76,
     .minimum_zig_version = "0.16.0",
     .paths = .{
