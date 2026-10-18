@@ -172,7 +172,6 @@ pub fn build(b: *std.Build) void {
     );
     integration_step.dependOn(&run_library_tests.step);
     integration_step.dependOn(&run_integration.step);
-    b.step("test-native", "Alias for test-integration").dependOn(integration_step);
 
     inline for (.{
         .{ "client", "examples/client.zig" },

@@ -6,11 +6,24 @@ A Zig transport library for Minecraft Bedrock, powered by libdatachannel.
 - Reliable and unreliable messaging with fragmentation and reassembly
 - Configurable limits, backpressure, and connection diagnostics
 
+## Status
+
+| Check | Result |
+| --- | --- |
+| Windows x86_64 and Linux x86_64 builds and tests | Pass |
+| go-nethernet client, signed identities, both channels | Pass (`tests/interop/run.sh`) |
+| Vanilla Bedrock client | Not yet verified, see the Minecraft smoke test |
+
+go-nethernet is the transport behind Dragonfly and gophertunnel, which vanilla
+clients join today, and this library matches its HTTP signaling, SDP, identity
+and framing behavior. macOS uses the same setup script but is not tested.
+
 ## Requirements
 
 - Zig 0.16.0
 - Git and CMake
 - A C/C++ toolchain supported by libdatachannel
+- Go, only for `tests/interop`
 
 ## Build
 
