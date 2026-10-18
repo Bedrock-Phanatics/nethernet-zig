@@ -19,6 +19,79 @@ const Config = struct {
     profile: enum { fixed, bedrock, rollover } = .bedrock,
     timeout_ms: u32 = 5_000,
     drain_timeout_ms: u32 = 5_000,
+    wait: enum { wakeup, sleep } = .wakeup,
+    idle: bool = false,
+    ice_udp_mux: bool = false,
+    rtc_threads: u32 = 0,
+};
+
+const Waiter = struct {
+    wakeup: nethernet.Wakeup = .{},
+    mode: @FieldType(Config, "wait"),
+    waits: u64 = 0,
+
+    fn idle(self: *Waiter, io: std.Io, token: nethernet.Wakeup.Token, timeout_ns: i96) !void {
+        self.waits += 1;
+        switch (self.mode) {
+            .sleep => try std.Io.sleep(io, .fromMilliseconds(1), .awake),
+            .wakeup => try self.wakeup.wait(io, token, .{ .duration = .{
+                .raw = .fromNanoseconds(@max(timeout_ns, 0)),
+                .clock = .awake,
+            } }),
+        }
+    }
+};
+
+const CountingAllocator = struct {
+    parent: std.mem.Allocator,
+    live_bytes: std.atomic.Value(usize) = .init(0),
+    allocations: std.atomic.Value(u64) = .init(0),
+
+    fn allocator(self: *CountingAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *CountingAllocator = @ptrCast(@alignCast(context));
+        const result = self.parent.rawAlloc(len, alignment, ret_addr) orelse return null;
+        _ = self.allocations.fetchAdd(1, .monotonic);
+        _ = self.live_bytes.fetchAdd(len, .monotonic);
+        return result;
+    }
+
+    fn resize(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *CountingAllocator = @ptrCast(@alignCast(context));
+        if (!self.parent.rawResize(memory, alignment, new_len, ret_addr)) return false;
+        self.track(memory.len, new_len);
+        return true;
+    }
+
+    fn remap(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *CountingAllocator = @ptrCast(@alignCast(context));
+        const result = self.parent.rawRemap(memory, alignment, new_len, ret_addr) orelse return null;
+        _ = self.allocations.fetchAdd(1, .monotonic);
+        self.track(memory.len, new_len);
+        return result;
+    }
+
+    fn free(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *CountingAllocator = @ptrCast(@alignCast(context));
+        self.parent.rawFree(memory, alignment, ret_addr);
+        _ = self.live_bytes.fetchSub(memory.len, .monotonic);
+    }
+
+    fn track(self: *CountingAllocator, old_len: usize, new_len: usize) void {
+        if (new_len > old_len) {
+            _ = self.live_bytes.fetchAdd(new_len - old_len, .monotonic);
+        } else {
+            _ = self.live_bytes.fetchSub(old_len - new_len, .monotonic);
+        }
+    }
 };
 
 const Pair = struct {
@@ -79,15 +152,20 @@ const Metrics = struct {
     native_dropped_unreliable: u64 = 0,
 
     queue_high_water_bytes: usize = 0,
+    queue_high_water_entries: usize = 0,
     buffered_high_water_bytes: usize = 0,
     send_buffer_bytes: usize = 0,
 
     max_loop_gap_ns: u64 = 0,
+    loop_iterations: u64 = 0,
+    reconnect_ns: u64 = 0,
+    churn_destroy_ns: u64 = 0,
+    backpressure: u64 = 0,
 };
 
 const LatencyHistogram = struct {
-    const bucket_width_ns: u64 = 10_000;
-    const bucket_count: usize = 200_001;
+    const bucket_width_ns: u64 = 1_000;
+    const bucket_count: usize = 2_000_001;
 
     buckets: []u64,
     count: u64 = 0,
@@ -151,10 +229,13 @@ const LatencyHistogram = struct {
 };
 
 pub fn main(init: std.process.Init) !void {
-    const allocator = init.gpa;
+    var counting: CountingAllocator = .{ .parent = init.gpa };
+    const allocator = counting.allocator();
     const io = init.io;
 
     var config = try parseArgs(init.minimal.args, allocator);
+    var waiter: Waiter = .{ .mode = config.wait };
+    if (config.rtc_threads != 0) try nethernet.Peer.setNativeThreadPoolSize(config.rtc_threads);
 
     if (config.connections == 0 or
         config.payload_size < 16 or
@@ -181,16 +262,21 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
+    const heap_before_pairs = counting.live_bytes.load(.monotonic);
+    const create_started = std.Io.Clock.awake.now(io);
+
     while (created < pairs.len) : (created += 1) {
         pairs[created] = try createPair(
             allocator,
             io,
             created,
-            config.timeout_ms,
+            config,
+            &waiter.wakeup,
         );
     }
 
     const setup_started = std.Io.Clock.awake.now(io);
+    const create_ns = create_started.durationTo(setup_started).nanoseconds;
 
     for (pairs) |pair| {
         try pair.client.start();
@@ -200,10 +286,13 @@ pub fn main(init: std.process.Init) !void {
         pairs,
         io,
         config.timeout_ms,
+        &waiter,
     );
 
     const setup_ns =
         setup_started.durationTo(std.Io.Clock.awake.now(io)).nanoseconds;
+    const rss_after_setup = residentBytes(io);
+    const heap_after_setup = counting.live_bytes.load(.monotonic);
 
     const slot_count = std.math.mul(
         usize,
@@ -259,6 +348,10 @@ pub fn main(init: std.process.Init) !void {
 
     const run_started = std.Io.Clock.awake.now(io);
     const cpu_started = std.Io.Clock.cpu_process.now(io);
+    const thread_cpu_started = std.Io.Clock.cpu_thread.now(io);
+    const harness_bytes = counting.live_bytes.load(.monotonic) -| heap_after_setup;
+    const allocations_started = counting.allocations.load(.monotonic);
+    const waits_started = waiter.waits;
 
     const deadline_ns: i96 =
         @as(i96, @intCast(config.duration_ms)) *
@@ -280,6 +373,9 @@ pub fn main(init: std.process.Init) !void {
     var previous_loop_ns: i96 = 0;
 
     while (true) {
+        const token = waiter.wakeup.prepare();
+        metrics.loop_iterations += 1;
+
         const now =
             std.Io.Clock.awake.now(io);
 
@@ -322,6 +418,7 @@ pub fn main(init: std.process.Init) !void {
             progress = progress or negotiation_progress;
 
             if (pair.client.ready() and pair.server.ready()) {
+                metrics.reconnect_ns += @intCast(now_ns - state.negotiation_started_ns);
                 state.phase = .active;
                 state.next_send_ns = now_ns;
                 state.completed_since_churn = 0;
@@ -391,7 +488,7 @@ pub fn main(init: std.process.Init) !void {
                 now_ns + 10 * std.time.ns_per_ms;
         }
 
-        if (generating) {
+        if (generating and !config.idle) {
             for (pairs, states, 0..) |*pair, *state, index| {
                 if (state.phase != .active) continue;
 
@@ -405,6 +502,7 @@ pub fn main(init: std.process.Init) !void {
                         config,
                         &metrics,
                         now_ns,
+                        &waiter.wakeup,
                     );
 
                     progress = progress or started;
@@ -414,6 +512,8 @@ pub fn main(init: std.process.Init) !void {
                 if (state.churn_due) continue;
 
                 const sent = sendDue(
+                    io,
+                    run_started,
                     pair,
                     state,
                     &metrics,
@@ -426,7 +526,7 @@ pub fn main(init: std.process.Init) !void {
             }
         }
 
-        if (now_ns >= next_stats_sample_ns) {
+        if (!config.idle and now_ns >= next_stats_sample_ns) {
             for (pairs) |pair| {
                 updateHighWater(&metrics, pair);
             }
@@ -452,11 +552,17 @@ pub fn main(init: std.process.Init) !void {
         }
 
         if (!progress) {
-            try std.Io.sleep(
-                io,
-                .fromMilliseconds(1),
-                .awake,
-            );
+            var idle_ns: i96 = if (generating) deadline_ns - now_ns else drain_timeout_ns;
+            if (config.duration_ms == 0) idle_ns = 100 * std.time.ns_per_ms;
+            if (metrics.in_flight != 0) idle_ns = @min(idle_ns, next_timeout_sweep_ns - now_ns);
+            if (!config.idle) idle_ns = @min(idle_ns, next_stats_sample_ns - now_ns);
+            if (generating and !config.idle and config.rate != 0) {
+                for (states) |state| {
+                    if (state.phase == .active and !state.churn_due)
+                        idle_ns = @min(idle_ns, state.next_send_ns - now_ns);
+                }
+            }
+            try waiter.idle(io, token, idle_ns);
         }
     }
 
@@ -469,15 +575,23 @@ pub fn main(init: std.process.Init) !void {
 
     const cpu_ns =
         cpu_started.durationTo(std.Io.Clock.cpu_process.now(io)).nanoseconds;
+    const thread_cpu_ns =
+        thread_cpu_started.durationTo(std.Io.Clock.cpu_thread.now(io)).nanoseconds;
+
+    const run_allocations = counting.allocations.load(.monotonic) - allocations_started;
+    const run_waits = waiter.waits - waits_started;
 
     const rss_end = residentBytes(io);
 
+    const teardown_started = std.Io.Clock.awake.now(io);
     for (pairs[0..created]) |pair| {
         metrics.send_buffer_bytes += pair.client.send_buffer.len + pair.server.send_buffer.len;
         pair.destroy();
     }
 
     created = 0;
+    const teardown_ns = teardown_started.durationTo(std.Io.Clock.awake.now(io)).nanoseconds;
+    const heap_retained = counting.live_bytes.load(.monotonic) -| (heap_before_pairs + harness_bytes);
 
     const rss_after_close = residentBytes(io);
 
@@ -495,6 +609,49 @@ pub fn main(init: std.process.Init) !void {
         rss_after_close,
     );
 
+    const connections: f64 = @floatFromInt(config.connections);
+    const roundtrips: f64 = @floatFromInt(@max(metrics.completed, 1));
+    const kibibytes = @as(f64, @floatFromInt(@max(metrics.bytes, 1))) / 1024;
+    const elapsed: f64 = @floatFromInt(elapsed_ns);
+    std.debug.print(
+        "\"wait\":\"{s}\",\"idle\":{},\"ice_udp_mux\":{},\"rtc_threads\":{d}," ++
+            "\"create_ms\":{d:.2},\"teardown_ms\":{d:.2}," ++
+            "\"rss_after_setup_bytes\":{?d},\"rss_per_pair_bytes\":{?d},\"zig_heap_bytes_per_pair\":{d}," ++
+            "\"run_allocations\":{d},\"allocations_per_roundtrip\":{d:.3}," ++
+            "\"cpu_ns_per_roundtrip\":{d:.0},\"cpu_ns_per_kib\":{d:.0},\"cpu_percent_per_pair\":{d:.4}," ++
+            "\"api_thread_cpu_percent\":{d:.1},\"background_cpu_percent\":{d:.1}," ++
+            "\"loop_iterations_per_roundtrip\":{d:.3},\"idle_waits\":{d},\"queue_high_water_entries\":{d}," ++
+            "\"reconnect_ms_mean\":{d:.2},\"churn_destroy_ms_mean\":{d:.2},\"backpressure\":{d},\"zig_heap_retained_after_close_bytes\":{d}}}\n",
+        .{
+            @tagName(config.wait),
+            config.idle,
+            config.ice_udp_mux,
+            config.rtc_threads,
+            @as(f64, @floatFromInt(create_ns)) / std.time.ns_per_ms,
+            @as(f64, @floatFromInt(teardown_ns)) / std.time.ns_per_ms,
+            rss_after_setup.current,
+            if (rss_after_setup.current != null and rss_process_start.current != null)
+                (rss_after_setup.current.? -| rss_process_start.current.?) / @as(u64, @intCast(config.connections))
+            else
+                null,
+            heap_after_setup / config.connections,
+            run_allocations,
+            @as(f64, @floatFromInt(run_allocations)) / roundtrips,
+            @as(f64, @floatFromInt(cpu_ns)) / roundtrips,
+            @as(f64, @floatFromInt(cpu_ns)) / kibibytes,
+            @as(f64, @floatFromInt(cpu_ns)) / elapsed * 100 / connections,
+            @as(f64, @floatFromInt(thread_cpu_ns)) / elapsed * 100,
+            @as(f64, @floatFromInt(cpu_ns - thread_cpu_ns)) / elapsed * 100,
+            @as(f64, @floatFromInt(metrics.loop_iterations)) / roundtrips,
+            run_waits,
+            metrics.queue_high_water_entries,
+            @as(f64, @floatFromInt(metrics.reconnect_ns)) / @as(f64, @floatFromInt(@max(metrics.reconnects, 1))) / std.time.ns_per_ms,
+            @as(f64, @floatFromInt(metrics.churn_destroy_ns)) / @as(f64, @floatFromInt(@max(metrics.reconnects, 1))) / std.time.ns_per_ms,
+            metrics.backpressure,
+            heap_retained,
+        },
+    );
+
     if (metrics.failures != 0 or metrics.corruptions != 0) {
         return error.StressFailure;
     }
@@ -504,15 +661,17 @@ fn createPair(
     allocator: std.mem.Allocator,
     io: std.Io,
     index: usize,
-    timeout_ms: u32,
+    config: Config,
+    wakeup: *nethernet.Wakeup,
 ) !Pair {
     const options: nethernet.ConnectionOptions = .{
         .native = .{
             .disable_trickle = true,
+            .enable_ice_udp_mux = config.ice_udp_mux,
         },
         .allow_anonymous = true,
-        .negotiation_timeout_ms = timeout_ms,
-        .connection_timeout_ms = timeout_ms,
+        .negotiation_timeout_ms = config.timeout_ms,
+        .connection_timeout_ms = config.timeout_ms,
     };
 
     const id: u64 = @intCast(index + 1);
@@ -539,6 +698,11 @@ fn createPair(
 
     errdefer server.destroy();
 
+    if (config.wait == .wakeup) {
+        client.peer.subscribe(wakeup);
+        server.peer.subscribe(wakeup);
+    }
+
     return .{
         .client = client,
         .server = server,
@@ -549,10 +713,12 @@ fn negotiateAll(
     pairs: []Pair,
     io: std.Io,
     timeout_ms: u32,
+    waiter: *Waiter,
 ) !void {
     const started = std.Io.Clock.awake.now(io);
 
     while (true) {
+        const token = waiter.wakeup.prepare();
         var ready_count: usize = 0;
         var progress = false;
 
@@ -575,19 +741,13 @@ fn negotiateAll(
             return;
         }
 
-        if (started
-            .durationTo(std.Io.Clock.awake.now(io))
-            .toMilliseconds() >= timeout_ms)
-        {
+        const elapsed = started.durationTo(std.Io.Clock.awake.now(io));
+        if (elapsed.toMilliseconds() >= timeout_ms) {
             return error.Timeout;
         }
 
         if (!progress) {
-            try std.Io.sleep(
-                io,
-                .fromMilliseconds(1),
-                .awake,
-            );
+            try waiter.idle(io, token, @as(i96, timeout_ms) * std.time.ns_per_ms - elapsed.nanoseconds);
         }
     }
 }
@@ -638,6 +798,8 @@ fn pumpNegotiation(
 }
 
 fn sendDue(
+    io: std.Io,
+    run_started: std.Io.Timestamp,
     pair: *Pair,
     state: *RuntimeState,
     metrics: *Metrics,
@@ -680,19 +842,24 @@ fn sendDue(
             sequence,
         );
 
+        const sent_ns = run_started.durationTo(std.Io.Clock.awake.now(io)).nanoseconds;
         pair.client.send(
             payload[0..size],
             reliability,
-        ) catch {
-            metrics.send_failures += 1;
-            metrics.failures += 1;
+        ) catch |err| {
+            if (err == error.Backpressure) {
+                metrics.backpressure += 1;
+            } else {
+                metrics.send_failures += 1;
+                metrics.failures += 1;
+            }
             break;
         };
 
         pending.* = .{
             .active = true,
             .sequence = sequence,
-            .sent_ns = now_ns,
+            .sent_ns = sent_ns,
             .size = size,
             .reliability = reliability,
         };
@@ -940,12 +1107,14 @@ fn beginReconnect(
     config: Config,
     metrics: *Metrics,
     now_ns: i96,
+    wakeup: *nethernet.Wakeup,
 ) bool {
     const replacement = createPair(
         allocator,
         io,
         index,
-        config.timeout_ms,
+        config,
+        wakeup,
     ) catch {
         metrics.negotiation_failures += 1;
         metrics.failures += 1;
@@ -968,7 +1137,9 @@ fn beginReconnect(
 
     recordFinalStats(metrics, pair.*);
 
+    const destroy_started = std.Io.Clock.awake.now(io);
     pair.destroy();
+    metrics.churn_destroy_ns += @intCast(destroy_started.durationTo(std.Io.Clock.awake.now(io)).nanoseconds);
     pair.* = replacement;
 
     state.phase = .negotiating;
@@ -1004,6 +1175,10 @@ fn updateHighWater(
             client.queue_high_water_bytes,
             server.queue_high_water_bytes,
         ),
+    );
+    metrics.queue_high_water_entries = @max(
+        metrics.queue_high_water_entries,
+        @max(client.queue_high_water_entries, server.queue_high_water_entries),
     );
 }
 
@@ -1315,6 +1490,17 @@ fn parseArgs(
                     value,
                 ) orelse
                 return error.InvalidArgument;
+        } else if (std.mem.eql(u8, argument, "--wait")) {
+            result.wait = std.meta.stringToEnum(
+                @TypeOf(result.wait),
+                iterator.next() orelse return error.MissingArgument,
+            ) orelse return error.InvalidArgument;
+        } else if (std.mem.eql(u8, argument, "--idle")) {
+            result.idle = true;
+        } else if (std.mem.eql(u8, argument, "--ice-udp-mux")) {
+            result.ice_udp_mux = true;
+        } else if (std.mem.eql(u8, argument, "--rtc-threads")) {
+            result.rtc_threads = try parse(u32, iterator.next());
         } else {
             return error.InvalidArgument;
         }
@@ -1537,8 +1723,7 @@ fn printReport(
             "\"rss_end_bytes\":{?d}," ++
             "\"rss_growth_bytes\":{?d}," ++
             "\"rss_peak_bytes\":{?d}," ++
-            "\"rss_after_close_bytes\":{?d}" ++
-            "}}\n",
+            "\"rss_after_close_bytes\":{?d},",
         .{
             histogram.percentileUs(50),
             histogram.percentileUs(95),
