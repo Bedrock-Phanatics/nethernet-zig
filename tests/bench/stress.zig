@@ -664,11 +664,8 @@ fn createPair(
     config: Config,
     wakeup: *nethernet.Wakeup,
 ) !Pair {
-    const options: nethernet.ConnectionOptions = .{
-        .native = .{
-            .disable_trickle = true,
-            .enable_ice_udp_mux = config.ice_udp_mux,
-        },
+    var options: nethernet.ConnectionOptions = .{
+        .native = .{ .disable_trickle = true },
         .allow_anonymous = true,
         .negotiation_timeout_ms = config.timeout_ms,
         .connection_timeout_ms = config.timeout_ms,
@@ -687,6 +684,8 @@ fn createPair(
 
     errdefer client.destroy();
 
+    // Clients share the process, so only servers mux or every agent would share one socket.
+    options.native.enable_ice_udp_mux = config.ice_udp_mux;
     const server = try Connection.create(
         allocator,
         io,
