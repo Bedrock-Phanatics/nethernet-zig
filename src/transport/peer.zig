@@ -220,10 +220,21 @@ pub const Peer = struct {
         c.rtcInitLogger(c.RTC_LOG_DEBUG, onNativeLog);
     }
 
-    /// Sets libdatachannel's worker count. It is read when libdatachannel starts, so call it before creating peers.
+    /// Sets libdatachannel's worker count, by default the CPU count up to four.
+    /// It is read when libdatachannel starts, so call it before creating peers.
     pub fn setNativeThreadPoolSize(count: u32) !void {
         if (count == 0) return error.InvalidConfiguration;
         try check(c.rtcSetThreadPoolSize(count));
+        native_pool_configured.store(true, .release);
+    }
+
+    // The native pool shares one lock, so workers past four mostly add contention.
+    var native_pool_configured: std.atomic.Value(bool) = .init(false);
+
+    fn configureNativePool() void {
+        if (native_pool_configured.swap(true, .acq_rel)) return;
+        const count = @min(std.Thread.getCpuCount() catch 4, 4);
+        _ = c.rtcSetThreadPoolSize(@intCast(count));
     }
 
     allocator: std.mem.Allocator,
@@ -312,6 +323,7 @@ pub const Peer = struct {
             });
         }
 
+        configureNativePool();
         self.id = c.rtcCreatePeerConnection(&config);
         if (self.id < 0) return error.WebRtcFailure;
         errdefer _ = c.rtcDeletePeerConnection(self.id);
