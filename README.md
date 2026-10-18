@@ -37,6 +37,10 @@ zig build -Doptimize=ReleaseSafe
 An existing patched libdatachannel installation can be selected with
 `-Dnative-prefix=/path/to/prefix`.
 
+## License
+
+Licensed under Apache-2.0. See [LICENSE](LICENSE).
+
 ## Quick start
 
 ```zig
