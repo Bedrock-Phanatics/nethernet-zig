@@ -629,18 +629,13 @@ pub const Connection = struct {
             self.signal_buffer = null;
         }
 
-        const needs_negotiation = self.peer.needsNegotiationBuffer();
-        if (self.established and !needs_negotiation) {
-            if (self.negotiation_scratch) |scratch| {
-                self.allocator.free(scratch);
-                self.negotiation_scratch = null;
-            }
-        }
-
-        const scratch = if (needs_negotiation)
-            self.negotiation_scratch orelse return error.InvalidState
-        else
-            self.packet_scratch;
+        // Gathering has finished by the time this scratch is released, so no larger local signal can follow.
+        const scratch = if (self.negotiation_scratch) |negotiation| blk: {
+            if (!self.established or self.peer.needsNegotiationBuffer()) break :blk negotiation;
+            self.allocator.free(negotiation);
+            self.negotiation_scratch = null;
+            break :blk self.packet_scratch;
+        } else self.packet_scratch;
         const event = try self.peer.pollRestricted(scratch, signals_only) orelse {
             for (&self.assemblies) |*assembly| {
                 if (assembly.decoder.used == 0 and

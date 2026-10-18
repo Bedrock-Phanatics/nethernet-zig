@@ -245,6 +245,7 @@ pub const Peer = struct {
 
     options: Options,
     queue: Queue,
+    queued_signals: usize = 0,
     dropped_unreliable_packets: u64 = 0,
     segment_payload: std.atomic.Value(usize) = .init(0),
 
@@ -417,7 +418,7 @@ pub const Peer = struct {
     pub fn hasPending(self: *Peer, signals_only: bool) bool {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        return if (signals_only) self.queue.hasTagBelow(3) else self.queue.count != 0;
+        return if (signals_only) self.queued_signals != 0 else self.queue.count != 0;
     }
 
     pub fn needsNegotiationBuffer(self: *Peer) bool {
@@ -426,7 +427,7 @@ pub const Peer = struct {
 
         if (!self.gathered) return true;
         if (self.options.disable_trickle and !self.description_sent) return true;
-        return self.queue.hasTagBelow(3);
+        return self.queued_signals != 0;
     }
 
     pub fn callbackStats(self: *Peer) CallbackStats {
@@ -727,71 +728,71 @@ pub const Peer = struct {
         output: []u8,
         signals_only: bool,
     ) !?Event {
+        if (builtin.is_test) {
+            if (self.queue_pop_test_hook) |hook| hook(self);
+        }
+
+        const lock_zone = trace.zone(@src(), "peer.poll.lock");
         self.mutex.lockUncancelable(self.io);
+        lock_zone.end();
 
         if (!self.canPollLocked(signals_only)) {
             self.mutex.unlock(self.io);
             return error.ConnectionClosed;
         }
 
-        const gathered = self.gathered;
+        if (!self.options.disable_trickle or !self.gathered or self.description_sent) {
+            defer self.mutex.unlock(self.io);
+            return self.dequeueLocked(output, signals_only);
+        }
         self.mutex.unlock(self.io);
 
-        if (builtin.is_test) {
-            if (self.queue_pop_test_hook) |hook| hook(self);
+        if (output.len > std.math.maxInt(c_int)) {
+            return error.InvalidConfiguration;
         }
 
-        if (self.options.disable_trickle and
-            gathered and
-            !self.description_sent)
-        {
-            if (output.len > std.math.maxInt(c_int)) {
-                return error.InvalidConfiguration;
-            }
+        const handles = self.acquireNativeHandles() orelse
+            return error.ConnectionClosed;
+        defer self.releaseNativeHandles();
 
-            const handles = self.acquireNativeHandles() orelse
-                return error.ConnectionClosed;
-            defer self.releaseNativeHandles();
+        const result = c.rtcGetLocalDescription(
+            handles.id,
+            output.ptr,
+            @intCast(output.len),
+        );
 
-            const result = c.rtcGetLocalDescription(
-                handles.id,
-                output.ptr,
-                @intCast(output.len),
-            );
+        if (result == c.RTC_ERR_TOO_SMALL) return error.NoSpaceLeft;
 
-            if (result == c.RTC_ERR_TOO_SMALL) return error.NoSpaceLeft;
+        try check(result);
 
-            try check(result);
-
-            if (result == 0 or result > output.len) {
-                return error.WebRtcFailure;
-            }
-
-            const data = output[0 .. @as(usize, @intCast(result)) - 1];
-            if (self.options.trace) traceSdp("native local gathered", data);
-            if (!hasUsableLocalCandidate(data)) return error.NoLocalIceCandidate;
-            self.description_sent = true;
-            uppercaseLocalFingerprintDigests(data);
-
-            return if (self.description_kind == .offer)
-                .{ .offer = data }
-            else
-                .{ .answer = data };
+        if (result == 0 or result > output.len) {
+            return error.WebRtcFailure;
         }
 
-        const lock_zone = trace.zone(@src(), "peer.poll.lock");
-        self.mutex.lockUncancelable(self.io);
-        lock_zone.end();
-        defer self.mutex.unlock(self.io);
+        const data = output[0 .. @as(usize, @intCast(result)) - 1];
+        if (self.options.trace) traceSdp("native local gathered", data);
+        if (!hasUsableLocalCandidate(data)) return error.NoLocalIceCandidate;
+        self.description_sent = true;
+        uppercaseLocalFingerprintDigests(data);
+
+        return if (self.description_kind == .offer)
+            .{ .offer = data }
+        else
+            .{ .answer = data };
+    }
+
+    fn dequeueLocked(self: *Peer, output: []u8, signals_only: bool) !?Event {
         const zone = if (signals_only) trace.zone(@src(), "peer.dequeue.priority") else trace.zone(@src(), "peer.dequeue");
         defer zone.end();
-        if (!self.canPollLocked(signals_only)) return error.ConnectionClosed;
 
-        const entry = (if (signals_only)
+        const entry = (if (!signals_only)
+            try self.queue.pop(output)
+        else if (self.queued_signals != 0)
             try self.queue.popFirstTagBelow(3, output)
         else
-            try self.queue.pop(output)) orelse return null;
+            null) orelse return null;
 
+        if (entry.tag < 3) self.queued_signals -= 1;
         if (entry.tag <= 1) uppercaseLocalFingerprintDigests(output[0..entry.data.len]);
         return switch (entry.tag) {
             0 => .{ .offer = entry.data },
@@ -964,6 +965,10 @@ pub const Peer = struct {
         self.mutex.lockUncancelable(self.io);
         lock_zone.end();
         defer self.mutex.unlock(self.io);
+        self.enqueueLocked(tag, data);
+    }
+
+    fn enqueueLocked(self: *Peer, tag: u8, data: []const u8) void {
         const zone = trace.zone(@src(), "peer.enqueue");
         defer zone.end();
 
@@ -980,11 +985,11 @@ pub const Peer = struct {
             ) catch {
                 self.dropped_unreliable_packets +|= 1;
             };
-        } else {
-            self.queue.push(tag, data) catch {
-                self.state = .failed;
-                self.drain_queued_on_close = false;
-            };
+        } else if (self.queue.push(tag, data)) {
+            if (tag < 3) self.queued_signals += 1;
+        } else |_| {
+            self.state = .failed;
+            self.drain_queued_on_close = false;
         }
         self.notify();
     }
@@ -1128,23 +1133,24 @@ pub const Peer = struct {
 
         const self = from(ptr);
 
+        const lock_zone = trace.zone(@src(), "peer.enqueue.lock");
         self.mutex.lockUncancelable(self.io);
+        lock_zone.end();
+        defer self.mutex.unlock(self.io);
+
         const tag: u8 = if (self.channels[0] == channel)
             3
         else if (self.channels[1] == channel)
             4
-        else blk: {
+        else {
             if (!self.stopping) {
                 self.state = .failed;
                 self.drain_queued_on_close = false;
                 self.notify();
             }
-            break :blk 0;
+            return;
         };
-        self.mutex.unlock(self.io);
-
-        if (tag == 0) return;
-        self.enqueue(tag, data[0..@intCast(size)]);
+        self.enqueueLocked(tag, data[0..@intCast(size)]);
     }
 
     fn onBufferedAmountLow(_: c_int, ptr: ?*anyopaque) callconv(.c) void {
@@ -1625,7 +1631,7 @@ test "late callbacks cannot revive or extend a closed channel drain" {
     try std.testing.expectError(error.ConnectionClosed, peer.poll(&output));
 }
 
-test "callback failure between poll checks prevents queued drain" {
+test "callback failure before a poll prevents queued drain" {
     const peer = try Peer.create(std.testing.allocator, std.testing.io, .{});
     defer peer.destroy();
     const channel = try testAttachedChannel(peer);
