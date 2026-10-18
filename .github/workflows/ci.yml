@@ -44,6 +44,11 @@ jobs:
       - run: zig build test-integration --summary all
       - run: zig build test-integration -Doptimize=ReleaseSafe
       - run: zig build stress-smoke -Doptimize=ReleaseSafe
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: tests/interop/go.mod
+          cache-dependency-path: tests/interop/go.sum
+      - run: sh tests/interop/run.sh
 
   windows:
     needs: core
@@ -60,3 +65,9 @@ jobs:
       - run: zig build -Doptimize=ReleaseSafe
       - run: zig build test-integration -Doptimize=ReleaseSafe
       - run: zig build stress-smoke -Doptimize=ReleaseSafe
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: tests/interop/go.mod
+          cache-dependency-path: tests/interop/go.sum
+      - run: sh tests/interop/run.sh
+        shell: bash

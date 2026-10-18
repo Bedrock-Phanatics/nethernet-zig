@@ -33,8 +33,8 @@ libdatachannel installation.
 
 ## Example: echo server and client
 
-The server accepts one connection and echoes a message. The client prints the
-response and acknowledges it before both programs close.
+The server accepts one connection and echoes messages until it receives `ack`.
+The client prints the response and acknowledges it before both programs close.
 
 ### Server
 
@@ -64,11 +64,11 @@ pub fn main(init: std.process.Init) !void {
     const connection = try listener.accept();
     defer connection.destroy();
 
-    const message = try connection.receive();
-    try connection.send(message.data, message.reliability);
-
-    const acknowledgement = try connection.receive();
-    if (!std.mem.eql(u8, acknowledgement.data, "ack")) return error.InvalidAcknowledgement;
+    while (true) {
+        const message = try connection.receive();
+        if (std.mem.eql(u8, message.data, "ack")) break;
+        try connection.send(message.data, message.reliability);
+    }
 }
 ```
 
@@ -206,6 +206,12 @@ zig build test-integration -Doptimize=ReleaseSafe
 zig build fuzz -Dfuzz-iterations=1000
 zig build stress-smoke -Doptimize=ReleaseSafe
 ```
+
+`tests/interop/run.sh` runs the echo server against a
+[go-nethernet](https://github.com/df-mc/go-nethernet) client that follows the
+vanilla join flow: an `https://` probe, `GET /v1/join`, a signed offer, and
+echoes on both data channels. It needs Go and `curl`, and CI runs it on Linux
+and Windows.
 
 Run `zig build bench` for benchmarks.
 
