@@ -7,8 +7,7 @@ A Zig implementation of Minecraft Bedrock's NetherNet transport, built on libdat
 - Reliable and unreliable channels with fragmentation and reassembly
 - Bounded memory, backpressure, and connection diagnostics
 
-Tested with vanilla Bedrock 1.26.52 on Windows and mobile, and against
-[go-nethernet](https://github.com/df-mc/go-nethernet). Gameplay login is left to the host application.
+Tested with vanilla Bedrock 1.26.52 and against [go-nethernet](https://github.com/df-mc/go-nethernet).
 
 ## Requirements
 
