@@ -2,6 +2,7 @@ const std = @import("std");
 
 const auth = @import("../auth/sdp.zig");
 const jwt = @import("../auth/token.zig");
+const trace = @import("../internal/trace.zig");
 const wake = @import("../internal/wakeup.zig");
 const Signal = @import("../protocol/signal.zig").Signal;
 const framing = @import("framing.zig");
@@ -588,6 +589,8 @@ pub const Connection = struct {
     }
 
     fn pollInternal(self: *Connection, signals_only: bool) !?Event {
+        const zone = trace.zone(@src(), "connection.poll");
+        defer zone.end();
         errdefer {
             for (&self.assemblies) |*assembly| assembly.clear(self.allocator);
             self.close();
@@ -689,6 +692,8 @@ pub const Connection = struct {
                 const reliable = event == .reliable_fragment;
                 const index: usize = if (reliable) 0 else 1;
 
+                const reassembly_zone = trace.zone(@src(), "connection.reassemble");
+                defer reassembly_zone.end();
                 const message = try self.assemblies[index].push(
                     self.allocator,
                     self.io,
@@ -758,6 +763,8 @@ pub const Connection = struct {
         try self.io.checkCancel();
         if (self.peer.hasPending(negotiation)) return;
         if (negotiation and self.ready()) return;
+        const zone = trace.zone(@src(), "connection.wait");
+        defer zone.end();
         try self.peer.wakeup.wait(self.io, token, self.waitDeadline());
     }
 
