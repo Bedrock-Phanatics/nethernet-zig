@@ -88,7 +88,6 @@ pub fn main(init: std.process.Init) !void {
         );
     }
 
-    // Receive-only measurements use preframed input so encoder copies are not timed.
     for ([_]usize{ 32, 64, 128, 256, 512, 1024, 1400, 8192 }) |size| {
         frame[0] = 0;
         @memcpy(frame[1..][0..size], payload[0..size]);

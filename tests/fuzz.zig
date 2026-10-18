@@ -50,7 +50,6 @@ pub fn exercise(input: []u8) void {
         if (sdp_identity.verify(allocator, input, 1000, kind, null)) |_| {} else |_| {}
     }
 
-    // Any signal that parses must preserve its semantic fields after re-encoding.
     if (Signal.parse(input)) |signal| {
         var buffer: [8192]u8 = undefined;
         if (signal.encode(&buffer)) |encoded| {
@@ -83,8 +82,6 @@ test "deterministic malformed input campaign" {
     }
 }
 
-// Random bytes almost never form valid DER, so the decoder is also driven
-// with mutations of a real key to reach its deeper paths.
 test "identity decoder survives mutations of a valid key" {
     var encoded: [identity_file.encoded_size]u8 = undefined;
     _ = identity_file.encode(
@@ -92,7 +89,6 @@ test "identity decoder survives mutations of a valid key" {
         &encoded,
     );
 
-    // Tags, and the short, long and reserved length forms.
     const hostile_bytes = [_]u8{ 0x00, 0x01, 0x02, 0x04, 0x06, 0x30, 0x31, 0x7f, 0x80, 0x81, 0x84, 0x88, 0xfe, 0xff };
 
     for (0..encoded.len) |offset| {
@@ -127,7 +123,6 @@ test "identity decoder survives mutations of a valid key" {
     };
     for (hostile) |case| _ = identity_file.decode(case) catch {};
 
-    // Bounded: each accepted key costs a P-384 scalar multiplication.
     var random = std.Random.DefaultPrng.init(0xA11CE);
     var buffer: [identity_file.encoded_size]u8 = undefined;
     for (0..@min(build_options.fuzz_iterations, 2000)) |i| {
@@ -139,8 +134,6 @@ test "identity decoder survives mutations of a valid key" {
     }
 }
 
-// Random input never reaches the identity verifier, so it is also driven with
-// mutations of a genuinely signed SDP.
 test "SDP identity verifier survives mutations of a signed assertion" {
     const allocator = std.testing.allocator;
 
@@ -176,8 +169,7 @@ test "SDP identity verifier survives mutations of a signed assertion" {
         }
     }
 
-    // The assertion signs only the canonical fingerprint JSON, so touching
-    // other lines may still verify. Touching a fingerprint never may.
+    // Only fingerprint lines are signed, so other edits may still verify.
     const line = std.mem.indexOf(u8, signed, "a=fingerprint:").?;
     const line_end = std.mem.indexOfScalarPos(u8, signed, line, '\r').?;
 
@@ -194,7 +186,6 @@ test "SDP identity verifier survives mutations of a signed assertion" {
         }
     }
 
-    // Duplicated, truncated and relocated assertions.
     for (0..signed.len) |len| {
         if (sdp_identity.verify(allocator, signed[0..len], 1000, .server, null)) |_| {} else |_| {}
     }
@@ -205,7 +196,6 @@ test "SDP identity verifier survives mutations of a signed assertion" {
         return error.DuplicateAssertionAccepted;
     } else |_| {}
 
-    // Clock boundaries around the token's validity window.
     for ([_]i64{ std.math.minInt(i64), -1, 0, 999, 1000, 1001, std.math.maxInt(i64) }) |now| {
         if (sdp_identity.verify(allocator, signed, now, .server, null)) |_| {} else |_| {}
         if (sdp_identity.verify(allocator, signed, now, .client, null)) |_| {} else |_| {}

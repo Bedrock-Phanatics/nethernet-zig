@@ -141,7 +141,6 @@ pub const Options = struct {
     identity: ?auth.Identity = null,
     server_identity_key: ?auth.KeyPair = null,
     server_identity_domain: []const u8 = "self",
-    /// These callbacks verify token issuers, not just key ownership.
     verify_server: ?auth.Verifier = null,
     verify_client: ?auth.Verifier = null,
 };
@@ -276,7 +275,6 @@ pub const Connection = struct {
     local_id: []u8,
     options: Options,
 
-    /// The peer's signing key does not prove its issuer is trusted.
     public_key: ?auth.Key = null,
     identity_issuer_verified: bool = false,
     started: std.Io.Timestamp,

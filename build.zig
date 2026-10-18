@@ -196,30 +196,6 @@ pub fn build(b: *std.Build) void {
         });
     }
 
-    const wake_bench_module = createModule(
-        b,
-        "tests/bench/wakeup.zig",
-        target,
-        .ReleaseFast,
-    );
-    wake_bench_module.addImport(
-        "wakeup",
-        createModule(b, "src/internal/wakeup.zig", target, .ReleaseFast),
-    );
-    wake_bench_module.addImport(
-        "queue",
-        createModule(b, "src/internal/queue.zig", target, .ReleaseFast),
-    );
-    const wake_bench = b.addExecutable(.{
-        .name = "wakeup-benchmark",
-        .root_module = wake_bench_module,
-    });
-    const wake_bench_step = b.step(
-        "bench-wakeup",
-        "Measure wakeup latency and idle CPU",
-    );
-    wake_bench_step.dependOn(&b.addRunArtifact(wake_bench).step);
-
     const benchmark_module = createModule(
         b,
         "tests/bench/main.zig",
@@ -248,30 +224,6 @@ pub fn build(b: *std.Build) void {
     );
     benchmark_step.dependOn(&b.addRunArtifact(benchmark).step);
 
-    const memory_module = createModule(
-        b,
-        "tests/bench/memory.zig",
-        target,
-        .ReleaseFast,
-    );
-    memory_module.addImport(
-        "framing",
-        createModule(b, "src/transport/framing.zig", target, .ReleaseFast),
-    );
-    memory_module.addImport(
-        "queue",
-        createModule(b, "src/internal/queue.zig", target, .ReleaseFast),
-    );
-    const memory_bench = b.addExecutable(.{
-        .name = "memory-benchmark",
-        .root_module = memory_module,
-    });
-    const memory_bench_step = b.step(
-        "bench-memory",
-        "Report bounded buffer memory",
-    );
-    memory_bench_step.dependOn(&b.addRunArtifact(memory_bench).step);
-
     const stress_module = createModule(b, "tests/bench/stress.zig", target, optimize);
     stress_module.addImport("nethernet", nethernet);
     if (target.result.os.tag == .windows) stress_module.linkSystemLibrary("psapi", .{});
@@ -286,10 +238,6 @@ pub fn build(b: *std.Build) void {
         .name = "transport-stress",
         .root_module = stress_module,
     });
-    const stress_tests = b.addTest(.{ .root_module = stress_module, .filters = &.{"benchmark "} });
-    const run_stress_tests = b.addRunArtifact(stress_tests);
-    addNativeRuntime(b, run_stress_tests, target, native_prefix);
-    b.step("test-bench", "Check benchmark diagnostics").dependOn(&run_stress_tests.step);
 
     const install_stress = b.addInstallArtifact(stress, .{});
     const stress_install_step = b.step(

@@ -5,7 +5,6 @@ const connection = @import("../transport/connection.zig");
 
 pub const maximum_sdp_size = 1024 * 1024;
 
-// A u64 needs at most 20 decimal digits.
 const maximum_numeric_network_id = 20;
 
 fn networkIdText(

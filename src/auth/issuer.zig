@@ -102,7 +102,7 @@ const fetch_timeout_seconds = 15;
 pub const Authority = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
-    // ponytail: one lock around verify and refresh, a fetch stalls other joins for at most fetch_timeout_seconds once a minute.
+    // ponytail: one lock for verify and refresh, a key fetch can stall joins for up to 15 seconds once a minute.
     mutex: std.Io.Mutex = .init,
     keys: ?Keys = null,
     refreshed: ?std.Io.Timestamp = null,

@@ -134,7 +134,6 @@ const private_permissions: std.Io.File.Permissions =
     else
         .default_file;
 
-// Offsets point to the contents and the next element.
 const Element = struct {
     start: usize,
     end: usize,

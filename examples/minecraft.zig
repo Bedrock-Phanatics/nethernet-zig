@@ -10,7 +10,7 @@ const usage =
     \\  --offline         disable issuer verification and allow anonymous clients
     \\  --trace           print safe HTTP and WebRTC negotiation stages
     \\  --protocol <number> advertised gameplay protocol, default 2193
-    \\  --version <string>  advertised version, default 1.26.51
+    \\  --version <string>  advertised version, default 1.26.52
     \\
 ;
 
@@ -31,7 +31,7 @@ const banner =
 const Status = struct {
     queries: std.atomic.Value(usize) = .init(0),
     protocol: u32 = 2193,
-    version: []const u8 = "1.26.51",
+    version: []const u8 = "1.26.52",
 
     fn get(context: ?*anyopaque) !nethernet.EndpointServerStatus {
         const self: *Status = @ptrCast(@alignCast(context.?));

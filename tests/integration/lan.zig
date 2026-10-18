@@ -42,7 +42,6 @@ fn sharedBindCycles(io: std.Io) !void {
         try client.request(destination);
         _ = try first.poll(100);
         _ = try second.poll(100);
-        // Shared sockets need not both receive the request.
         try std.testing.expect(first.servers.contains(1) or second.servers.contains(1));
         first.close();
         first.close();
@@ -153,7 +152,6 @@ test "LAN discovery signaling negotiates WebRTC with trickle ICE" {
 
     try std.testing.expect(client_discovery.isSubscribed(&restored_listener.wakeup));
 
-    // The restored subscription must wake the second accept promptly.
     const accept_started = std.Io.Clock.awake.now(io);
     var reverse_dialing = try io.concurrent(
         nethernet.dialLan,

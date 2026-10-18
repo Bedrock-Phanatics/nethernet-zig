@@ -28,7 +28,6 @@ pub const Options = struct {
     maximum_http_workers: usize = 32,
     maximum_pending_accepts: usize = 64,
     request_timeout_ms: u32 = 15000,
-    /// GET /v1/join returns 503 without metadata. POST still works.
     status_provider: ?StatusProvider = null,
     trace: bool = false,
 };

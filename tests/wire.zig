@@ -4,7 +4,6 @@ const discovery = @import("nethernet_core").discovery_codec;
 test "trusted issuer verifies independent RS256 tokens and rejects invalid claims" {
     const issuer = @import("nethernet_core").identity_issuer;
     const allocator = std.testing.allocator;
-    // Python cryptography 50.0.1 generated these RSA signatures with a disposable test key.
     const fixture = try std.json.parseFromSlice(struct {
         jwks: []const u8,
         vectors: []const struct { name: []const u8, token: []const u8 },
@@ -47,7 +46,6 @@ test "issuer verification releases partial allocations" {
 test "identity verifies an independently signed multi-fingerprint assertion" {
     const auth = @import("nethernet_core").sdp_identity;
     const allocator = std.testing.allocator;
-    // Python cryptography 50.0.1 signed this fixture with the test-only P-384 scalar 1.
     const fixture = try std.json.parseFromSlice(
         struct { sdp: []const u8, payload: []const u8, public_key: []const u8 },
         allocator,

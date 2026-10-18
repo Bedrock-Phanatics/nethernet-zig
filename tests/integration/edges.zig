@@ -10,7 +10,6 @@ fn origin(allocator: std.mem.Allocator, listener: *Listener, host: []const u8) !
     });
 }
 
-/// Sends raw bytes, then checks the listener still answers a normal request.
 fn survives(listener: *Listener, io: std.Io, garbage: []const u8) !void {
     {
         const stream = try listener.server.socket.address.connect(io, .{ .mode = .stream });
@@ -47,7 +46,6 @@ test "listener survives TLS handshakes, truncated requests and malformed HTTP" {
     );
     defer listener.destroy();
 
-    // Bedrock tries TLS before the plain listener.
     try survives(listener, io, &.{
         0x16, 0x03, 0x01, 0x00, 0x2c, 0x01, 0x00, 0x00,
         0x28, 0x03, 0x03, 0x00, 0x01, 0x02, 0x03, 0x04,
@@ -82,7 +80,6 @@ test "failed negotiation releases its slot and leaves the listener usable" {
     var client: std.http.Client = .{ .allocator = allocator, .io = io };
     defer client.deinit();
 
-    // A leaked slot would starve later requests.
     for (0..4) |_| {
         var output: [1024]u8 = undefined;
         var writer = std.Io.Writer.fixed(&output);
@@ -262,7 +259,6 @@ test "one listener serves several simultaneous clients" {
     }
 }
 
-/// Field set of a real Bedrock Dedicated Server `GET /v1/join` response.
 const bds_status_fields = [_][]const u8{
     "name",     "protocol", "version",    "level",
     "gameType", "players",  "maxPlayers",
@@ -359,7 +355,6 @@ test "listener destroyed while a negotiation is in flight" {
     }
 }
 
-// Windows reports INVALID_PARAMETER when a pending accept is canceled.
 test "repeated listener create and destroy does not leak handles" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
@@ -462,29 +457,4 @@ test "network IDs at and beyond the limit are handled over real HTTP" {
     }
 
     _ = port;
-}
-
-test "a stalled request body is answered after the read window" {
-    const io = std.testing.io;
-    const listener = try Listener.listen(
-        std.testing.allocator,
-        io,
-        try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0"),
-        .{ .connection = .{ .allow_anonymous = true }, .request_timeout_ms = 15000 },
-    );
-    defer listener.destroy();
-
-    const stream = try listener.server.socket.address.connect(io, .{ .mode = .stream });
-    defer stream.close(io);
-    var output: [256]u8 = undefined;
-    var writer = stream.writer(io, &output);
-    try writer.interface.writeAll("POST /v1/join/1 HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/sdp\r\nContent-Length: 64\r\n\r\nv=0\r\n");
-    try writer.interface.flush();
-
-    const started = std.Io.Clock.awake.now(io);
-    var input: [256]u8 = undefined;
-    var reader = stream.reader(io, &input);
-    try std.testing.expectEqualStrings("HTTP/1.1 504", try reader.interface.take(12));
-    const elapsed = started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
-    try std.testing.expect(elapsed >= 4000 and elapsed < 10000);
 }

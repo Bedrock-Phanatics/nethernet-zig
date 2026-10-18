@@ -304,14 +304,14 @@ test "HTTP reports identity rejection and peer creation failures" {
     }
 }
 
-test "HTTP times out a stalled request with a response" {
+test "HTTP answers a stalled request after the read window" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     const listener = try Listener.listen(
         allocator,
         io,
         try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0"),
-        .{ .connection = .{ .allow_anonymous = true }, .request_timeout_ms = 100 },
+        .{ .connection = .{ .allow_anonymous = true }, .request_timeout_ms = 15000 },
     );
     defer listener.destroy();
 
@@ -324,10 +324,13 @@ test "HTTP times out a stalled request with a response" {
     );
     try writer.interface.flush();
 
+    const started = std.Io.Clock.awake.now(io);
     var read_buffer: [512]u8 = undefined;
     var reader = stream.reader(io, &read_buffer);
     const prefix = try reader.interface.take(12);
     try std.testing.expectEqualStrings("504", prefix[9..12]);
+    const elapsed = started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
+    try std.testing.expect(elapsed >= 4000 and elapsed < 10000);
 }
 
 test "endpoint listener keeps one server identity key for its lifetime" {

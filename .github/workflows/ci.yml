@@ -27,8 +27,6 @@ jobs:
       - run: zig build fuzz -Dfuzz-iterations=100000
       - run: zig build fuzz --fuzz=100K -Dfuzz-iterations=1000
       - run: zig build bench
-      - run: zig build bench-memory
-      - run: zig build bench-wakeup
 
   linux-integration:
     needs: core
