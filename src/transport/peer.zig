@@ -208,6 +208,12 @@ pub const Peer = struct {
         c.rtcInitLogger(c.RTC_LOG_DEBUG, onNativeLog);
     }
 
+    /// Sets libdatachannel's worker count. It is read when libdatachannel starts, so call it before creating peers.
+    pub fn setNativeThreadPoolSize(count: u32) !void {
+        if (count == 0) return error.InvalidConfiguration;
+        try check(c.rtcSetThreadPoolSize(count));
+    }
+
     allocator: std.mem.Allocator,
     io: std.Io,
 
