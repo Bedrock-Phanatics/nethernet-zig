@@ -83,6 +83,19 @@ zig build fuzz
 sh tests/interop/run.sh   # requires Go
 ```
 
+## Performance
+
+```sh
+zig build bench                                    # codec, framing, and queue
+zig build stress -Doptimize=ReleaseFast -- --connections 100 --duration-ms 10000
+zig build stress -Doptimize=ReleaseFast -Dtracy=true -- --connections 100
+```
+
+`-Dtracy=true` fetches [ztracy](https://github.com/zig-gamedev/ztracy) and emits Tracy zones on
+the transport hot paths. Without it the zones compile to nothing. A busy server can lower
+libdatachannel's worker count with `Peer.setNativeThreadPoolSize` before creating connections.
+See [tests/bench/BASELINE.md](tests/bench/BASELINE.md) for measured results.
+
 ## License
 
 [Apache-2.0](LICENSE)
