@@ -63,11 +63,7 @@ pub const Discovery = struct {
         const buffers = try allocator.alloc(u8, codec.maximum_datagram * 4);
         errdefer allocator.free(buffers);
 
-        const socket = try address.bind(io, .{
-            .mode = .dgram,
-            .protocol = .udp,
-            .allow_broadcast = true,
-        });
+        const socket = try @import("socket.zig").bind(io, address);
         errdefer socket.close(io);
 
         var actual_options = options;
@@ -378,7 +374,7 @@ pub const Discovery = struct {
         const timeout = wake.deadline(std.Io.Clock.awake.now(self.io), timeout_ms);
         while (true) {
             try self.io.checkCancel();
-            self.wakeup.prepare();
+            const token = self.wakeup.prepare();
             self.receive_mutex.lockUncancelable(self.io);
             const message = self.incoming;
             self.incoming = null;
@@ -389,7 +385,7 @@ pub const Discovery = struct {
             if (self.closed) return error.ConnectionClosed;
             if (std.Io.Clock.awake.now(self.io).nanoseconds >= timeout.deadline.raw.nanoseconds)
                 return error.Timeout;
-            try self.wakeup.wait(self.io, timeout);
+            try self.wakeup.wait(self.io, token, timeout);
         }
     }
 

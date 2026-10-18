@@ -26,6 +26,7 @@ pub const Listener = struct {
         discovery: *Discovery,
         options: Options,
     ) !*Listener {
+        try conn.validateServerIdentity(options.connection);
         if (options.maximum_negotiations == 0 or
             options.maximum_negotiations_per_peer == 0 or
             options.maximum_negotiations_per_peer > options.maximum_negotiations)
@@ -85,7 +86,7 @@ pub const Listener = struct {
         try self.discovery.beginOperation();
         defer self.discovery.endOperation();
         while (true) {
-            self.wakeup.prepare();
+            const token = self.wakeup.prepare();
             if (try self.pollAcceptOwned()) |connection| return connection;
             var deadline = self.discovery.tickDeadline();
             var pending_work = false;
@@ -96,7 +97,7 @@ pub const Listener = struct {
                 }
             }
             try self.discovery.io.checkCancel();
-            if (!pending_work) try self.wakeup.wait(self.discovery.io, deadline);
+            if (!pending_work) try self.wakeup.wait(self.discovery.io, token, deadline);
         }
     }
 
@@ -301,7 +302,7 @@ pub fn dial(
     try connection.start();
 
     while (!connection.ready()) {
-        wakeup.prepare();
+        const token = wakeup.prepare();
         if (try discovery.poll(0)) |signal| {
             const matches_connection =
                 signal.connection_id == connection.id and
@@ -320,7 +321,7 @@ pub fn dial(
         }
         try discovery.io.checkCancel();
         if (!connection.ready() and !connection.peer.hasPending(true)) {
-            try wakeup.wait(discovery.io, wake.earliest(discovery.tickDeadline(), connection.waitDeadline()));
+            try wakeup.wait(discovery.io, token, wake.earliest(discovery.tickDeadline(), connection.waitDeadline()));
         }
     }
 

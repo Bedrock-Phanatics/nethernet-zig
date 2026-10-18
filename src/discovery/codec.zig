@@ -239,7 +239,7 @@ pub fn decodePayload(payload: []u8) !Decoded {
                         payload[20..28],
                         .little,
                     ),
-                    .data = payload[32..][0..length],
+                    .data = payload[32..],
                 },
             };
         },
@@ -254,6 +254,11 @@ pub fn decodePayload(payload: []u8) !Decoded {
 }
 
 test "all packet kinds roundtrip and reject tampering" {
+    const Tag = std.meta.Tag(Packet);
+    try std.testing.expectEqual(@as(u16, 0), @intFromEnum(Tag.request));
+    try std.testing.expectEqual(@as(u16, 1), @intFromEnum(Tag.response));
+    try std.testing.expectEqual(@as(u16, 2), @intFromEnum(Tag.message));
+
     const codec = Codec.init();
 
     var scratch: [256]u8 = undefined;
@@ -323,7 +328,7 @@ test "all packet kinds roundtrip and reject tampering" {
     }
 }
 
-test "declared message length excludes compatible trailing bytes" {
+test "declared message length keeps vanilla trailing signal bytes" {
     var payload = [_]u8{0} ** 41;
     std.mem.writeInt(u16, payload[0..2], payload.len, .little);
     std.mem.writeInt(u16, payload[2..4], 2, .little);
@@ -332,7 +337,28 @@ test "declared message length excludes compatible trailing bytes" {
     std.mem.writeInt(u32, payload[28..32], 4, .little);
     @memcpy(payload[32..], "PingEXTRA");
     const decoded = try decodePayload(&payload);
-    try std.testing.expectEqualStrings("Ping", decoded.packet.message.data);
+    try std.testing.expectEqualStrings("PingEXTRA", decoded.packet.message.data);
+}
+
+test "a truncated declared length still yields the whole vanilla signal" {
+    const signal =
+        "CONNECTREQUEST 3671553456937775104 v=0\r\n" ++
+        "a=candidate:1 1 udp 2130706431 192.168.0.2 52000 typ host generation 0\r\n";
+
+    var payload = [_]u8{0} ** (32 + signal.len);
+    std.mem.writeInt(u16, payload[0..2], payload.len, .little);
+    std.mem.writeInt(u16, payload[2..4], 2, .little);
+    std.mem.writeInt(u64, payload[4..12], 0x1020304050607080, .little);
+    std.mem.writeInt(u64, payload[20..28], 9, .little);
+    std.mem.writeInt(u32, payload[28..32], 38, .little);
+    @memcpy(payload[32..], signal);
+
+    const decoded = try decodePayload(&payload);
+    try std.testing.expectEqualStrings(signal, decoded.packet.message.data);
+    try std.testing.expectEqual(@as(u64, 9), decoded.packet.message.recipient_id);
+
+    std.mem.writeInt(u32, payload[28..32], signal.len + 1, .little);
+    try std.testing.expectError(error.MalformedPacket, decodePayload(&payload));
 }
 
 test "arbitrary datagrams and plaintext fail safely without allocations" {

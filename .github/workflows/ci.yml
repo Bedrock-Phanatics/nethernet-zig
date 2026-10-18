@@ -27,8 +27,6 @@ jobs:
       - run: zig build fuzz -Dfuzz-iterations=100000
       - run: zig build fuzz --fuzz=100K -Dfuzz-iterations=1000
       - run: zig build bench
-      - run: zig build bench-memory
-      - run: zig build bench-wakeup
 
   linux-integration:
     needs: core
@@ -44,6 +42,11 @@ jobs:
       - run: zig build test-integration --summary all
       - run: zig build test-integration -Doptimize=ReleaseSafe
       - run: zig build stress-smoke -Doptimize=ReleaseSafe
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: tests/interop/go.mod
+          cache-dependency-path: tests/interop/go.sum
+      - run: sh tests/interop/run.sh
 
   windows:
     needs: core
@@ -54,7 +57,15 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.16.0
+          # Restored Windows caches can reference missing Zig runtime libraries.
+          use-cache: false
       - run: powershell -ExecutionPolicy Bypass -File tools/setup-native.ps1
       - run: zig build -Doptimize=ReleaseSafe
       - run: zig build test-integration -Doptimize=ReleaseSafe
       - run: zig build stress-smoke -Doptimize=ReleaseSafe
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: tests/interop/go.mod
+          cache-dependency-path: tests/interop/go.sum
+      - run: sh tests/interop/run.sh
+        shell: bash

@@ -17,6 +17,7 @@ artifacts/
 *.key
 *.pfx
 *.p12
+*.der
 
 # Editors and operating systems
 .idea/

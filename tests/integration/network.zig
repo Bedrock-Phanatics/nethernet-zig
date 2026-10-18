@@ -296,7 +296,7 @@ test "real WebRTC survives loopback UDP loss duplication jitter and reordering" 
         const sent = std.Io.Clock.awake.now(io);
 
         while (true) {
-            server.prepareWait();
+            const token = server.prepareWait();
             if (try server.poll()) |event| switch (event) {
                 .message => |message| {
                     try std.testing.expectEqualSlices(
@@ -314,7 +314,7 @@ test "real WebRTC survives loopback UDP loss duplication jitter and reordering" 
             ).toMilliseconds() > 30_000;
             if (timed_out or proxy.failure.load(.acquire)) return error.ProxyFailed;
             if (!server.peer.hasPending(false)) {
-                try server.peer.wakeup.wait(io, timeoutAfter(sent, 30_000));
+                try server.peer.wakeup.wait(io, token, timeoutAfter(sent, 30_000));
             }
         }
     }
@@ -325,10 +325,10 @@ test "real WebRTC survives loopback UDP loss duplication jitter and reordering" 
 
     const drain_started = std.Io.Clock.awake.now(io);
     while (drain_started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds() < 200) {
-        server.prepareWait();
+        const token = server.prepareWait();
         try std.testing.expect((try server.poll()) == null);
         if (!server.peer.hasPending(false)) {
-            try server.peer.wakeup.wait(io, timeoutAfter(drain_started, 200));
+            try server.peer.wakeup.wait(io, token, timeoutAfter(drain_started, 200));
         }
     }
 }

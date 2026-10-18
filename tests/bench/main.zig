@@ -64,12 +64,12 @@ pub fn main(init: std.process.Init) !void {
         report(io, start, "discovery_decode", size, default_iterations, 0);
     }
 
-    for ([_]usize{ 32, 64, 128, 256, 512, 1024, 1400, 8192, 262143, 262144, payload_size }) |size| {
+    for ([_]usize{ 32, 64, 128, 256, 512, 1024, 1200, 1400, 8192, 65536, 262143, 262144, payload_size }) |size| {
         const iterations: usize = if (size > 8192) 1000 else default_iterations;
         try validateFraming(payload[0..size], frame, storage);
         const start = std.Io.Clock.awake.now(io);
         for (0..iterations) |_| {
-            var encoder = try framing.Encoder.init(payload[0..size], .reliable, payload.len);
+            var encoder = try framing.Encoder.init(payload[0..size], .reliable, payload.len, framing.maximum_segment_payload);
             var decoder = framing.Reassembler.init(storage, .reliable);
             while (try encoder.next(frame)) |part| {
                 if (try decoder.push(part)) |message| {
@@ -84,11 +84,10 @@ pub fn main(init: std.process.Init) !void {
             "frame_reassemble",
             size,
             iterations,
-            if (size <= framing.maximum_segment_payload) 0 else size,
+            size,
         );
     }
 
-    // Receive-only measurements use preframed input so encoder copies are not timed.
     for ([_]usize{ 32, 64, 128, 256, 512, 1024, 1400, 8192 }) |size| {
         frame[0] = 0;
         @memcpy(frame[1..][0..size], payload[0..size]);
@@ -104,7 +103,7 @@ pub fn main(init: std.process.Init) !void {
     const wire = try allocator.alloc(u8, payload_size + 3);
     defer allocator.free(wire);
     for ([_]usize{ framing.maximum_segment_payload + 1, payload_size }) |size| {
-        var encoder = try framing.Encoder.init(payload[0..size], .reliable, payload.len);
+        var encoder = try framing.Encoder.init(payload[0..size], .reliable, payload.len, framing.maximum_segment_payload);
         var offsets: [3]usize = undefined;
         var lengths: [3]usize = undefined;
         var count: usize = 0;
@@ -149,7 +148,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn validateFraming(payload: []const u8, frame: []u8, storage: []u8) !void {
-    var encoder = try framing.Encoder.init(payload, .reliable, storage.len);
+    var encoder = try framing.Encoder.init(payload, .reliable, storage.len, framing.maximum_segment_payload);
     var decoder = framing.Reassembler.init(storage, .reliable);
     var result: ?[]const u8 = null;
     while (try encoder.next(frame)) |part| result = try decoder.push(part);
