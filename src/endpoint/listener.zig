@@ -77,8 +77,7 @@ pub const Listener = struct {
         );
         errdefer allocator.free(slots);
 
-        // Closed requests leave TIME_WAIT sockets that block a restart on Linux. Windows does not need
-        // this, and its SO_REUSEADDR would let another process bind the port.
+        // TIME_WAIT from closed requests blocks a quick restart on Linux. Windows rebinds anyway.
         var server = try address.listen(io, .{ .reuse_address = builtin.os.tag != .windows });
         errdefer server.deinit(io);
 
@@ -176,8 +175,7 @@ pub const Listener = struct {
         self.allocator.destroy(self);
     }
 
-    // The token only holds the key and whole-second times, and signing is deterministic, so every
-    // connection in the same second gets the same bytes. Returns a copy owned by the caller.
+    // Tokens only change once a second and signing is deterministic, so one is shared per second.
     fn serverToken(self: *Listener, key: auth.KeyPair) ![]u8 {
         const now = std.Io.Clock.real.now(self.io).toSeconds();
         self.token_mutex.lockUncancelable(self.io);

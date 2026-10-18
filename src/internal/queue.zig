@@ -80,7 +80,6 @@ pub const Queue = struct {
 
         self.used_bytes -= entry.len;
         self.count -= 1;
-        // Restarting at zero keeps a mostly empty ring in the same few cache lines and pages.
         if (self.count == 0) {
             self.read_byte = 0;
             self.head = 0;

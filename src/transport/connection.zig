@@ -382,7 +382,7 @@ pub const Connection = struct {
                 .domain = self.options.server_identity_domain,
             };
         } else if (self.options.identity) |*identity| {
-            // Copied so callers can reuse or free their token once the connection exists.
+            // Copied so callers can free theirs.
             self.owned_token = try allocator.dupe(u8, identity.token);
             identity.token = self.owned_token.?;
         }
@@ -594,7 +594,7 @@ pub const Connection = struct {
     }
 
     fn pollInternal(self: *Connection, signals_only: bool) !?Event {
-        // An idle established connection has no deadlines, so only a peer callback can give it work.
+        // Established and idle means no deadlines, so only a peer callback can bring work.
         if (self.idle_sequence == self.peer.wakeup.sequence.load(.acquire)) return null;
 
         const zone = trace.zone(@src(), "connection.poll");
@@ -637,7 +637,7 @@ pub const Connection = struct {
             self.signal_buffer = null;
         }
 
-        // Gathering has finished by the time this scratch is released, so no larger local signal can follow.
+        // Gathering is done once this is released, so no larger local signal can follow.
         const scratch = if (self.negotiation_scratch) |negotiation| blk: {
             if (!self.established or self.peer.needsNegotiationBuffer()) break :blk negotiation;
             native.freeLazy(self.allocator, negotiation);

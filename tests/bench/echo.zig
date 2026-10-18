@@ -3,7 +3,6 @@ const nethernet = @import("nethernet");
 
 const Connection = nethernet.Connection;
 
-// Echo server for out-of-process load tests: one thread accepts, the main thread polls every connection.
 const Accepted = struct {
     mutex: std.Io.Mutex = .init,
     connections: std.ArrayList(*Connection) = .empty,

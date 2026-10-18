@@ -228,7 +228,6 @@ pub const Peer = struct {
         native_pool_configured.store(true, .release);
     }
 
-    // The native pool shares one lock, so workers past four mostly add contention.
     var native_pool_configured: std.atomic.Value(bool) = .init(false);
 
     fn configureNativePool() void {
@@ -756,7 +755,7 @@ pub const Peer = struct {
             if (self.queue_pop_test_hook) |hook| hook(self);
         }
 
-        // Every enqueue and state change signals the wakeup under the lock, so an unchanged sequence means still empty.
+        // Every enqueue and state change bumps the sequence under the lock, so an unchanged one means still empty.
         const sequence = self.wakeup.sequence.load(.acquire);
         if (self.idle_sequence == sequence) return null;
 

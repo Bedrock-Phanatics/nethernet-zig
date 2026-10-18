@@ -167,7 +167,6 @@ fn report(io: std.Io, start: std.Io.Timestamp, operation: []const u8, bytes: usi
     );
 }
 
-// A priority pop shifts every byte queued behind the signal.
 fn backlogBenchmark(io: std.Io, allocator: std.mem.Allocator) !void {
     const fragment = [_]u8{0} ++ [_]u8{42} ** 1199;
     const bytes = try allocator.alloc(u8, 1024 * 1024);

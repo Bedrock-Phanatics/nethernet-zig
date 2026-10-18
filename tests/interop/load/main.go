@@ -18,7 +18,6 @@ import (
 	"github.com/df-mc/go-nethernet/endpoint"
 )
 
-// Drives many connections against an HTTP signaling endpoint, or serves an echo endpoint with go-nethernet.
 func main() {
 	mode := flag.String("mode", "load", "load or serve")
 	addr := flag.String("addr", "127.0.0.1:18760", "endpoint address")
@@ -66,7 +65,7 @@ func serve(addr string) {
 	}
 }
 
-// Same size mix as the stress harness bedrock profile.
+// Same mix as the stress harness bedrock profile.
 func payloadSize(sequence uint64) int {
 	switch s := sequence % 100; {
 	case s < 35:

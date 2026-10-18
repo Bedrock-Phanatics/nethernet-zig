@@ -18,7 +18,7 @@ case "$mode" in
       -Dnative-sanitizer="$sanitizer" -- "$@"
     ;;
   zig-tsan)
-    # Only the Zig side is instrumented, so only reports with a racing access in Zig code count.
+    # Only Zig code is instrumented, so reports inside native code are noise.
     zig build stress -Doptimize=ReleaseSafe -Dsanitize-thread=true -- "$@"
     ;;
   valgrind)

@@ -95,7 +95,6 @@ pub fn decode(bytes: []const u8) !KeyPair {
 pub fn loadOrCreate(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !KeyPair {
     const cwd: std.Io.Dir = .cwd();
 
-    // Stop retrying if another process keeps replacing the file.
     for (0..8) |_| {
         if (cwd.readFileAlloc(io, path, allocator, .limited(maximum_size))) |bytes| {
             defer {
