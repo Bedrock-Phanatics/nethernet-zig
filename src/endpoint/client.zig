@@ -190,7 +190,7 @@ pub fn dial(
     defer allocator.free(answer);
 
     while (!peer.ready()) {
-        peer.prepareWait();
+        const token = peer.prepareWait();
         if (try peer.pollNegotiation()) |event| {
             switch (event) {
                 .signal => |signal| {
@@ -220,7 +220,7 @@ pub fn dial(
             }
         }
 
-        try peer.wait(true);
+        try peer.wait(token, true);
     }
 
     return peer;

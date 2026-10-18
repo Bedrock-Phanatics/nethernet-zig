@@ -55,7 +55,6 @@ test "native peers negotiate and exchange both channel types" {
 
         var received = false;
         while (!received) {
-            b.wakeup.prepare();
             if (started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds() > 20_000) {
                 return error.Timeout;
             }
@@ -277,7 +276,6 @@ test "a negotiated 1024-byte SCTP limit bounds fragments and unreliable sends" {
     var fragments: usize = 0;
     var message: ?[]const u8 = null;
     while (message == null) {
-        a.wakeup.prepare();
         if (started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds() > 25_000) {
             return error.Timeout;
         }
@@ -306,7 +304,6 @@ test "a negotiated 1024-byte SCTP limit bounds fragments and unreliable sends" {
     try a.send(payload, .reliable, buffer);
 
     while (true) {
-        b.wakeup.prepare();
         if (started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds() > 30_000) {
             return error.Timeout;
         }

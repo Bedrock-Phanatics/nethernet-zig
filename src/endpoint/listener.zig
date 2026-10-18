@@ -230,7 +230,7 @@ pub const Listener = struct {
             const stream = self.server.accept(self.io) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
                 error.ConnectionAborted, error.BlockedByFirewall, error.ProtocolFailure, error.WouldBlock => continue,
-                error.ProcessFdQuotaExceeded, error.SystemFdQuotaExceeded, error.SystemResources => {
+                error.ProcessFdQuotaExceeded, error.SystemFdQuotaExceeded, error.SystemResources, error.Unexpected => {
                     try std.Io.sleep(self.io, .fromMilliseconds(100), .awake);
                     continue;
                 },
@@ -531,7 +531,7 @@ pub const Listener = struct {
         }
 
         while (!answered or !connection.ready()) {
-            connection.prepareWait();
+            const token = connection.prepareWait();
             if (previous_diagnostics) |previous| {
                 const state = connection.state();
                 const diagnostics = connection.diagnostics();
@@ -597,7 +597,7 @@ pub const Listener = struct {
                 }
             }
 
-            try connection.wait(true);
+            try connection.wait(token, true);
         }
 
         if (try self.accepted.put(self.io, &.{connection}, 0) == 0)

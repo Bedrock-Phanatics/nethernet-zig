@@ -15,6 +15,7 @@ pub const SelectedIceAddresses = native.SelectedIceAddresses;
 
 pub const maximum_network_id_length = 4096;
 const maximum_signal_size = 1024 * 1024;
+const maximum_local_signal_size = 64 * 1024;
 const maximum_pending_candidate_bytes = 64 * 1024;
 const maximum_pending_candidates = 32;
 
@@ -338,7 +339,7 @@ pub const Connection = struct {
         const packet_scratch = try allocator.alloc(u8, packet_buffer_size);
         errdefer allocator.free(packet_scratch);
 
-        const negotiation_scratch = try allocator.alloc(u8, maximum_signal_size + 1);
+        const negotiation_scratch = try allocator.alloc(u8, @max(maximum_local_signal_size, packet_buffer_size));
         errdefer allocator.free(negotiation_scratch);
 
         const send_buffer = try allocator.alloc(u8, packet_buffer_size);
@@ -594,9 +595,11 @@ pub const Connection = struct {
             self.close();
         }
 
-        const now = std.Io.Clock.awake.now(self.io);
+        if (!self.established and self.peer.ready()) self.established = true;
 
-        if (self.peer.ready()) self.established = true;
+        const timed = !self.established or
+            self.assemblies[0].started != null or self.assemblies[1].started != null;
+        const now = if (timed) std.Io.Clock.awake.now(self.io) else undefined;
 
         if (!self.established) {
             const started = self.answered orelse self.started;
@@ -746,20 +749,23 @@ pub const Connection = struct {
         return result;
     }
 
-    pub fn prepareWait(self: *Connection) void {
-        self.peer.wakeup.prepare();
+    pub const WaitToken = wake.Wakeup.Token;
+
+    /// Take a token before polling and pass it to wait, so events that land in between are not missed.
+    pub fn prepareWait(self: *Connection) WaitToken {
+        return self.peer.wakeup.prepare();
     }
 
-    pub fn wait(self: *Connection, negotiation: bool) !void {
+    pub fn wait(self: *Connection, token: WaitToken, negotiation: bool) !void {
         try self.io.checkCancel();
         if (self.peer.hasPending(negotiation)) return;
         if (negotiation and self.ready()) return;
-        try self.peer.wakeup.wait(self.io, self.waitDeadline());
+        try self.peer.wakeup.wait(self.io, token, self.waitDeadline());
     }
 
     pub fn receive(self: *Connection) !Message {
         while (true) {
-            self.prepareWait();
+            const token = self.prepareWait();
             if (try self.poll()) |event| {
                 switch (event) {
                     .message => |message| return message,
@@ -771,7 +777,7 @@ pub const Connection = struct {
                 }
             }
 
-            try self.wait(false);
+            try self.wait(token, false);
         }
     }
 
@@ -936,6 +942,18 @@ test "cancel and close unblock receive" {
     var closed = try io.concurrent(Connection.receive, .{connection});
     connection.close();
     try std.testing.expectError(error.ConnectionClosed, closed.await(io));
+}
+
+test "graceful close from another thread unblocks receive" {
+    const io = std.testing.io;
+    for (0..50) |_| {
+        const connection = try Connection.create(std.testing.allocator, io, .client, 1, "remote", .{});
+        defer connection.destroy();
+        connection.established = true;
+        var receiving = try io.concurrent(Connection.receive, .{connection});
+        try connection.closeGracefully();
+        try std.testing.expectError(error.ConnectionClosed, receiving.await(io));
+    }
 }
 
 test "receive drains partial messages without waiting" {
@@ -1178,14 +1196,14 @@ test "candidate before answer replays after the remote description" {
     var offer: ?[]u8 = null;
     defer if (offer) |value| allocator.free(value);
     while (offer == null) {
-        client.prepareWait();
+        const client_token = client.prepareWait();
         if (try client.pollNegotiation()) |event| switch (event) {
             .signal => |signal| if (std.mem.eql(u8, signal.kind, Signal.offer)) {
                 offer = try allocator.dupe(u8, signal.data);
             },
             .message => return error.UnexpectedMessage,
         };
-        if (offer == null) try client.wait(true);
+        if (offer == null) try client.wait(client_token, true);
     }
     try server.applySignal(.{
         .kind = Signal.offer,
@@ -1199,7 +1217,7 @@ test "candidate before answer replays after the remote description" {
     var candidate: ?[]u8 = null;
     defer if (candidate) |value| allocator.free(value);
     while (answer == null or candidate == null) {
-        server.prepareWait();
+        const server_token = server.prepareWait();
         if (try server.pollNegotiation()) |event| switch (event) {
             .signal => |signal| {
                 if (std.mem.eql(u8, signal.kind, Signal.answer) and answer == null)
@@ -1209,7 +1227,7 @@ test "candidate before answer replays after the remote description" {
             },
             .message => return error.UnexpectedMessage,
         };
-        if (answer == null or candidate == null) try server.wait(true);
+        if (answer == null or candidate == null) try server.wait(server_token, true);
     }
 
     try client.applySignal(.{

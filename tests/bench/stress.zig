@@ -80,6 +80,7 @@ const Metrics = struct {
 
     queue_high_water_bytes: usize = 0,
     buffered_high_water_bytes: usize = 0,
+    send_buffer_bytes: usize = 0,
 
     max_loop_gap_ns: u64 = 0,
 };
@@ -472,6 +473,7 @@ pub fn main(init: std.process.Init) !void {
     const rss_end = residentBytes(io);
 
     for (pairs[0..created]) |pair| {
+        metrics.send_buffer_bytes += pair.client.send_buffer.len + pair.server.send_buffer.len;
         pair.destroy();
     }
 
@@ -743,8 +745,6 @@ fn pumpServer(
     var processed: usize = 0;
 
     while (processed < budget) : (processed += 1) {
-        pair.server.prepareWait();
-
         const event =
             try pair.server.poll() orelse break;
 
@@ -794,8 +794,6 @@ fn pumpClient(
     var processed: usize = 0;
 
     while (processed < config.poll_budget) : (processed += 1) {
-        pair.client.prepareWait();
-
         const event =
             try pair.client.poll() orelse break;
 
@@ -1463,7 +1461,8 @@ fn printReport(
             "\"messages_per_second\":{d:.1}," ++
             "\"sent_per_second\":{d:.1}," ++
             "\"bytes\":{d}," ++
-            "\"mib_per_second\":{d:.2},",
+            "\"mib_per_second\":{d:.2}," ++
+            "\"send_buffer_bytes\":{d},",
         .{
             @tagName(builtin.os.tag),
             @tagName(builtin.cpu.arch),
@@ -1508,6 +1507,7 @@ fn printReport(
             @as(f64, @floatFromInt(metrics.bytes)) /
                 safe_seconds /
                 (1024 * 1024),
+            metrics.send_buffer_bytes,
         },
     );
 

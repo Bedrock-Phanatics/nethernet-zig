@@ -173,13 +173,13 @@ pub fn receiveDeadline(connection: *Connection, started: std.Io.Timestamp) !neth
     while (true) {
         if (started.durationTo(std.Io.Clock.awake.now(connection.io)).toMilliseconds() >= 15000)
             return error.Timeout;
-        connection.prepareWait();
+        const token = connection.prepareWait();
         if (try connection.poll()) |event| switch (event) {
             .message => |message| return message,
             .signal => return error.UnexpectedSignal,
         };
         if (!connection.peer.hasPending(false)) {
-            try connection.peer.wakeup.wait(connection.io, .{ .deadline = .{
+            try connection.peer.wakeup.wait(connection.io, token, .{ .deadline = .{
                 .raw = started.addDuration(.fromMilliseconds(15000)),
                 .clock = .awake,
             } });

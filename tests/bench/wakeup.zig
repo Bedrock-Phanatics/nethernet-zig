@@ -37,7 +37,7 @@ fn run(io: std.Io, mode: Mode) !void {
     defer producer.cancel(io) catch {};
     for (&latency) |*sample| {
         while (true) {
-            harness.wakeup.prepare();
+            const token = harness.wakeup.prepare();
             harness.mutex.lockUncancelable(io);
             const packet = try harness.queue.pop(&output);
             const sent = harness.sent;
@@ -49,7 +49,7 @@ fn run(io: std.Io, mode: Mode) !void {
             }
             switch (mode) {
                 .polling_1ms => try std.Io.sleep(io, .fromMilliseconds(1), .awake),
-                .event_driven => try harness.wakeup.wait(io, wake.deadline(std.Io.Clock.awake.now(io), 5000)),
+                .event_driven => try harness.wakeup.wait(io, token, wake.deadline(std.Io.Clock.awake.now(io), 5000)),
             }
         }
     }
@@ -60,10 +60,10 @@ fn run(io: std.Io, mode: Mode) !void {
     const limit = wake.deadline(start, 1000);
     var idle_waits: usize = 0;
     while (std.Io.Clock.awake.now(io).nanoseconds < limit.deadline.raw.nanoseconds) {
-        harness.wakeup.prepare();
+        const token = harness.wakeup.prepare();
         switch (mode) {
             .polling_1ms => try std.Io.sleep(io, .fromMilliseconds(1), .awake),
-            .event_driven => try harness.wakeup.wait(io, limit),
+            .event_driven => try harness.wakeup.wait(io, token, limit),
         }
         idle_waits += 1;
     }

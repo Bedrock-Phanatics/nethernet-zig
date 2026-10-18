@@ -198,7 +198,7 @@ pub const Options = struct {
     port_range_end: u16 = 0,
     enable_ice_udp_mux: bool = false,
     disable_trickle: bool = false,
-    drop_unreliable_on_pressure: bool = false,
+    drop_unreliable_on_pressure: bool = true,
     unreliable_reserve_bytes: usize = framing.maximum_segment_payload + 1,
     unreliable_reserve_entries: usize = 1,
 };
@@ -230,6 +230,7 @@ pub const Peer = struct {
     drain_queued_on_close: bool = false,
     send_stopped: bool = false,
     gathered: bool = false,
+    channels_open: bool = false,
     ice_state: IceState = .new,
     gathering_state: GatheringState = .new,
     description_sent: bool = false,
@@ -450,6 +451,7 @@ pub const Peer = struct {
     const NativeHandles = struct {
         id: c_int,
         channels: [2]c_int,
+        open: bool = false,
     };
 
     fn acquireNativeHandles(self: *Peer) ?NativeHandles {
@@ -471,7 +473,18 @@ pub const Peer = struct {
         }
 
         self.active_native_queries += 1;
-        return .{ .id = self.id, .channels = self.channels };
+        return .{ .id = self.id, .channels = self.channels, .open = self.channels_open };
+    }
+
+    // Channel state lives behind libdatachannel's global lock, so it is only queried until both open.
+    fn channelsOpen(self: *Peer, handles: NativeHandles) bool {
+        if (handles.open) return true;
+        if (handles.channels[0] < 0 or handles.channels[1] < 0 or
+            !c.rtcIsOpen(handles.channels[0]) or !c.rtcIsOpen(handles.channels[1])) return false;
+        self.mutex.lockUncancelable(self.io);
+        self.channels_open = true;
+        self.mutex.unlock(self.io);
+        return true;
     }
 
     fn negotiatedSegmentPayload(self: *Peer, id: c_int) !usize {
@@ -576,11 +589,7 @@ pub const Peer = struct {
     pub fn ready(self: *Peer) bool {
         const handles = self.acquireReadyChannels() orelse return false;
         defer self.releaseNativeHandles();
-
-        return handles.channels[0] >= 0 and
-            handles.channels[1] >= 0 and
-            c.rtcIsOpen(handles.channels[0]) and
-            c.rtcIsOpen(handles.channels[1]);
+        return self.channelsOpen(handles);
     }
 
     pub fn offer(self: *Peer) !void {
@@ -797,12 +806,7 @@ pub const Peer = struct {
         defer if (handles_acquired) self.releaseNativeHandles();
 
         const channels = handles.channels;
-
-        if (channels[0] < 0 or channels[1] < 0 or
-            !c.rtcIsOpen(channels[0]) or !c.rtcIsOpen(channels[1]))
-        {
-            return error.InvalidState;
-        }
+        if (!self.channelsOpen(handles)) return error.InvalidState;
 
         const segment = try self.negotiatedSegmentPayload(handles.id);
 
@@ -1218,7 +1222,7 @@ fn gracefulDrain(
     const started = std.Io.Clock.awake.now(io);
     const timeout = wake.deadline(started, timeout_ms);
     while (true) {
-        target.wakeup.prepare();
+        const token = target.wakeup.prepare();
         switch (target.drainStatus()) {
             .open => {},
             .closed => return,
@@ -1230,7 +1234,7 @@ fn gracefulDrain(
         }
         if (std.Io.Clock.awake.now(io).nanoseconds >= timeout.deadline.raw.nanoseconds)
             return error.Timeout;
-        try target.wakeup.wait(io, timeout);
+        try target.wakeup.wait(io, token, timeout);
     }
 }
 
@@ -1640,7 +1644,7 @@ test "native handle lease keeps handles live until close can delete them" {
 
     const handles = peer.acquireNativeHandles().?;
     var released = false;
-    peer.wakeup.prepare();
+    const token = peer.wakeup.prepare();
     var closing = try io.concurrent(Peer.close, .{peer});
     var closing_done = false;
     defer if (!closing_done) {
@@ -1648,7 +1652,7 @@ test "native handle lease keeps handles live until close can delete them" {
         closing.await(io);
     };
 
-    try peer.wakeup.wait(io, wake.deadline(std.Io.Clock.awake.now(io), 1000));
+    try peer.wakeup.wait(io, token, wake.deadline(std.Io.Clock.awake.now(io), 1000));
     try std.testing.expectEqual(State.closed, peer.getState());
     try std.testing.expectEqual(handles.id, peer.id);
 
@@ -1733,9 +1737,9 @@ test "native callback queue exhaustion fails closed with bounded storage" {
 
     peer.enqueue(3, "a");
     peer.enqueue(3, "b");
-    peer.wakeup.prepare();
+    const token = peer.wakeup.prepare();
     peer.enqueue(3, "c");
-    try std.testing.expect(peer.wakeup.event.isSet());
+    try std.testing.expect(peer.wakeup.signaled(token));
 
     try std.testing.expectEqual(State.failed, peer.getState());
     try std.testing.expectEqual(@as(usize, 2), peer.queue.count);
@@ -1751,32 +1755,31 @@ test "state changes and errors wake subscribers" {
     var wakeup: Wakeup = .{};
     peer.subscribe(&wakeup);
     defer peer.subscribe(null);
-    wakeup.prepare();
+    var token = wakeup.prepare();
     Peer.onGathered(0, c.RTC_GATHERING_COMPLETE, peer);
-    try std.testing.expect(wakeup.event.isSet());
-    wakeup.prepare();
+    try std.testing.expect(wakeup.signaled(token));
+    token = wakeup.prepare();
     Peer.onState(0, c.RTC_CONNECTING, peer);
-    try std.testing.expect(wakeup.event.isSet());
-    wakeup.prepare();
+    try std.testing.expect(wakeup.signaled(token));
+    token = wakeup.prepare();
     Peer.onOpen(0, peer);
-    try std.testing.expect(wakeup.event.isSet());
-    wakeup.prepare();
+    try std.testing.expect(wakeup.signaled(token));
+    token = wakeup.prepare();
     Peer.onBufferedAmountLow(0, peer);
-    try std.testing.expect(wakeup.event.isSet());
-    wakeup.prepare();
+    try std.testing.expect(wakeup.signaled(token));
+    token = wakeup.prepare();
     Peer.onError(0, null, peer);
-    try std.testing.expect(wakeup.event.isSet());
+    try std.testing.expect(wakeup.signaled(token));
     try std.testing.expectEqual(State.failed, peer.getState());
-    wakeup.prepare();
+    token = wakeup.prepare();
     peer.close();
-    try std.testing.expect(wakeup.event.isSet());
+    try std.testing.expect(wakeup.signaled(token));
 }
 
-test "opt-in unreliable drops preserve capacity for reliable traffic" {
+test "unreliable drops preserve capacity for reliable traffic" {
     const peer = try Peer.create(std.testing.allocator, std.testing.io, .{
         .queue_bytes = framing.maximum_segment_payload + 1,
         .queue_entries = 3,
-        .drop_unreliable_on_pressure = true,
         .unreliable_reserve_bytes = 8,
         .unreliable_reserve_entries = 1,
     });
