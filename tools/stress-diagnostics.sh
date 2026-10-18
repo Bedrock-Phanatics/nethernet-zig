@@ -17,6 +17,10 @@ case "$mode" in
     zig build stress -Doptimize=ReleaseSafe -Dnative-prefix="$prefix" \
       -Dnative-sanitizer="$sanitizer" -- "$@"
     ;;
+  zig-tsan)
+    # Only the Zig side is instrumented, so only reports with a racing access in Zig code count.
+    zig build stress -Doptimize=ReleaseSafe -Dsanitize-thread=true -- "$@"
+    ;;
   valgrind)
     zig build stress-install -Doptimize=ReleaseSafe
     LD_LIBRARY_PATH="$(pwd)/.deps/native/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
@@ -24,7 +28,7 @@ case "$mode" in
       --show-leak-kinds=definite,indirect zig-out/bin/transport-stress "$@"
     ;;
   *)
-    echo "usage: tools/stress-diagnostics.sh asan|tsan|valgrind [stress arguments...]" >&2
+    echo "usage: tools/stress-diagnostics.sh asan|tsan|zig-tsan|valgrind [stress arguments...]" >&2
     exit 2
     ;;
 esac

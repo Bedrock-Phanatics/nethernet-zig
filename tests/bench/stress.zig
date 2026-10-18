@@ -5,6 +5,13 @@ const nethernet = @import("nethernet");
 const Connection = nethernet.Connection;
 const Reliability = nethernet.Reliability;
 
+// Zig links TSan statically, so it must start before libstdc++ constructors take their first lock.
+extern fn __tsan_init() callconv(.c) void;
+const tsan_preinit = [1]*const fn () callconv(.c) void{&__tsan_init};
+comptime {
+    if (builtin.sanitize_thread) @export(&tsan_preinit, .{ .name = "nethernet_tsan_preinit", .section = ".preinit_array" });
+}
+
 const Config = struct {
     connections: usize = 100,
     duration_ms: u64 = 30_000,

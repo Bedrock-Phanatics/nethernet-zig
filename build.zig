@@ -103,6 +103,7 @@ pub fn build(b: *std.Build) void {
     if (handshake_pairs == 0 or handshake_pairs > 100) @panic("handshake-pairs must be 1-100");
 
     const tracy = b.option(bool, "tracy", "Emit Tracy profiler zones") orelse false;
+    const sanitize_thread = b.option(bool, "sanitize-thread", "Instrument nethernet and the stress harness with TSan") orelse false;
 
     const build_options = b.addOptions();
     build_options.addOption(usize, "fuzz_iterations", fuzz_iterations);
@@ -119,6 +120,7 @@ pub fn build(b: *std.Build) void {
     });
     addNative(b, nethernet, target, native_prefix);
     nethernet.addOptions("trace_options", trace_options);
+    if (sanitize_thread) nethernet.sanitize_thread = true;
     if (tracy) {
         if (b.lazyDependency("ztracy", .{
             .target = target,
@@ -242,6 +244,7 @@ pub fn build(b: *std.Build) void {
 
     const stress_module = createModule(b, "tests/bench/stress.zig", target, optimize);
     stress_module.addImport("nethernet", nethernet);
+    if (sanitize_thread) stress_module.sanitize_thread = true;
     if (target.result.os.tag == .windows) stress_module.linkSystemLibrary("psapi", .{});
     if (native_sanitizer) |sanitizer| {
         stress_module.linkSystemLibrary(switch (sanitizer) {
