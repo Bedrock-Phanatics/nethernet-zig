@@ -499,3 +499,88 @@ test "exhausted UDP port range does not emit a non-trickle offer" {
     }
     return error.Timeout;
 }
+
+test "ICE UDP mux serves concurrent connections from one server port" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const address = try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0");
+    const probe = try address.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    const port = probe.address.getPort();
+    probe.close(io);
+
+    var clients: [3]*Connection = undefined;
+    var servers: [3]*Connection = undefined;
+    var created: usize = 0;
+    defer for (clients[0..created], servers[0..created]) |client, server| {
+        client.destroy();
+        server.destroy();
+    };
+
+    while (created < clients.len) {
+        const id: u64 = created + 1;
+        clients[created] = try Connection.create(allocator, io, .client, id, "server", .{
+            .native = .{ .disable_trickle = true, .bind_address = "127.0.0.1" },
+        });
+        errdefer clients[created].destroy();
+        servers[created] = try Connection.create(allocator, io, .server, id, "client", .{
+            .native = .{
+                .disable_trickle = true,
+                .bind_address = "127.0.0.1",
+                .port_range_begin = port,
+                .port_range_end = port,
+                .enable_ice_udp_mux = true,
+            },
+            .allow_anonymous = true,
+        });
+        created += 1;
+    }
+    for (clients) |client| try client.start();
+
+    const started = std.Io.Clock.awake.now(io);
+    var ready = false;
+    while (!ready) {
+        if (started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds() > 20_000)
+            return error.Timeout;
+        ready = true;
+        var pending = false;
+        for (clients, servers) |client, server| {
+            for (
+                [_]*Connection{ client, server },
+                [_]*Connection{ server, client },
+                [_][]const u8{ "client", "server" },
+            ) |source, destination, name| {
+                if (try source.pollNegotiation()) |event| switch (event) {
+                    .signal => |signal| {
+                        var routed = signal;
+                        routed.network_id = name;
+                        try destination.applySignal(routed);
+                    },
+                    else => return error.UnexpectedEvent,
+                };
+            }
+            ready = ready and client.ready() and server.ready();
+            pending = pending or client.peer.hasPending(true) or server.peer.hasPending(true);
+        }
+        if (!ready and !pending) try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    }
+
+    var expected_local: [64]u8 = undefined;
+    var expected_len: usize = 0;
+    for (clients, servers, 0..) |client, server, index| {
+        var local: [64]u8 = undefined;
+        var remote: [64]u8 = undefined;
+        const selected = (try server.selectedIceAddresses(&local, &remote)) orelse
+            return error.NoSelectedPair;
+        if (index == 0) {
+            @memcpy(expected_local[0..selected.local.len], selected.local);
+            expected_len = selected.local.len;
+        } else {
+            try std.testing.expectEqualStrings(expected_local[0..expected_len], selected.local);
+        }
+
+        const payload = [_]u8{@intCast(index)} ** 3000;
+        try client.send(&payload, .reliable);
+        const message = try server.receive();
+        try std.testing.expectEqualSlices(u8, &payload, message.data);
+    }
+}
