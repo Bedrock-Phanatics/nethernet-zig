@@ -10,7 +10,7 @@ NetherNet uses native components under their respective licenses:
 - plog — MIT
 
 The exact libdatachannel and Mbed TLS revisions are pinned by tools/setup-native.*.
-Media and WebSocket support are disabled. The repository patches
-libdatachannel's SCTP receive bounds handling; when distributing native
-binaries, retain applicable upstream notices and satisfy the source-disclosure
-requirements of MPL-2.0 for modified MPL-covered files.
+Media and WebSocket support are disabled. tools/*.patch modifies
+libdatachannel, libjuice and usrsctp; when distributing native binaries, retain
+applicable upstream notices and satisfy the source-disclosure requirements of
+MPL-2.0 for modified MPL-covered files.

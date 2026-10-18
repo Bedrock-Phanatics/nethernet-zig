@@ -1,29 +1,26 @@
 # NetherNet
 
-A Zig implementation of Minecraft Bedrock's NetherNet transport, built on libdatachannel.
+A Zig implementation of Minecraft Bedrock's NetherNet transport, built on
+[libdatachannel](https://github.com/paullouisageneau/libdatachannel).
 
-- HTTP signaling (`/v1/join`) and LAN discovery
-- Signed identities verified against Minecraft's authorization keys
-- Reliable and unreliable channels with fragmentation and reassembly
-- Bounded memory, backpressure, and connection diagnostics
-
-Tested with vanilla Bedrock 1.26.52 and against [go-nethernet](https://github.com/df-mc/go-nethernet).
+Works with vanilla Bedrock 1.26.52 and [go-nethernet](https://github.com/df-mc/go-nethernet).
 
 ## Requirements
 
 - Zig 0.16.0
-- Git, CMake, and a C/C++ toolchain
-- Windows x86_64 or Linux x86_64
+- Git, CMake and a C/C++ toolchain
+- Linux or Windows, x86_64
 
 ## Build
 
 ```sh
-sh tools/setup-native.sh                                  # Linux
+sh tools/setup-native.sh                                         # Linux
 powershell -ExecutionPolicy Bypass -File tools/setup-native.ps1  # Windows
 zig build -Doptimize=ReleaseSafe
 ```
 
-Use `-Dnative-prefix=<path>` to point at an existing libdatachannel build.
+The setup script builds a patched libdatachannel into `.deps/native`. Use `-Dnative-prefix=<path>`
+to point at another build.
 
 ## Usage
 
@@ -49,29 +46,39 @@ try connection.send(message.data, message.reliability);
 ```
 
 Keep the identity file across restarts so players only confirm the server once.
-`allow_anonymous = true` accepts clients without an identity, for testing.
 
-## Examples
-
-| Example | Description |
+| API | Purpose |
 | --- | --- |
-| [server.zig](examples/server.zig) / [client.zig](examples/client.zig) | Local echo server and client |
-| [minecraft.zig](examples/minecraft.zig) | Accepts a vanilla client and reports each transport stage |
+| `EndpointListener` | HTTP signaling server, `accept` returns established connections |
+| `dialEndpoint` | Connects to an HTTP signaling server |
+| `LanListener`, `dialLan` | LAN discovery and signaling |
+| `Connection` | `send`, `receive`, `poll`, `wait`, `closeGracefully`, `diagnostics` |
+| `Wakeup` | One wait across many connections via `connection.peer.subscribe` |
+| `identity_issuer.Authority` | Verifies client identities against Minecraft's keys |
+| `Peer.setNativeThreadPoolSize` | Native worker count, at most four by default |
 
-```sh
-./zig-out/bin/minecraft --trace
-```
-
-Add a server at your machine's address, port `19132`, and join. The example
-stops after the client's first packet since it does not implement gameplay.
+Messages returned by `receive` and `poll` are borrowed until the next call. Set
+`allow_anonymous = true` to accept clients without an identity, for testing.
 
 ## Networking
 
 | Port | Protocol | Purpose |
 | --- | --- | --- |
 | 19132 | TCP | HTTP signaling |
-| Negotiated | UDP | WebRTC traffic, fixed with `port_range_begin`/`port_range_end` |
+| Negotiated | UDP | WebRTC, fixed with `port_range_begin`/`port_range_end` |
 | 7551 | UDP | LAN discovery |
+
+Every connection gets its own UDP socket by default. `.native = .{ .enable_ice_udp_mux = true }`
+shares one socket and uses less CPU, but on Linux raise `net.core.rmem_max` before serving many
+players with it.
+
+## Examples
+
+```sh
+zig build
+./zig-out/bin/minecraft --trace   # accepts a vanilla client on port 19132
+./zig-out/bin/server              # echo server for ./zig-out/bin/client
+```
 
 ## Tests
 
@@ -79,18 +86,14 @@ stops after the client's first packet since it does not implement gameplay.
 zig build test
 zig build test-integration -Doptimize=ReleaseSafe
 zig build fuzz
-sh tests/interop/run.sh   # requires Go
-```
-
-## Performance
-
-```sh
-zig build bench                                    # codec, framing, and queue
 zig build stress -Doptimize=ReleaseFast -- --connections 100 --duration-ms 10000
-zig build stress -Doptimize=ReleaseFast -Dtracy=true -- --connections 100
+sh tests/interop/run.sh            # needs Go
 ```
 
-`-Dtracy=true` fetches [ztracy](https://github.com/zig-gamedev/ztracy) and emits Tracy zones on
-the transport hot paths. Without it the zones compile to nothing. A busy server can lower
-libdatachannel's worker count with `Peer.setNativeThreadPoolSize` before creating connections.
-See [tests/bench/BASELINE.md](tests/bench/BASELINE.md) for measured results.
+`tools/stress-diagnostics.sh asan|tsan|zig-tsan|valgrind` runs the stress harness under sanitizers
+on Linux. `zig build echo-install` and `tests/interop/load` measure a server against go-nethernet
+clients from another process.
+
+## License
+
+Apache-2.0. Native dependencies are listed in [NOTICE](NOTICE).
