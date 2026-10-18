@@ -204,6 +204,13 @@ pub const Listener = struct {
     }
 
     const ResponseState = enum(u8) { pending, committed, timed_out };
+    const read_timeout_ms = 5000;
+
+    fn requestTimer(io: std.Io, request_read: *const std.atomic.Value(bool), total_ms: u32) std.Io.Cancelable!void {
+        const read_ms = @min(read_timeout_ms, total_ms);
+        try std.Io.sleep(io, .fromMilliseconds(read_ms), .awake);
+        if (request_read.load(.acquire)) try std.Io.sleep(io, .fromMilliseconds(total_ms - read_ms), .awake);
+    }
 
     fn respond(
         request: *std.http.Server.Request,
@@ -253,6 +260,7 @@ pub const Listener = struct {
 
     fn handleTimed(self: *Listener, stream: std.Io.net.Stream) !void {
         var response_state = std.atomic.Value(ResponseState).init(.pending);
+        var request_read = std.atomic.Value(bool).init(false);
         const Result = union(enum) {
             done: anyerror!void,
             timeout: std.Io.Cancelable!void,
@@ -262,16 +270,9 @@ pub const Listener = struct {
         var select = std.Io.Select(Result).init(self.io, &results);
         defer select.cancelDiscard();
 
-        try select.concurrent(
-            .timeout,
-            std.Io.sleep,
-            .{
-                self.io,
-                std.Io.Duration.fromMilliseconds(self.options.request_timeout_ms),
-                .awake,
-            },
-        );
-        try select.concurrent(.done, handle, .{ self, stream, &response_state });
+        // Slow senders only get a short window to deliver the request, the rest is for negotiation.
+        try select.concurrent(.timeout, requestTimer, .{ self.io, &request_read, self.options.request_timeout_ms });
+        try select.concurrent(.done, handle, .{ self, stream, &response_state, &request_read });
 
         switch (try select.await()) {
             .done => |result| result catch |err| {
@@ -304,6 +305,7 @@ pub const Listener = struct {
         self: *Listener,
         stream: std.Io.net.Stream,
         response_state: *std.atomic.Value(ResponseState),
+        request_read: *std.atomic.Value(bool),
     ) anyerror!void {
         var input: [16384]u8 = undefined;
         var output: [4096]u8 = undefined;
@@ -319,6 +321,7 @@ pub const Listener = struct {
         }
 
         var request = try http.receiveHead();
+        if (request.head.method != .POST) request_read.store(true, .release);
         if (request.head.expect) |expect| {
             if (!std.mem.eql(u8, expect, "100-continue")) return error.HttpExpectationFailed;
         }
@@ -435,6 +438,7 @@ pub const Listener = struct {
             });
         };
         defer self.allocator.free(body);
+        request_read.store(true, .release);
 
         if (body.len == 0) {
             self.trace("POST HTTP 400 (empty offer)", .{});
