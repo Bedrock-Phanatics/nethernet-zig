@@ -1,0 +1,16 @@
+diff --git a/src/impl/dtlstransport.cpp b/src/impl/dtlstransport.cpp
+index 689eb06..ae26e70 100644
+--- a/src/impl/dtlstransport.cpp
++++ b/src/impl/dtlstransport.cpp
+@@ -543,7 +543,10 @@ void DtlsTransport::doRecv() {
+ 				}
+ 
+ 				if (ret == MBEDTLS_ERR_SSL_WANT_READ) {
+-					ThreadPool::Instance().schedule(mTimerSetAt + milliseconds(mFinMs),
++					auto timeout = mFinMs != 0 ? mTimerSetAt + milliseconds(mFinMs)
++					                           : std::chrono::steady_clock::now() +
++					                                 milliseconds(MBEDTLS_SSL_DTLS_TIMEOUT_DFL_MIN);
++					ThreadPool::Instance().schedule(timeout,
+ 					                                [weak_this = weak_from_this()]() {
+ 						                                if (auto locked = weak_this.lock())
+ 							                                locked->doRecv();
