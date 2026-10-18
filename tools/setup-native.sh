@@ -48,6 +48,7 @@ apply_patch "$(pwd)/tools/libdatachannel-mbedtls-link-order.patch"
 apply_patch "$(pwd)/tools/libdatachannel-threadpool.patch"
 apply_patch "$(pwd)/tools/libdatachannel-dtls-timer.patch"
 apply_patch "$(pwd)/tools/libdatachannel-sctp-timer-wheel.patch"
+apply_patch "$(pwd)/tools/libdatachannel-juice-timers.patch"
 
 prefix="${NETHERNET_NATIVE_PREFIX:-$(pwd)/.deps/native}"
 mbedtls_build="${NETHERNET_MBEDTLS_BUILD:-.deps/mbedtls-build}"
