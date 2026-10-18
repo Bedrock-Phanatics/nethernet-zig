@@ -381,6 +381,10 @@ pub const Connection = struct {
                 .token = token,
                 .domain = self.options.server_identity_domain,
             };
+        } else if (self.options.identity) |*identity| {
+            // Copied so callers can reuse or free their token once the connection exists.
+            self.owned_token = try allocator.dupe(u8, identity.token);
+            identity.token = self.owned_token.?;
         }
 
         return self;
@@ -1612,4 +1616,23 @@ test "stored options never outlive a caller's local network ID buffer" {
     @memset(&scratch, 0);
     try std.testing.expectEqualStrings("12345", connection.options.local_network_id);
     try std.testing.expectEqualStrings("12345", connection.localAddress().network_id);
+}
+
+test "stored options never outlive a caller's identity token" {
+    var token = "header.payload.signature".*;
+    const connection = try Connection.create(
+        std.testing.allocator,
+        std.testing.io,
+        .server,
+        1,
+        "remote",
+        .{
+            .allow_anonymous = true,
+            .identity = .{ .key = jwt.Scheme.KeyPair.generate(std.testing.io), .token = &token },
+        },
+    );
+    defer connection.destroy();
+
+    @memset(&token, 0);
+    try std.testing.expectEqualStrings("header.payload.signature", connection.options.identity.?.token);
 }

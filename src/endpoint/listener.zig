@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const auth = @import("../auth/sdp.zig");
+const jwt = @import("../auth/token.zig");
 const Signal = @import("../protocol/signal.zig").Signal;
 const conn = @import("../transport/connection.zig");
 const maximum_sdp_size = @import("client.zig").maximum_sdp_size;
@@ -46,6 +47,9 @@ pub const Listener = struct {
     reserved_accepts: usize = 0,
     active_negotiations: usize = 0,
     closed: bool = false,
+    token_mutex: std.Io.Mutex = .init,
+    token_second: i64 = 0,
+    token: ?[]u8 = null,
 
     pub fn listen(
         allocator: std.mem.Allocator,
@@ -167,8 +171,24 @@ pub const Listener = struct {
 
     pub fn destroy(self: *Listener) void {
         self.close();
+        if (self.token) |token| self.allocator.free(token);
         self.allocator.free(self.slots);
         self.allocator.destroy(self);
+    }
+
+    // The token only holds the key and whole-second times, and signing is deterministic, so every
+    // connection in the same second gets the same bytes. Returns a copy owned by the caller.
+    fn serverToken(self: *Listener, key: auth.KeyPair) ![]u8 {
+        const now = std.Io.Clock.real.now(self.io).toSeconds();
+        self.token_mutex.lockUncancelable(self.io);
+        defer self.token_mutex.unlock(self.io);
+        if (self.token == null or self.token_second != now) {
+            const token = try jwt.serverToken(self.allocator, key, now);
+            if (self.token) |old| self.allocator.free(old);
+            self.token = token;
+            self.token_second = now;
+        }
+        return self.allocator.dupe(u8, self.token.?);
     }
 
     fn trace(self: *Listener, comptime format: []const u8, args: anytype) void {
@@ -490,6 +510,16 @@ pub const Listener = struct {
         var connection_options = self.options.connection;
         connection_options.native.disable_trickle = true;
         connection_options.trace = connection_options.trace or self.options.trace;
+        const identity_token = if (connection_options.identity == null)
+            try self.serverToken(connection_options.server_identity_key.?)
+        else
+            null;
+        defer if (identity_token) |owned| self.allocator.free(owned);
+        if (identity_token) |owned| connection_options.identity = .{
+            .key = connection_options.server_identity_key.?,
+            .token = owned,
+            .domain = connection_options.server_identity_domain,
+        };
 
         const connection = conn.Connection.create(
             self.allocator,
