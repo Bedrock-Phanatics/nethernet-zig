@@ -23,6 +23,8 @@ const Config = struct {
     idle: bool = false,
     ice_udp_mux: bool = false,
     rtc_threads: u32 = 0,
+    slow_server_ms: u32 = 0,
+    disconnect_at_ms: u64 = 0,
 };
 
 const Waiter = struct {
@@ -107,6 +109,7 @@ const Pair = struct {
 const Phase = enum {
     active,
     negotiating,
+    closing,
     dead,
 };
 
@@ -127,6 +130,8 @@ const RuntimeState = struct {
     pending_count: usize = 0,
     completed_since_churn: u64 = 0,
     churn_due: bool = false,
+    last_reliable_sent: u64 = 0,
+    last_reliable_echo: u64 = 0,
 };
 
 const Metrics = struct {
@@ -148,6 +153,7 @@ const Metrics = struct {
 
     corruptions: u64 = 0,
     unmatched_messages: u64 = 0,
+    reliable_order_violations: u64 = 0,
 
     native_dropped_unreliable: u64 = 0,
 
@@ -161,6 +167,11 @@ const Metrics = struct {
     reconnect_ns: u64 = 0,
     churn_destroy_ns: u64 = 0,
     backpressure: u64 = 0,
+
+    disconnects: u64 = 0,
+    disconnects_detected: u64 = 0,
+    disconnect_detect_ns: u64 = 0,
+    disconnect_detect_max_ns: u64 = 0,
 };
 
 const LatencyHistogram = struct {
@@ -370,6 +381,8 @@ pub fn main(init: std.process.Init) !void {
 
     var next_timeout_sweep_ns: i96 = 0;
     var next_stats_sample_ns: i96 = 0;
+    var next_server_pump_ns: i96 = 0;
+    var disconnect_ns: ?i96 = null;
     var previous_loop_ns: i96 = 0;
 
     while (true) {
@@ -404,6 +417,32 @@ pub fn main(init: std.process.Init) !void {
 
         var progress = false;
 
+        if (config.disconnect_at_ms != 0 and disconnect_ns == null and
+            now_ns >= @as(i96, config.disconnect_at_ms) * std.time.ns_per_ms)
+        {
+            disconnect_ns = now_ns;
+            for (pairs, states, 0..) |pair, *state, index| {
+                if (index % 2 != 0 or state.phase != .active) continue;
+                pair.server.close();
+                state.phase = .closing;
+                metrics.disconnects += 1;
+            }
+            progress = true;
+        }
+
+        for (pairs, states) |*pair, *state| {
+            if (state.phase != .closing) continue;
+            progress = (pumpClient(io, run_started, pair, state, &metrics, &histogram, config) catch {
+                const detect_ns: u64 = @intCast(now_ns - disconnect_ns.?);
+                metrics.disconnects_detected += 1;
+                metrics.disconnect_detect_ns += detect_ns;
+                metrics.disconnect_detect_max_ns = @max(metrics.disconnect_detect_max_ns, detect_ns);
+                abortPending(state, &metrics);
+                state.phase = .dead;
+                continue;
+            }) or progress;
+        }
+
         for (pairs, states, 0..) |*pair, *state, index| {
             if (state.phase != .negotiating) continue;
 
@@ -435,8 +474,12 @@ pub fn main(init: std.process.Init) !void {
             }
         }
 
+        const pump_servers = config.slow_server_ms == 0 or now_ns >= next_server_pump_ns;
+        if (pump_servers and config.slow_server_ms != 0)
+            next_server_pump_ns = now_ns + @as(i96, config.slow_server_ms) * std.time.ns_per_ms;
+
         for (pairs, states) |*pair, *state| {
-            if (state.phase != .active) continue;
+            if (state.phase != .active or !pump_servers) continue;
 
             const server_progress = pumpServer(
                 pair,
@@ -556,6 +599,9 @@ pub fn main(init: std.process.Init) !void {
             if (config.duration_ms == 0) idle_ns = 100 * std.time.ns_per_ms;
             if (metrics.in_flight != 0) idle_ns = @min(idle_ns, next_timeout_sweep_ns - now_ns);
             if (!config.idle) idle_ns = @min(idle_ns, next_stats_sample_ns - now_ns);
+            if (config.slow_server_ms != 0) idle_ns = @min(idle_ns, next_server_pump_ns - now_ns);
+            if (disconnect_ns == null and config.disconnect_at_ms != 0)
+                idle_ns = @min(idle_ns, @as(i96, config.disconnect_at_ms) * std.time.ns_per_ms - now_ns);
             if (generating and !config.idle and config.rate != 0) {
                 for (states) |state| {
                     if (state.phase == .active and !state.churn_due)
@@ -621,7 +667,9 @@ pub fn main(init: std.process.Init) !void {
             "\"cpu_ns_per_roundtrip\":{d:.0},\"cpu_ns_per_kib\":{d:.0},\"cpu_percent_per_pair\":{d:.4}," ++
             "\"api_thread_cpu_percent\":{d:.1},\"background_cpu_percent\":{d:.1}," ++
             "\"loop_iterations_per_roundtrip\":{d:.3},\"idle_waits\":{d},\"queue_high_water_entries\":{d}," ++
-            "\"reconnect_ms_mean\":{d:.2},\"churn_destroy_ms_mean\":{d:.2},\"backpressure\":{d},\"zig_heap_retained_after_close_bytes\":{d}}}\n",
+            "\"reconnect_ms_mean\":{d:.2},\"churn_destroy_ms_mean\":{d:.2},\"backpressure\":{d},\"zig_heap_retained_after_close_bytes\":{d}," ++
+            "\"reliable_order_violations\":{d},\"disconnects\":{d},\"disconnects_detected\":{d}," ++
+            "\"disconnect_detect_ms_mean\":{d:.1},\"disconnect_detect_ms_max\":{d:.1}}}\n",
         .{
             @tagName(config.wait),
             config.idle,
@@ -649,10 +697,17 @@ pub fn main(init: std.process.Init) !void {
             @as(f64, @floatFromInt(metrics.churn_destroy_ns)) / @as(f64, @floatFromInt(@max(metrics.reconnects, 1))) / std.time.ns_per_ms,
             metrics.backpressure,
             heap_retained,
+            metrics.reliable_order_violations,
+            metrics.disconnects,
+            metrics.disconnects_detected,
+            @as(f64, @floatFromInt(metrics.disconnect_detect_ns)) / @as(f64, @floatFromInt(@max(metrics.disconnects_detected, 1))) / std.time.ns_per_ms,
+            @as(f64, @floatFromInt(metrics.disconnect_detect_max_ns)) / std.time.ns_per_ms,
         },
     );
 
-    if (metrics.failures != 0 or metrics.corruptions != 0) {
+    if (metrics.failures != 0 or metrics.corruptions != 0 or metrics.reliable_order_violations != 0 or
+        metrics.disconnects_detected != metrics.disconnects)
+    {
         return error.StressFailure;
     }
 }
@@ -667,8 +722,9 @@ fn createPair(
     var options: nethernet.ConnectionOptions = .{
         .native = .{ .disable_trickle = true },
         .allow_anonymous = true,
-        .negotiation_timeout_ms = config.timeout_ms,
-        .connection_timeout_ms = config.timeout_ms,
+        // The harness gives up first, so stalled connections can still be inspected.
+        .negotiation_timeout_ms = config.timeout_ms + 1000,
+        .connection_timeout_ms = config.timeout_ms + 1000,
     };
 
     const id: u64 = @intCast(index + 1);
@@ -742,11 +798,29 @@ fn negotiateAll(
 
         const elapsed = started.durationTo(std.Io.Clock.awake.now(io));
         if (elapsed.toMilliseconds() >= timeout_ms) {
+            printUnready(pairs);
             return error.Timeout;
         }
 
         if (!progress) {
             try waiter.idle(io, token, @as(i96, timeout_ms) * std.time.ns_per_ms - elapsed.nanoseconds);
+        }
+    }
+}
+
+fn printUnready(pairs: []Pair) void {
+    for (pairs, 0..) |pair, index| {
+        if (pair.client.ready() and pair.server.ready()) continue;
+        for ([_]*Connection{ pair.client, pair.server }, [_][]const u8{ "client", "server" }) |connection, role| {
+            const diagnostics = connection.diagnostics();
+            std.debug.print("pair {d} {s}: state={s} ice={s} reliable={s} unreliable={s}\n", .{
+                index,
+                role,
+                @tagName(connection.state()),
+                @tagName(diagnostics.ice_state),
+                @tagName(diagnostics.reliable.state),
+                @tagName(diagnostics.unreliable.state),
+            });
         }
     }
 }
@@ -905,8 +979,6 @@ fn pumpServer(
     metrics: *Metrics,
     budget: usize,
 ) !bool {
-    _ = state;
-
     var progress = false;
     var processed: usize = 0;
 
@@ -931,6 +1003,7 @@ fn pumpServer(
                 )) {
                     metrics.corruptions += 1;
                 }
+                checkOrder(&state.last_reliable_sent, message, sequence, metrics);
 
                 pair.server.send(
                     message.data,
@@ -972,6 +1045,8 @@ fn pumpClient(
                         metrics.corruptions += 1;
                         continue;
                     };
+
+                checkOrder(&state.last_reliable_echo, message, sequence, metrics);
 
                 const slot_index: usize = @intCast(
                     sequence %
@@ -1049,7 +1124,9 @@ fn expirePending(
     for (state.pending) |*pending| {
         if (!pending.active) continue;
 
-        if (now_ns - pending.sent_ns < timeout_ns) {
+        // A dropped unreliable message would otherwise hold its slot for the whole timeout.
+        const limit_ns = if (pending.reliability == .unreliable) @min(timeout_ns, 2 * std.time.ns_per_s) else timeout_ns;
+        if (now_ns - pending.sent_ns < limit_ns) {
             continue;
         }
 
@@ -1073,6 +1150,22 @@ fn expireAllPending(
             metrics,
             pending,
         );
+    }
+}
+
+// Every message takes the next sequence, so reliable ones must arrive in increasing order.
+fn checkOrder(last: *u64, message: nethernet.Message, sequence: u64, metrics: *Metrics) void {
+    if (message.reliability != .reliable) return;
+    if (sequence <= last.*) metrics.reliable_order_violations += 1;
+    last.* = sequence;
+}
+
+fn abortPending(state: *RuntimeState, metrics: *Metrics) void {
+    for (state.pending) |*pending| {
+        if (!pending.active) continue;
+        pending.active = false;
+        state.pending_count -= 1;
+        metrics.in_flight -= 1;
     }
 }
 
@@ -1500,6 +1593,10 @@ fn parseArgs(
             result.ice_udp_mux = true;
         } else if (std.mem.eql(u8, argument, "--rtc-threads")) {
             result.rtc_threads = try parse(u32, iterator.next());
+        } else if (std.mem.eql(u8, argument, "--slow-server-ms")) {
+            result.slow_server_ms = try parse(u32, iterator.next());
+        } else if (std.mem.eql(u8, argument, "--disconnect-at-ms")) {
+            result.disconnect_at_ms = try parse(u64, iterator.next());
         } else {
             return error.InvalidArgument;
         }
