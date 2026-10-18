@@ -295,3 +295,69 @@ builds differ only in instruction scheduling, from debug line information.
 - Separate peers over a real network, mobile clients, or vanilla Bedrock under load.
 - Kernel time on Linux, since `perf_event_paranoid` is 2 in this WSL setup.
 - UDP mux, 1,000 or more pairs, and long soak runs.
+
+## Phase 2
+
+Same machine and workloads. Each row compares 1.1.0 with the current tree under identical
+arguments, and every change kept the existing invariants and tests.
+
+Changes:
+
+- The callback queue restarts at offset zero whenever it drains, wraps without division, removes
+  priority entries with `memmove` instead of byte loops, and stores 8-byte entries.
+- A received fragment takes the peer lock once instead of twice, and a poll takes it once instead
+  of three times. Queued signals are counted, so polls and waits no longer scan the queue.
+- Every enqueue and state change already advances the peer's wakeup sequence under its lock. A
+  poll that finds nothing records that sequence, and later polls return immediately until it
+  moves, first in `Peer` and then in an established `Connection` with no reassembly in progress.
+
+Queue microbenchmarks, ns per operation:
+
+| Operation | 1.1.0 | Now |
+| --- | ---: | ---: |
+| Push and pop, 128 B | 16.7 | 14.1 |
+| Signal check, 16 / 128 / 512 queued | 23 / 189 / 738 | O(1) in `Peer`; scan 11 / 133 / 545 |
+| Priority pop behind 16 / 128 / 512, 20,000 pops | 27 / 200 / 750 | 21 / 151 / 560 |
+
+Transport, ReleaseFast:
+
+| Workload | Measurement | 1.1.0 | Now |
+| --- | --- | ---: | ---: |
+| Windows, 100 pairs, realistic | process CPU | 86-89% | 64-68% |
+| | API thread CPU | 18-19% | 13-14% |
+| | p50 / p99 | 1.35-1.36 / 2.7-3.0 ms | 1.37 / 2.5-2.7 ms |
+| | RSS growth in 10 s | 15-16 MB | 8.6-9.2 MB |
+| Windows, 400 pairs, realistic, 4 workers | process CPU | 279-282% | 251-255% |
+| | API thread CPU | 83-88% | 67-69% |
+| | p50 / p95 | 1.03-1.05 / 4.8-6.2 ms | 0.91-0.96 / 3.7-4.3 ms |
+| Windows, 100 pairs, fixed 8 KiB | RSS growth / peak | 218 / 307 MB | 11 / 100 MB |
+| Windows, 10 pairs, 64 B saturation, 2 workers | RSS growth | 19 MB | 0.8 MB |
+| Linux, 200 pairs, realistic, 2 workers | API thread CPU | 40-43% | 35-38% |
+| | `Connection.pollInternal` share | 10.3% | 5.3% |
+
+Throughput and latency elsewhere are unchanged within run-to-run noise, since native code still
+accounts for over 75% of CPU. The remaining poll cost is two cache misses per idle connection
+per sweep. At 400 pairs the API thread is mostly synchronous `rtcSendMessage`, so a ready list
+would save little there.
+
+Worker counts, ReleaseFast, current tree:
+
+| Workload | Platform | default (12) | 2 | 4 |
+| --- | --- | ---: | ---: | ---: |
+| 10 pairs, 64 B saturation, round trips/s | Windows | 11.8-12.7k | 16.3-17.3k | 15.3-16.8k |
+| | Linux | 30.0k | 41.8-46.5k | 16.4-17.7k |
+| 1 pair, 1200 B saturation, round trips/s | Windows | 7.0-7.1k | 5.6-6.2k | 7.2-7.7k |
+| 1 pair, 64 KiB, 8 in flight, round trips/s | Windows | 268-299 | 147-169 | 246-266 |
+| | Linux | 172 | 170 | 287 |
+| 200 pairs, realistic, p99 | Linux | 24 ms | 1.2 ms | 6.5 ms |
+| 400 pairs, realistic, p50 / p99 | Linux | 56 / 116 ms | 0.8-0.9 / 85-128 ms | 1.5-1.6 / 6-12 ms |
+
+No single count wins everywhere, so the default stays libdatachannel's. Servers with many small
+messages should set two to four workers and measure their own mix.
+
+Still open:
+
+- More than the receive queue of unread reliable data still fails the connection, for example
+  64 x 64 KiB in flight against the default 1 MiB queue. libdatachannel's pull API would block a
+  shared worker thread per slow consumer, so it is not a safe replacement as is.
+- `rtcGetBufferedAmount` is about 1% of a send and was left in place.
