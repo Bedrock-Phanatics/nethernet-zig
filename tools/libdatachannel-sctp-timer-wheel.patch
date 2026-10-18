@@ -1,0 +1,110 @@
+diff --git a/deps/usrsctp/usrsctplib/netinet/sctp_callout.c b/deps/usrsctp/usrsctplib/netinet/sctp_callout.c
+index ee6cd4c..7679325 100755
+--- a/deps/usrsctp/usrsctplib/netinet/sctp_callout.c
++++ b/deps/usrsctp/usrsctplib/netinet/sctp_callout.c
+@@ -76,11 +76,33 @@ uint32_t sctp_get_tick_count(void) {
+ 
+ /*
+  * SCTP_TIMERQ_LOCK protects:
+- * - SCTP_BASE_INFO(callqueue)
++ * - sctp_callwheel
+  * - sctp_os_timer_next: next timer to check
+  */
+ static sctp_os_timer_t *sctp_os_timer_next = NULL;
+ 
++/*
++ * Timers hash into a wheel by expiry tick, so a tick only visits the buckets
++ * that elapsed instead of every pending timer.
++ */
++#define SCTP_CALLWHEEL_SIZE 1024
++static struct calloutlist sctp_callwheel[SCTP_CALLWHEEL_SIZE];
++static int sctp_callwheel_ready = 0;
++
++static struct calloutlist *
++sctp_callwheel_bucket(uint32_t time)
++{
++	int i;
++
++	if (!sctp_callwheel_ready) {
++		for (i = 0; i < SCTP_CALLWHEEL_SIZE; i++) {
++			TAILQ_INIT(&sctp_callwheel[i]);
++		}
++		sctp_callwheel_ready = 1;
++	}
++	return (&sctp_callwheel[time & (SCTP_CALLWHEEL_SIZE - 1)]);
++}
++
+ void
+ sctp_os_timer_init(sctp_os_timer_t *c)
+ {
+@@ -104,7 +126,7 @@ sctp_os_timer_start(sctp_os_timer_t *c, uint32_t to_ticks, void (*ftn) (void *),
+ 		if (c == sctp_os_timer_next) {
+ 			sctp_os_timer_next = TAILQ_NEXT(c, tqe);
+ 		}
+-		TAILQ_REMOVE(&SCTP_BASE_INFO(callqueue), c, tqe);
++		TAILQ_REMOVE(sctp_callwheel_bucket(c->c_time), c, tqe);
+ 		/*
+ 		 * part of the normal "stop a pending callout" process
+ 		 * is to clear the CALLOUT_ACTIVE and CALLOUT_PENDING
+@@ -124,7 +146,7 @@ sctp_os_timer_start(sctp_os_timer_t *c, uint32_t to_ticks, void (*ftn) (void *),
+ 	c->c_flags = (SCTP_CALLOUT_ACTIVE | SCTP_CALLOUT_PENDING);
+ 	c->c_func = ftn;
+ 	c->c_time = ticks + to_ticks;
+-	TAILQ_INSERT_TAIL(&SCTP_BASE_INFO(callqueue), c, tqe);
++	TAILQ_INSERT_TAIL(sctp_callwheel_bucket(c->c_time), c, tqe);
+ 	SCTP_TIMERQ_UNLOCK();
+ 	return (ret);
+ }
+@@ -145,7 +167,7 @@ sctp_os_timer_stop(sctp_os_timer_t *c)
+ 	if (c == sctp_os_timer_next) {
+ 		sctp_os_timer_next = TAILQ_NEXT(c, tqe);
+ 	}
+-	TAILQ_REMOVE(&SCTP_BASE_INFO(callqueue), c, tqe);
++	TAILQ_REMOVE(sctp_callwheel_bucket(c->c_time), c, tqe);
+ 	SCTP_TIMERQ_UNLOCK();
+ 	return (1);
+ }
+@@ -156,24 +178,29 @@ sctp_handle_tick(uint32_t elapsed_ticks)
+ 	sctp_os_timer_t *c;
+ 	void (*c_func)(void *);
+ 	void *c_arg;
++	uint32_t tick, buckets;
+ 
+ 	SCTP_TIMERQ_LOCK();
+ 	/* update our tick count */
++	tick = ticks;
+ 	ticks += elapsed_ticks;
+-	c = TAILQ_FIRST(&SCTP_BASE_INFO(callqueue));
+-	while (c) {
+-		if (SCTP_UINT32_GE(ticks, c->c_time)) {
+-			sctp_os_timer_next = TAILQ_NEXT(c, tqe);
+-			TAILQ_REMOVE(&SCTP_BASE_INFO(callqueue), c, tqe);
+-			c_func = c->c_func;
+-			c_arg = c->c_arg;
+-			c->c_flags &= ~SCTP_CALLOUT_PENDING;
+-			SCTP_TIMERQ_UNLOCK();
+-			c_func(c_arg);
+-			SCTP_TIMERQ_LOCK();
+-			c = sctp_os_timer_next;
+-		} else {
+-			c = TAILQ_NEXT(c, tqe);
++	buckets = elapsed_ticks < SCTP_CALLWHEEL_SIZE ? elapsed_ticks : SCTP_CALLWHEEL_SIZE;
++	while (buckets-- > 0) {
++		c = TAILQ_FIRST(sctp_callwheel_bucket(++tick));
++		while (c) {
++			if (SCTP_UINT32_GE(ticks, c->c_time)) {
++				sctp_os_timer_next = TAILQ_NEXT(c, tqe);
++				TAILQ_REMOVE(sctp_callwheel_bucket(c->c_time), c, tqe);
++				c_func = c->c_func;
++				c_arg = c->c_arg;
++				c->c_flags &= ~SCTP_CALLOUT_PENDING;
++				SCTP_TIMERQ_UNLOCK();
++				c_func(c_arg);
++				SCTP_TIMERQ_LOCK();
++				c = sctp_os_timer_next;
++			} else {
++				c = TAILQ_NEXT(c, tqe);
++			}
+ 		}
+ 	}
+ 	sctp_os_timer_next = NULL;

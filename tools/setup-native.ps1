@@ -102,6 +102,7 @@ if ($Backend -eq 'MbedTLS') {
 Apply-LibdatachannelPatch (Join-Path $root 'tools/libdatachannel-bounds.patch')
 Apply-LibdatachannelPatch (Join-Path $root 'tools/libdatachannel-threadpool.patch')
 Apply-LibdatachannelPatch (Join-Path $root 'tools/libdatachannel-dtls-timer.patch')
+Apply-LibdatachannelPatch (Join-Path $root 'tools/libdatachannel-sctp-timer-wheel.patch')
 if ($Backend -eq 'MbedTLS') {
     Apply-LibdatachannelPatch (Join-Path $root 'tools/libdatachannel-mbedtls-link-order.patch')
 }
