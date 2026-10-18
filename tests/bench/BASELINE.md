@@ -358,6 +358,7 @@ messages should set two to four workers and measure their own mix.
 Still open:
 
 - More than the receive queue of unread reliable data still fails the connection, for example
-  64 x 64 KiB in flight against the default 1 MiB queue. libdatachannel's pull API would block a
-  shared worker thread per slow consumer, so it is not a safe replacement as is.
+  64 x 64 KiB in flight against the default 1 MiB queue. In pull mode libdatachannel blocks the
+  delivering worker thread once a channel holds 1,024 unread messages, so one slow consumer could
+  stall a shared worker. It is not a safe replacement as is.
 - `rtcGetBufferedAmount` is about 1% of a send and was left in place.
