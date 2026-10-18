@@ -102,9 +102,14 @@ pub fn build(b: *std.Build) void {
     const handshake_pairs = b.option(usize, "handshake-pairs", "Concurrent native test pairs (1-100)") orelse 8;
     if (handshake_pairs == 0 or handshake_pairs > 100) @panic("handshake-pairs must be 1-100");
 
+    const tracy = b.option(bool, "tracy", "Emit Tracy profiler zones") orelse false;
+
     const build_options = b.addOptions();
     build_options.addOption(usize, "fuzz_iterations", fuzz_iterations);
     build_options.addOption(usize, "handshake_pairs", handshake_pairs);
+
+    const trace_options = b.addOptions();
+    trace_options.addOption(bool, "tracy", tracy);
 
     const nethernet = b.addModule("nethernet", .{
         .root_source_file = b.path("src/root.zig"),
@@ -113,6 +118,17 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     addNative(b, nethernet, target, native_prefix);
+    nethernet.addOptions("trace_options", trace_options);
+    if (tracy) {
+        if (b.lazyDependency("ztracy", .{
+            .target = target,
+            .optimize = optimize,
+            .enable_ztracy = true,
+        })) |ztracy| {
+            nethernet.addImport("ztracy", ztracy.module("root"));
+            nethernet.linkLibrary(ztracy.artifact("tracy"));
+        }
+    }
 
     const core = createModule(b, "src/core.zig", target, optimize);
 

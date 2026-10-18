@@ -1,6 +1,7 @@
 # Build output
 .zig-cache/
 zig-out/
+zig-pkg/
 .deps/
 artifacts/
 

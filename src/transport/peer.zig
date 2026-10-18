@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const Queue = @import("../internal/queue.zig").Queue;
+const trace = @import("../internal/trace.zig");
 const wake = @import("../internal/wakeup.zig");
 const Wakeup = wake.Wakeup;
 const framing = @import("framing.zig");
@@ -315,6 +316,8 @@ pub const Peer = struct {
     }
 
     pub fn close(self: *Peer) void {
+        const zone = trace.zone(@src(), "peer.close");
+        defer zone.end();
         self.mutex.lockUncancelable(self.io);
 
         if (self.stopping) {
@@ -337,10 +340,12 @@ pub const Peer = struct {
         self.channels = .{ -1, -1 };
         self.mutex.unlock(self.io);
 
+        const delete_zone = trace.zone(@src(), "rtcDeletePeerConnection");
         if (id >= 0) _ = c.rtcDeletePeerConnection(id);
         for (channels) |channel| {
             if (channel >= 0) _ = c.rtcDeleteDataChannel(channel);
         }
+        delete_zone.end();
 
         self.mutex.lockUncancelable(self.io);
         self.native_delete_complete = true;
@@ -403,6 +408,8 @@ pub const Peer = struct {
     }
 
     fn notify(self: *Peer) void {
+        const zone = trace.zone(@src(), "peer.notify");
+        defer zone.end();
         self.wakeup.signal(self.io);
         if (self.subscriber) |wakeup| wakeup.signal(self.io);
     }
@@ -772,8 +779,12 @@ pub const Peer = struct {
                 .{ .answer = data };
         }
 
+        const lock_zone = trace.zone(@src(), "peer.poll.lock");
         self.mutex.lockUncancelable(self.io);
+        lock_zone.end();
         defer self.mutex.unlock(self.io);
+        const zone = if (signals_only) trace.zone(@src(), "peer.dequeue.priority") else trace.zone(@src(), "peer.dequeue");
+        defer zone.end();
         if (!self.canPollLocked(signals_only)) return error.ConnectionClosed;
 
         const entry = (if (signals_only)
@@ -806,6 +817,8 @@ pub const Peer = struct {
         reliability: framing.Reliability,
         scratch: []u8,
     ) !void {
+        const zone = trace.zone(@src(), "peer.send");
+        defer zone.end();
         const handles = self.acquireReadyChannels() orelse
             return error.InvalidState;
         var handles_acquired = true;
@@ -824,7 +837,9 @@ pub const Peer = struct {
         );
 
         const channel = channels[@intFromEnum(reliability)];
+        const buffered_zone = trace.zone(@src(), "rtcGetBufferedAmount");
         const buffered = c.rtcGetBufferedAmount(channel);
+        buffered_zone.end();
         try check(buffered);
 
         const fragment_count = if (data.len == 0)
@@ -848,6 +863,8 @@ pub const Peer = struct {
         }
 
         while (try encoder.next(scratch)) |fragment| {
+            const send_zone = trace.zone(@src(), "rtcSendMessage");
+            defer send_zone.end();
             check(c.rtcSendMessage(
                 channel,
                 fragment.ptr,
@@ -943,8 +960,12 @@ pub const Peer = struct {
     }
 
     fn enqueue(self: *Peer, tag: u8, data: []const u8) void {
+        const lock_zone = trace.zone(@src(), "peer.enqueue.lock");
         self.mutex.lockUncancelable(self.io);
+        lock_zone.end();
         defer self.mutex.unlock(self.io);
+        const zone = trace.zone(@src(), "peer.enqueue");
+        defer zone.end();
 
         if (self.stopping or self.state == .failed or self.state == .closed) return;
 
@@ -1101,6 +1122,8 @@ pub const Peer = struct {
         size: c_int,
         ptr: ?*anyopaque,
     ) callconv(.c) void {
+        const zone = trace.zone(@src(), "native.onMessage");
+        defer zone.end();
         if (size < 0) return;
 
         const self = from(ptr);
@@ -1125,6 +1148,8 @@ pub const Peer = struct {
     }
 
     fn onBufferedAmountLow(_: c_int, ptr: ?*anyopaque) callconv(.c) void {
+        const zone = trace.zone(@src(), "native.onBufferedAmountLow");
+        defer zone.end();
         const self = from(ptr);
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
