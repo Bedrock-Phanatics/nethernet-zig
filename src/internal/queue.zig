@@ -92,15 +92,6 @@ pub const Queue = struct {
         return .{ .tag = entry.tag, .data = output[0..entry.len] };
     }
 
-    pub fn hasTagBelow(self: *const Queue, limit: u8) bool {
-        var index = self.head;
-        for (0..self.count) |_| {
-            if (self.entries[index].tag < limit) return true;
-            index = wrap(index + 1, self.entries.len);
-        }
-        return false;
-    }
-
     pub fn popFirstTagBelow(self: *Queue, limit: u8, output: []u8) !?Popped {
         var byte_offset: usize = 0;
         var index = self.head;
@@ -163,9 +154,8 @@ test "priority pop bypasses data and preserves class order" {
     try queue.push(3, "data-a");
     try queue.push(2, "signal");
     try queue.push(4, "data-b");
-    try std.testing.expect(queue.hasTagBelow(3));
     try std.testing.expectEqualStrings("signal", (try queue.popFirstTagBelow(3, &output)).?.data);
-    try std.testing.expect(!queue.hasTagBelow(3));
+    try std.testing.expect((try queue.popFirstTagBelow(3, &output)) == null);
     try std.testing.expectEqualStrings("data-a", (try queue.pop(&output)).?.data);
     try std.testing.expectEqualStrings("data-b", (try queue.pop(&output)).?.data);
 }

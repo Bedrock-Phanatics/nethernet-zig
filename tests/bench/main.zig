@@ -167,7 +167,7 @@ fn report(io: std.Io, start: std.Io.Timestamp, operation: []const u8, bytes: usi
     );
 }
 
-// Connection.poll scans for queued signals on every call, and a priority pop shifts every byte queued behind the signal.
+// A priority pop shifts every byte queued behind the signal.
 fn backlogBenchmark(io: std.Io, allocator: std.mem.Allocator) !void {
     const fragment = [_]u8{0} ++ [_]u8{42} ** 1199;
     const bytes = try allocator.alloc(u8, 1024 * 1024);
@@ -181,16 +181,8 @@ fn backlogBenchmark(io: std.Io, allocator: std.mem.Allocator) !void {
         var queue = try Queue.init(bytes, &entries);
         for (0..backlog) |_| try queue.push(3, &fragment);
 
-        const iterations = 100_000;
-        var start = std.Io.Clock.awake.now(io);
-        for (0..iterations) |_| {
-            checksum +%= @intFromBool(queue.hasTagBelow(3));
-            std.mem.doNotOptimizeAway(&queue);
-        }
-        report(io, start, try std.fmt.bufPrint(&name, "queue_signal_scan_{d}", .{backlog}), fragment.len, iterations, 0);
-
         const pops = 20_000;
-        start = std.Io.Clock.awake.now(io);
+        const start = std.Io.Clock.awake.now(io);
         for (0..pops) |_| {
             try queue.push(2, "candidate:1 1 udp 1 192.0.2.1 1 typ host");
             const popped = (try queue.popFirstTagBelow(3, &output)).?;
