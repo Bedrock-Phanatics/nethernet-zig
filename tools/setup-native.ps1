@@ -92,6 +92,13 @@ if ($Backend -eq 'MbedTLS') {
         'set',
         'MBEDTLS_SSL_DTLS_SRTP'
     )
+    Run-Native python @(
+        '.deps/mbedtls/scripts/config.py',
+        '-f',
+        '.deps/mbedtls/include/mbedtls/mbedtls_config.h',
+        'unset',
+        'MBEDTLS_DEBUG_C'
+    )
 }
 
 Apply-LibdatachannelPatch (Join-Path $root 'tools/libdatachannel-bounds.patch')

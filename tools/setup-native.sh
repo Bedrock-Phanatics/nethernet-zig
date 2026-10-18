@@ -33,6 +33,9 @@ test "$(git -C .deps/mbedtls rev-parse HEAD)" = \
 python3 .deps/mbedtls/scripts/config.py \
     -f .deps/mbedtls/include/mbedtls/mbedtls_config.h \
     set MBEDTLS_SSL_DTLS_SRTP
+python3 .deps/mbedtls/scripts/config.py \
+    -f .deps/mbedtls/include/mbedtls/mbedtls_config.h \
+    unset MBEDTLS_DEBUG_C
 
 apply_patch() {
     patch="$1"
