@@ -336,14 +336,14 @@ pub const Connection = struct {
         const packet_payload_size: usize = @min(options.maximum_message_size, framing.maximum_segment_payload);
         const packet_buffer_size = packet_payload_size + 1;
 
-        const packet_scratch = try allocator.alloc(u8, packet_buffer_size);
-        errdefer allocator.free(packet_scratch);
+        const packet_scratch = try native.allocLazy(allocator, packet_buffer_size);
+        errdefer native.freeLazy(allocator, packet_scratch);
 
-        const negotiation_scratch = try allocator.alloc(u8, @max(maximum_local_signal_size, packet_buffer_size));
-        errdefer allocator.free(negotiation_scratch);
+        const negotiation_scratch = try native.allocLazy(allocator, @max(maximum_local_signal_size, packet_buffer_size));
+        errdefer native.freeLazy(allocator, negotiation_scratch);
 
-        const send_buffer = try allocator.alloc(u8, packet_buffer_size);
-        errdefer allocator.free(send_buffer);
+        const send_buffer = try native.allocLazy(allocator, packet_buffer_size);
+        errdefer native.freeLazy(allocator, send_buffer);
 
         var native_options = options.native;
         native_options.maximum_message_size = options.maximum_message_size;
@@ -397,9 +397,9 @@ pub const Connection = struct {
         if (self.owned_token) |token| self.allocator.free(token);
         if (self.signal_buffer) |buffer| self.allocator.free(buffer);
 
-        self.allocator.free(self.packet_scratch);
-        if (self.negotiation_scratch) |scratch| self.allocator.free(scratch);
-        self.allocator.free(self.send_buffer);
+        native.freeLazy(self.allocator, self.packet_scratch);
+        if (self.negotiation_scratch) |scratch| native.freeLazy(self.allocator, scratch);
+        native.freeLazy(self.allocator, self.send_buffer);
         self.allocator.free(self.remote_id);
         self.allocator.free(self.local_id);
         self.allocator.destroy(self);
@@ -636,7 +636,7 @@ pub const Connection = struct {
         // Gathering has finished by the time this scratch is released, so no larger local signal can follow.
         const scratch = if (self.negotiation_scratch) |negotiation| blk: {
             if (!self.established or self.peer.needsNegotiationBuffer()) break :blk negotiation;
-            self.allocator.free(negotiation);
+            native.freeLazy(self.allocator, negotiation);
             self.negotiation_scratch = null;
             break :blk self.packet_scratch;
         } else self.packet_scratch;

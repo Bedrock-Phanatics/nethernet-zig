@@ -15,6 +15,17 @@ const c = @cImport({
 
 pub const maximum_signal_size = 1024 * 1024;
 
+/// Skips the safe-build 0xAA fill so large buffers only become resident as they are used.
+pub fn allocLazy(allocator: std.mem.Allocator, len: usize) error{OutOfMemory}![]u8 {
+    std.debug.assert(len != 0);
+    const ptr = allocator.rawAlloc(len, .@"1", @returnAddress()) orelse return error.OutOfMemory;
+    return ptr[0..len];
+}
+
+pub fn freeLazy(allocator: std.mem.Allocator, buffer: []u8) void {
+    allocator.rawFree(buffer, .@"1", @returnAddress());
+}
+
 fn sdpTraceLineKind(line: []const u8) enum { identity, ice_password, plain } {
     if (std.mem.startsWith(u8, line, "a=identity:")) return .identity;
     if (std.mem.startsWith(u8, line, "a=ice-pwd:")) return .ice_password;
@@ -268,8 +279,8 @@ pub const Peer = struct {
         const self = try allocator.create(Peer);
         errdefer allocator.destroy(self);
 
-        const queue_bytes = try allocator.alloc(u8, options.queue_bytes);
-        errdefer allocator.free(queue_bytes);
+        const queue_bytes = try allocLazy(allocator, options.queue_bytes);
+        errdefer freeLazy(allocator, queue_bytes);
 
         const queue_entries = try allocator.alloc(
             Queue.Entry,
@@ -397,7 +408,7 @@ pub const Peer = struct {
         self.close();
 
         const allocator = self.allocator;
-        allocator.free(self.queue.bytes);
+        freeLazy(allocator, self.queue.bytes);
         allocator.free(self.queue.entries);
         allocator.destroy(self);
     }
