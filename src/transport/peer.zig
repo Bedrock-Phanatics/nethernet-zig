@@ -1867,33 +1867,45 @@ test "idle polls notice every later callback" {
     try std.testing.expectError(error.ConnectionClosed, peer.poll(&output));
 }
 
-test "concurrent callbacks are never missed by an idle poller" {
+test "concurrent producers are never missed by an idle poller and keep channel order" {
     const io = std.testing.io;
     const count = 20_000;
-    const peer = try Peer.create(std.testing.allocator, io, .{ .queue_entries = count + 1 });
+    const peer = try Peer.create(std.testing.allocator, io, .{ .queue_entries = 2 * count + 1 });
     defer peer.destroy();
 
     const Producer = struct {
-        fn run(target: *Peer) !void {
-            for (0..count) |i| target.enqueue(3, &.{ 0, @truncate(i) });
+        fn run(target: *Peer, tag: u8) !void {
+            for (0..count) |i| {
+                const sequence: u16 = @intCast(i);
+                target.enqueue(tag, &([_]u8{0} ++ std.mem.toBytes(sequence)));
+            }
         }
     };
-    var producer = try io.concurrent(Producer.run, .{peer});
-    defer producer.cancel(io) catch {};
+    var reliable = try io.concurrent(Producer.run, .{ peer, 3 });
+    defer reliable.cancel(io) catch {};
+    var unreliable = try io.concurrent(Producer.run, .{ peer, 4 });
+    defer unreliable.cancel(io) catch {};
 
     var output: [16]u8 = undefined;
-    var received: usize = 0;
-    while (received < count) {
+    var received = [2]u16{ 0, 0 };
+    while (received[0] < count or received[1] < count) {
         const token = peer.wakeup.prepare();
         if (try peer.poll(&output)) |event| {
-            try std.testing.expectEqual(@as(u8, @truncate(received)), event.reliable_fragment[1]);
-            received += 1;
+            const index: usize, const fragment = switch (event) {
+                .reliable_fragment => |data| .{ 0, data },
+                .unreliable_fragment => |data| .{ 1, data },
+                else => return error.UnexpectedEvent,
+            };
+            try std.testing.expectEqual(received[index], std.mem.bytesToValue(u16, fragment[1..3]));
+            received[index] += 1;
             continue;
         }
         try peer.wakeup.wait(io, token, wake.deadline(std.Io.Clock.awake.now(io), 10_000));
         if (!peer.wakeup.signaled(token)) try std.testing.expect(!peer.hasPending(false));
     }
-    try producer.await(io);
+    try reliable.await(io);
+    try unreliable.await(io);
+    try std.testing.expectEqual(@as(u64, 0), peer.callbackStats().dropped_unreliable_packets);
 }
 
 test "default callback queue accepts a maximum-sized signaling event" {
