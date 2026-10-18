@@ -189,7 +189,7 @@ fn backlogBenchmark(io: std.Io, allocator: std.mem.Allocator) !void {
         }
         report(io, start, try std.fmt.bufPrint(&name, "queue_signal_scan_{d}", .{backlog}), fragment.len, iterations, 0);
 
-        const pops = 200;
+        const pops = 20_000;
         start = std.Io.Clock.awake.now(io);
         for (0..pops) |_| {
             try queue.push(2, "candidate:1 1 udp 1 192.0.2.1 1 typ host");
