@@ -81,7 +81,3 @@ zig build test-integration -Doptimize=ReleaseSafe
 zig build fuzz
 sh tests/interop/run.sh   # requires Go
 ```
-
-## License
-
-[Apache-2.0](LICENSE)
