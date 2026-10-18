@@ -372,6 +372,36 @@ test "repeated listener create and destroy does not leak handles" {
     }
 }
 
+test "a restarted listener rebinds its port while closed requests linger" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const options: nethernet.EndpointListenerOptions = .{
+        .connection = .{ .allow_anonymous = true },
+        .maximum_http_workers = 2,
+        .maximum_negotiations = 1,
+    };
+
+    const first = try Listener.listen(allocator, io, try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0"), options);
+    const address = first.server.socket.address;
+    {
+        errdefer first.destroy();
+        const stream = try address.connect(io, .{ .mode = .stream });
+        defer stream.close(io);
+        var write_buffer: [256]u8 = undefined;
+        var writer = stream.writer(io, &write_buffer);
+        try writer.interface.writeAll("GET /v1/join HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        try writer.interface.flush();
+        // Reading to the end makes the server close first, which leaves its side in TIME_WAIT.
+        var read_buffer: [1024]u8 = undefined;
+        var reader = stream.reader(io, &read_buffer);
+        _ = try reader.interface.discardRemaining();
+    }
+    first.destroy();
+
+    const second = try Listener.listen(allocator, io, address, options);
+    second.destroy();
+}
+
 test "an exhausted UDP port range fails instead of hanging" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;

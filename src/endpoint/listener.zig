@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const auth = @import("../auth/sdp.zig");
 const Signal = @import("../protocol/signal.zig").Signal;
@@ -72,7 +73,9 @@ pub const Listener = struct {
         );
         errdefer allocator.free(slots);
 
-        var server = try address.listen(io, .{});
+        // Closed requests leave TIME_WAIT sockets that block a restart on Linux. Windows does not need
+        // this, and its SO_REUSEADDR would let another process bind the port.
+        var server = try address.listen(io, .{ .reuse_address = builtin.os.tag != .windows });
         errdefer server.deinit(io);
 
         var actual_options = options;
