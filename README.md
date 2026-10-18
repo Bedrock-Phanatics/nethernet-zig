@@ -88,7 +88,3 @@ zig build fuzz -Dfuzz-iterations=100000
 zig build test-integration -Doptimize=ReleaseSafe
 zig build stress-smoke -Doptimize=ReleaseSafe
 ```
-
-## License
-
-Licensed under Apache-2.0. See [LICENSE](LICENSE).
