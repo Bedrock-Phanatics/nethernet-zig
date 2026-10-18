@@ -1,0 +1,27 @@
+diff --git a/src/impl/threadpool.hpp b/src/impl/threadpool.hpp
+index 1cc2073..295a5ca 100644
+--- a/src/impl/threadpool.hpp
++++ b/src/impl/threadpool.hpp
+@@ -95,7 +95,6 @@ auto ThreadPool::schedule(clock::duration delay, F &&f, Args &&...args) noexcept
+ template <class F, class... Args>
+ auto ThreadPool::schedule(clock::time_point time, F &&f, Args &&...args) noexcept
+     -> invoke_future_t<F, Args...> {
+-	std::unique_lock lock(mMutex);
+ 	using R = std::invoke_result_t<std::decay_t<F>, std::decay_t<Args>...>;
+ 	auto bound = std::bind(std::forward<F>(f), std::forward<Args>(args)...);
+ 	auto task = std::make_shared<std::packaged_task<R()>>([bound = std::move(bound)]() mutable {
+@@ -107,8 +106,13 @@ auto ThreadPool::schedule(clock::time_point time, F &&f, Args &&...args) noexcep
+ 		}
+ 	});
+ 	std::future<R> result = task->get_future();
++	std::function<void()> func = [task = std::move(task)]() { return (*task)(); };
+ 
+-	mTasks.push({time, [task = std::move(task)]() { return (*task)(); }});
++	// Allocate and notify outside the lock so the woken worker does not block on it again
++	{
++		std::unique_lock lock(mMutex);
++		mTasks.push({time, std::move(func)});
++	}
+ 	mTasksCondition.notify_one();
+ 	return result;
+ }

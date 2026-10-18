@@ -43,6 +43,7 @@ apply_patch() {
 
 apply_patch "$(pwd)/tools/libdatachannel-bounds.patch"
 apply_patch "$(pwd)/tools/libdatachannel-mbedtls-link-order.patch"
+apply_patch "$(pwd)/tools/libdatachannel-threadpool.patch"
 
 prefix="${NETHERNET_NATIVE_PREFIX:-$(pwd)/.deps/native}"
 mbedtls_build="${NETHERNET_MBEDTLS_BUILD:-.deps/mbedtls-build}"
