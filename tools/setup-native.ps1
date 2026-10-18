@@ -85,20 +85,18 @@ if ($Backend -eq 'MbedTLS') {
         throw 'Unexpected Mbed TLS checkout.'
     }
 
-    Run-Native python @(
-        '.deps/mbedtls/scripts/config.py',
-        '-f',
-        '.deps/mbedtls/include/mbedtls/mbedtls_config.h',
-        'set',
-        'MBEDTLS_SSL_DTLS_SRTP'
-    )
-    Run-Native python @(
-        '.deps/mbedtls/scripts/config.py',
-        '-f',
-        '.deps/mbedtls/include/mbedtls/mbedtls_config.h',
-        'unset',
-        'MBEDTLS_DEBUG_C'
-    )
+    foreach ($setting in @(
+        @('set', 'MBEDTLS_SSL_DTLS_SRTP'),
+        @('set', 'MBEDTLS_AES_ROM_TABLES'),
+        @('unset', 'MBEDTLS_DEBUG_C'),
+        @('unset', 'MBEDTLS_SELF_TEST')
+    )) {
+        Run-Native python (@(
+            '.deps/mbedtls/scripts/config.py',
+            '-f',
+            '.deps/mbedtls/include/mbedtls/mbedtls_config.h'
+        ) + $setting)
+    }
 }
 
 Apply-LibdatachannelPatch (Join-Path $root 'tools/libdatachannel-bounds.patch')

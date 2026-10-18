@@ -30,12 +30,11 @@ test "$(git -C .deps/libdatachannel rev-parse HEAD)" = \
 test "$(git -C .deps/mbedtls rev-parse HEAD)" = \
     068ff080b369adfac81509f9b57b2afabaf82dc5
 
-python3 .deps/mbedtls/scripts/config.py \
-    -f .deps/mbedtls/include/mbedtls/mbedtls_config.h \
-    set MBEDTLS_SSL_DTLS_SRTP
-python3 .deps/mbedtls/scripts/config.py \
-    -f .deps/mbedtls/include/mbedtls/mbedtls_config.h \
-    unset MBEDTLS_DEBUG_C
+for setting in "set MBEDTLS_SSL_DTLS_SRTP" "set MBEDTLS_AES_ROM_TABLES" \
+    "unset MBEDTLS_DEBUG_C" "unset MBEDTLS_SELF_TEST"; do
+    python3 .deps/mbedtls/scripts/config.py \
+        -f .deps/mbedtls/include/mbedtls/mbedtls_config.h $setting
+done
 
 apply_patch() {
     patch="$1"
