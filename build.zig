@@ -274,6 +274,11 @@ pub fn build(b: *std.Build) void {
     );
     stress_step.dependOn(&run_stress.step);
 
+    const echo_module = createModule(b, "tests/bench/echo.zig", target, optimize);
+    echo_module.addImport("nethernet", nethernet);
+    const echo = b.addExecutable(.{ .name = "nethernet-echo", .root_module = echo_module });
+    b.step("echo-install", "Install the out-of-process echo server").dependOn(&b.addInstallArtifact(echo, .{}).step);
+
     const run_stress_smoke = b.addRunArtifact(stress);
     addNativeRuntime(b, run_stress_smoke, target, native_prefix);
     run_stress_smoke.addArgs(&.{
