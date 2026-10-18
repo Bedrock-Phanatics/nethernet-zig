@@ -101,8 +101,9 @@ pub fn main(init: std.process.Init) !void {
 
     if (trace) nethernet.Peer.enableNativeTrace();
 
-    var authority = if (offline) null else try Authority.init(init.gpa, init.io);
-    defer if (authority) |*value| value.keys.deinit();
+    var authority = nethernet.identity_issuer.Authority.init(init.gpa, init.io);
+    defer authority.deinit();
+    if (!offline) try authority.refresh();
 
     const key = try nethernet.identity_file.loadOrCreate(
         init.io,
@@ -125,7 +126,7 @@ pub fn main(init: std.process.Init) !void {
             .connection = .{
                 .server_identity_key = key,
                 .allow_anonymous = offline,
-                .verify_client = if (authority) |*value| .{ .context = value, .verify = Authority.verify } else null,
+                .verify_client = if (offline) null else authority.verifier(),
             },
             .status_provider = .{ .context = &status, .get = Status.get },
             .trace = trace,
@@ -194,6 +195,12 @@ pub fn main(init: std.process.Init) !void {
         @tagName(first.reliability),
         first.data[0..@min(8, first.data.len)],
     });
+    if (requestedProtocol(first.data)) |protocol| {
+        std.debug.print("      RequestNetworkSettings from client protocol {d}{s}\n", .{
+            protocol,
+            if (protocol == status.protocol) "" else ", which differs from the advertised protocol",
+        });
+    }
 
     var payloads: usize = 1;
     var bytes: usize = first.data.len;
@@ -219,48 +226,17 @@ fn stage(number: usize, name: []const u8, reached: bool, failures: *usize) void 
     });
 }
 
-const Authority = struct {
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    keys: nethernet.identity_issuer.Keys,
+fn requestedProtocol(payload: []const u8) ?u32 {
+    var reader = std.Io.Reader.fixed(if (payload.len != 0 and payload[0] == 0xfe) payload[1..] else payload);
+    _ = reader.takeLeb128(u32) catch return null;
+    const header = reader.takeLeb128(u32) catch return null;
+    if (header & 0x3ff != 0xc1) return null;
+    return reader.takeInt(u32, .big) catch null;
+}
 
-    fn init(allocator: std.mem.Allocator, io: std.Io) !Authority {
-        const Result = union(enum) { keys: anyerror!nethernet.identity_issuer.Keys, timeout: std.Io.Cancelable!void };
-        var results: [2]Result = undefined;
-        var select = std.Io.Select(Result).init(io, &results);
-        defer while (select.cancel()) |pending| {
-            if (pending == .keys) {
-                const keys = pending.keys catch continue;
-                keys.deinit();
-            }
-        };
-        try select.concurrent(.timeout, std.Io.sleep, .{ io, std.Io.Duration.fromSeconds(15), .awake });
-        try select.concurrent(.keys, fetch, .{ allocator, io });
-        const keys = switch (try select.await()) {
-            .keys => |result| try result,
-            .timeout => |result| {
-                try result;
-                return error.IssuerFetchTimeout;
-            },
-        };
-        return .{ .allocator = allocator, .io = io, .keys = keys };
-    }
-
-    fn fetch(allocator: std.mem.Allocator, io: std.Io) !nethernet.identity_issuer.Keys {
-        var client: std.http.Client = .{ .allocator = allocator, .io = io };
-        defer client.deinit();
-        var buffer: [64 * 1024]u8 = undefined;
-        var writer = std.Io.Writer.fixed(&buffer);
-        const result = try client.fetch(.{
-            .location = .{ .url = "https://authorization.franchise.minecraft-services.net/.well-known/keys" },
-            .response_writer = &writer,
-        });
-        if (result.status != .ok) return error.IssuerFetchFailed;
-        return nethernet.identity_issuer.Keys.init(allocator, writer.buffered(), "https://authorization.franchise.minecraft-services.net/", "api://auth-minecraft-services/multiplayer");
-    }
-
-    fn verify(context: ?*anyopaque, token: []const u8) !?nethernet.sdp_identity.Key {
-        const self: *Authority = @ptrCast(@alignCast(context.?));
-        return try self.keys.verify(self.allocator, token, std.Io.Clock.real.now(self.io).toSeconds());
-    }
-};
+test requestedProtocol {
+    try std.testing.expectEqual(@as(?u32, 2193), requestedProtocol(&.{ 6, 0xc1, 0x01, 0, 0, 0x08, 0x91 }));
+    try std.testing.expectEqual(@as(?u32, 2193), requestedProtocol(&.{ 0xfe, 6, 0xc1, 0x01, 0, 0, 0x08, 0x91 }));
+    try std.testing.expectEqual(@as(?u32, null), requestedProtocol(&.{ 6, 0x01, 0, 0, 0x08, 0x91 }));
+    try std.testing.expectEqual(@as(?u32, null), requestedProtocol(&.{}));
+}

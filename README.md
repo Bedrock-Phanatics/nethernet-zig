@@ -135,40 +135,48 @@ received: hello
 [examples/minecraft.zig](examples/minecraft.zig) tests transport connections and
 receives Bedrock payloads. It does not implement login or gameplay.
 
-The example defaults to protocol 2193 and version 1.26.51 from
-[Mojang's protocol metadata](https://mojang.github.io/bedrock-protocol-docs/changelog/).
-These are advertised gameplay metadata, not a claim of tested client compatibility.
-Hosting applications should supply their own supported protocol and version.
-Use `--protocol` and `--version` to override the example defaults.
+The example advertises protocol 2193 and version 1.26.51, the latest stable
+release in [Mojang's protocol changelog](https://mojang.github.io/bedrock-protocol-docs/changelog/),
+so no flags are needed. `--protocol` and `--version` override them. Hosting
+applications should advertise the protocol their game layer actually speaks.
 
 ```powershell
 .\zig-out\bin\minecraft.exe --trace
 ```
 
 Connect through Add Server to `127.0.0.1:19132`. Keep the identity file between
-runs. The Windows default accepts both IPv4 and IPv6.
+runs so the client's trust-on-first-use prompt only appears once. The Windows
+default accepts both IPv4 and IPv6.
 
-The example fetches Minecraft's trusted RSA signing keys over HTTPS at startup
-and verifies client token signatures, issuer, audience, expiration, and the
-fingerprint binding. Startup fails if the keys cannot be fetched within 15 seconds.
-This single-connection smoke test takes one key snapshot per run. Long-running
-hosts must refresh trusted keys on rotation. `--offline` explicitly disables
-issuer verification and permits anonymous clients.
+The example verifies client tokens against Minecraft's published signing keys,
+including issuer, audience, expiration, and the fingerprint binding. `--offline`
+disables issuer verification and permits anonymous clients.
 
-With `--trace`, expect `GET /v1/join HTTP 200 application/json`, followed by
-`POST /v1/join/{networkId} received`. A successful transport connection reaches
-`[7/7] first Bedrock payload`. Live vanilla compatibility still needs testing.
+With `--trace`, expect `GET /v1/join HTTP 200 application/json`, then
+`POST /v1/join/{networkId} received`. `[7/7] first Bedrock payload` means the
+WebRTC transport works end to end. The example then prints the protocol from
+the client's `RequestNetworkSettings`. Gameplay login is outside this library.
 
 For vanilla-facing applications, provide `status_provider` in
-`EndpointListenerOptions`. GET returns JSON metadata, 503 when unavailable, or
-500 when invalid. POST requires `Content-Type: application/sdp`.
+`EndpointListenerOptions`. Without one, GET returns 200 with an empty body,
+like go-nethernet. Provider failures return 503 and invalid metadata 500.
+TLS handshakes on the plaintext port are closed immediately so clients fall
+back from `https://` to `http://` without waiting.
 
 Authenticated listeners require `connection.verify_client`. Without it, startup
 returns `MissingClientVerifier`, unless `allow_anonymous` is explicitly enabled.
-`identity_issuer.Keys` verifies RS256 tokens against a host-supplied JWKS snapshot,
-issuer, and audience. Keep the snapshot and its issuer/audience strings alive
-while verifying, and synchronize replacement with active verifiers. Never fetch
-keys from URLs supplied by an untrusted token.
+`identity_issuer.Authority` verifies Minecraft multiplayer tokens and refetches
+the signing keys when an unknown key ID appears, at most once a minute:
+
+```zig
+var authority = nethernet.identity_issuer.Authority.init(gpa, io);
+defer authority.deinit();
+try authority.refresh();
+// EndpointListenerOptions.connection.verify_client = authority.verifier()
+```
+
+`identity_issuer.Keys` verifies RS256 tokens against a host-supplied JWKS
+snapshot for other issuers.
 
 A self-signed server identity proves key possession, not server trust. Clients
 can use `verify_server` to pin a known key. Keep the server's identity file across

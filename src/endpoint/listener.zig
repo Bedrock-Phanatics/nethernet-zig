@@ -188,6 +188,10 @@ pub const Listener = struct {
             error.IdentityTooDeep,
             error.UnsupportedAlgorithm,
             error.UnsupportedKey,
+            error.UnknownSigningKey,
+            error.UntrustedIssuer,
+            error.InvalidAudience,
+            error.SignatureVerificationFailed,
             error.InvalidCharacter,
             error.InvalidPadding,
             error.SyntaxError,
@@ -225,6 +229,11 @@ pub const Listener = struct {
         while (true) {
             const stream = self.server.accept(self.io) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
+                error.ConnectionAborted, error.BlockedByFirewall, error.ProtocolFailure, error.WouldBlock => continue,
+                error.ProcessFdQuotaExceeded, error.SystemFdQuotaExceeded, error.SystemResources => {
+                    try std.Io.sleep(self.io, .fromMilliseconds(100), .awake);
+                    continue;
+                },
                 else => {
                     self.accepted.close(self.io);
                     return;
@@ -267,6 +276,7 @@ pub const Listener = struct {
         switch (try select.await()) {
             .done => |result| result catch |err| {
                 if (err != error.Canceled and
+                    err != error.TlsNotSupported and
                     err != error.HttpConnectionClosing and
                     err != error.HttpRequestTruncated and
                     response_state.load(.acquire) == .pending)
@@ -302,6 +312,12 @@ pub const Listener = struct {
         var writer = stream.writer(self.io, &output);
         var http = std.http.Server.init(&reader.interface, &writer.interface);
 
+        // Clients probe https first, so close TLS hellos right away and let them fall back to http.
+        if (try reader.interface.peekByte() == 0x16) {
+            self.trace("TLS handshake on plaintext signaling closed", .{});
+            return error.TlsNotSupported;
+        }
+
         var request = try http.receiveHead();
         if (request.head.expect) |expect| {
             if (!std.mem.eql(u8, expect, "100-continue")) return error.HttpExpectationFailed;
@@ -315,11 +331,8 @@ pub const Listener = struct {
         {
             self.trace("GET /v1/join received", .{});
             const provider = self.options.status_provider orelse {
-                self.trace("GET /v1/join HTTP 503 (no status provider)", .{});
-                return respond(&request, response_state, "", .{
-                    .status = .service_unavailable,
-                    .keep_alive = false,
-                });
+                self.trace("GET /v1/join HTTP 200 (no status provider)", .{});
+                return respond(&request, response_state, "", .{ .keep_alive = false });
             };
 
             const status = provider.get(provider.context) catch |err| {
@@ -385,7 +398,7 @@ pub const Listener = struct {
             });
         }
 
-        const content_type = request.head.content_type orelse "";
+        const content_type = request.head.content_type orelse "application/sdp";
         const media_type = std.mem.trim(u8, content_type[0 .. std.mem.indexOfScalar(u8, content_type, ';') orelse content_type.len], " \t");
         if (!std.ascii.eqlIgnoreCase(media_type, "application/sdp")) {
             self.trace("POST HTTP 415 (expected application/sdp)", .{});
@@ -576,6 +589,7 @@ pub const Listener = struct {
                         });
 
                         answered = true;
+                        stream.shutdown(self.io, .send) catch {};
                         self.trace("HTTP 200 application/sdp returned", .{});
                     },
 
@@ -593,6 +607,13 @@ pub const Listener = struct {
         self.trace("both data channels open; connection accepted", .{});
     }
 };
+
+test "identity verification failures produce HTTP 403" {
+    for ([_]anyerror{ error.UnknownSigningKey, error.UntrustedIssuer, error.InvalidAudience, error.SignatureVerificationFailed }) |failure| {
+        try std.testing.expectEqual(std.http.Status.forbidden, Listener.errorStatus(failure));
+    }
+    try std.testing.expectEqual(std.http.Status.internal_server_error, Listener.errorStatus(error.OutOfMemory));
+}
 
 const SdpSummary = struct {
     identity: bool = false,

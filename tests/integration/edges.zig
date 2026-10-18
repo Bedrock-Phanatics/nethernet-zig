@@ -388,7 +388,7 @@ test "an exhausted UDP port range fails instead of hanging" {
         .{
             .connection = .{
                 .allow_anonymous = true,
-                .native = .{ .port_range_begin = 31301, .port_range_end = 31301 },
+                .native = .{ .bind_address = "127.0.0.1", .port_range_begin = 31301, .port_range_end = 31301 },
             },
             .maximum_negotiations = 2,
             .request_timeout_ms = 2000,
@@ -414,6 +414,7 @@ test "an exhausted UDP port range fails instead of hanging" {
         .connection_timeout_ms = 3000,
     })) |second| {
         second.destroy();
+        return error.ExhaustedPortRangeAccepted;
     } else |_| {}
 
     try std.testing.expect(

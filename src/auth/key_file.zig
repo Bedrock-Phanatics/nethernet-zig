@@ -41,12 +41,13 @@ pub fn encode(key: KeyPair, output: *[encoded_size]u8) []const u8 {
 }
 
 pub fn decode(bytes: []const u8) !KeyPair {
+    if (bytes.len > maximum_size) return error.InvalidKeyFile;
     const info = try sequence(bytes, 0);
     if (info.end != bytes.len) return error.InvalidKeyFile;
 
-    const algorithm = try sequence(bytes, try expectInteger(bytes, info.start, 0));
-    const key_oid = try oid(bytes, algorithm.start);
-    const curve_oid = try oid(bytes, key_oid.end);
+    const algorithm = try sequence(bytes[0..info.end], try expectInteger(bytes[0..info.end], info.start, 0));
+    const key_oid = try oid(bytes[0..algorithm.end], algorithm.start);
+    const curve_oid = try oid(bytes[0..algorithm.end], key_oid.end);
     if (curve_oid.end != algorithm.end) return error.InvalidKeyFile;
 
     if (!std.mem.eql(u8, key_oid.contents, &ec_public_key_oid) or
@@ -56,18 +57,39 @@ pub fn decode(bytes: []const u8) !KeyPair {
     }
 
     const wrapper = try take(bytes, algorithm.end, .octetstring, .primitive);
-    const ec_key = try sequence(bytes, wrapper.start);
+    if (wrapper.end != info.end) return error.InvalidKeyFile;
+    const ec_key = try sequence(bytes[0..wrapper.end], wrapper.start);
     if (ec_key.end != wrapper.end) return error.InvalidKeyFile;
 
-    const scalar_index = try expectInteger(bytes, ec_key.start, 1);
-    const scalar = try take(bytes, scalar_index, .octetstring, .primitive);
+    const scalar_index = try expectInteger(bytes[0..ec_key.end], ec_key.start, 1);
+    const scalar = try take(bytes[0..ec_key.end], scalar_index, .octetstring, .primitive);
     if (scalar.contents.len != scalar_size) return error.InvalidKeyFile;
 
     var secret: [scalar_size]u8 = undefined;
     defer std.crypto.secureZero(u8, &secret);
     @memcpy(&secret, scalar.contents);
 
-    return KeyPair.fromSecretKey(try jwt.Scheme.SecretKey.fromBytes(secret));
+    const key = try KeyPair.fromSecretKey(try jwt.Scheme.SecretKey.fromBytes(secret));
+    var next = scalar.end;
+    if (next < ec_key.end and bytes[next] == 0xa0) {
+        const parameters = try element(bytes[0..ec_key.end], next, 0xa0);
+        const curve = try oid(bytes[0..parameters.end], parameters.start);
+        if (curve.end != parameters.end or !std.mem.eql(u8, curve.contents, &secp384r1_oid))
+            return error.InvalidKeyFile;
+        next = parameters.end;
+    }
+    if (next < ec_key.end) {
+        const public = try element(bytes[0..ec_key.end], next, 0xa1);
+        const point = try take(bytes[0..public.end], public.start, .bitstring, .primitive);
+        if (point.end != public.end or point.contents.len < 2 or point.contents[0] != 0)
+            return error.InvalidKeyFile;
+        const provided = jwt.Scheme.PublicKey.fromSec1(point.contents[1..]) catch return error.InvalidKeyFile;
+        if (!std.mem.eql(u8, &provided.toUncompressedSec1(), &key.public_key.toUncompressedSec1()))
+            return error.InvalidKeyFile;
+        next = public.end;
+    }
+    if (next != ec_key.end) return error.InvalidKeyFile;
+    return key;
 }
 
 pub fn loadOrCreate(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !KeyPair {
@@ -91,11 +113,11 @@ pub fn loadOrCreate(io: std.Io, allocator: std.mem.Allocator, path: []const u8) 
         var encoded: [encoded_size]u8 = undefined;
         defer std.crypto.secureZero(u8, &encoded);
 
-        cwd.writeFile(io, .{
-            .sub_path = path,
-            .data = encode(key, &encoded),
-            .flags = .{ .exclusive = true, .permissions = private_permissions },
-        }) catch |err| switch (err) {
+        var file = try cwd.createFileAtomic(io, path, .{ .permissions = private_permissions });
+        defer file.deinit(io);
+        try file.file.writeStreamingAll(io, encode(key, &encoded));
+        try file.file.sync(io);
+        file.link(io) catch |err| switch (err) {
             error.PathAlreadyExists => continue,
             else => return err,
         };
@@ -126,15 +148,12 @@ fn take(
     tag: der.Tag,
     pc: der.PC,
 ) !Element {
-    if (index + 2 > bytes.len) return error.InvalidKeyFile;
+    return element(bytes, index, @bitCast(der.Identifier{ .tag = tag, .pc = pc, .class = .universal }));
+}
 
-    const identifier: der.Identifier = @bitCast(bytes[index]);
-    if (identifier.tag != tag or
-        identifier.pc != pc or
-        identifier.class != .universal)
-    {
+fn element(bytes: []const u8, index: usize, identifier: u8) !Element {
+    if (index > bytes.len or bytes.len - index < 2 or bytes[index] != identifier)
         return error.InvalidKeyFile;
-    }
 
     const size_byte = bytes[index + 1];
     var header: usize = 2;
@@ -147,8 +166,10 @@ fn take(
         }
 
         header += long;
+        if (bytes[index + 2] == 0) return error.InvalidKeyFile;
         length = 0;
         for (bytes[index + 2 ..][0..long]) |byte| length = (length << 8) | byte;
+        if (length < 128) return error.InvalidKeyFile;
     }
 
     const start = index + header;
@@ -335,4 +356,48 @@ test "identity files persist across calls and are never silently replaced" {
         error.InvalidKeyFile,
         loadOrCreate(io, allocator, path),
     );
+}
+
+test "PKCS#8 rejects inconsistent public keys and trailing nested data" {
+    var encoded: [encoded_size]u8 = undefined;
+    const key = try KeyPair.generateDeterministic(.{21} ** 48);
+    _ = encode(key, &encoded);
+    const other = try KeyPair.generateDeterministic(.{22} ** 48);
+    @memcpy(encoded[public_key_offset..], &other.public_key.toUncompressedSec1());
+    try std.testing.expectError(error.InvalidKeyFile, decode(&encoded));
+    _ = encode(key, &encoded);
+    encoded[scalar_offset + scalar_size] = 0xa2;
+    try std.testing.expectError(error.InvalidKeyFile, decode(&encoded));
+    _ = encode(key, &encoded);
+    encoded[scalar_offset + scalar_size + 1] -= 1;
+    try std.testing.expectError(error.InvalidKeyFile, decode(&encoded));
+    _ = encode(key, &encoded);
+    encoded[public_key_offset - 1] = 1;
+    try std.testing.expectError(error.InvalidKeyFile, decode(&encoded));
+    try std.testing.expectError(error.InvalidKeyFile, sequence(&.{ 0x30, 0x81, 1, 0 }, 0));
+    try std.testing.expectError(error.InvalidKeyFile, sequence(&.{ 0x30, 0x82, 0, 128 }, 0));
+}
+
+test "concurrent identity creation publishes one complete key" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&buffer, ".zig-cache/tmp/{s}/shared.der", .{tmp.sub_path});
+    var tasks: [8]std.Io.Future(@typeInfo(@TypeOf(loadOrCreate)).@"fn".return_type.?) = undefined;
+    var started: usize = 0;
+    defer for (tasks[0..started]) |*task| {
+        _ = task.cancel(io) catch {};
+    };
+    for (&tasks) |*task| {
+        task.* = try io.concurrent(loadOrCreate, .{ io, std.testing.allocator, path });
+        started += 1;
+    }
+    const expected = try tasks[0].await(io);
+    for (tasks[1..]) |*task| {
+        const actual = try task.await(io);
+        try std.testing.expectEqualSlices(u8, &expected.secret_key.toBytes(), &actual.secret_key.toBytes());
+    }
+    const loaded = try loadOrCreate(io, std.testing.allocator, path);
+    try std.testing.expectEqualSlices(u8, &expected.secret_key.toBytes(), &loaded.secret_key.toBytes());
 }

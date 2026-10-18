@@ -167,7 +167,7 @@ test "HTTP rejects invalid routes, network IDs, empty SDP and oversized bodies" 
     const cases = [_]Case{
         .{
             .request = "POST /v1/join/1 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\n\r\nnope",
-            .status = "415",
+            .status = "400",
         },
         .{
             .request = "POST /v1/join/1 HTTP/1.1\r\nHost: localhost\r\nContent-Type: text/plain\r\nContent-Length: 4\r\n\r\nnope",
@@ -175,7 +175,7 @@ test "HTTP rejects invalid routes, network IDs, empty SDP and oversized bodies" 
         },
         .{
             .request = "GET /v1/join HTTP/1.1\r\nHost: localhost\r\n\r\n",
-            .status = "503",
+            .status = "200",
         },
         .{
             .request = "GET /bad HTTP/1.1\r\nHost: localhost\r\n\r\n",
@@ -221,6 +221,10 @@ test "HTTP rejects invalid routes, network IDs, empty SDP and oversized bodies" 
             .request = "POST /v1/join/1 HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/sdp\r\nContent-Length: 4\r\n\r\nnope",
             .status = "400",
         },
+        .{
+            .request = "\x16\x03\x01\x00\x05hello",
+            .status = "",
+        },
     };
 
     for (cases) |case| {
@@ -234,6 +238,10 @@ test "HTTP rejects invalid routes, network IDs, empty SDP and oversized bodies" 
 
         var read_buffer: [1024]u8 = undefined;
         var reader = stream.reader(io, &read_buffer);
+        if (case.status.len == 0) {
+            try std.testing.expectError(error.EndOfStream, reader.interface.takeByte());
+            continue;
+        }
         const prefix = try reader.interface.take(12);
         try std.testing.expectEqualStrings(case.status, prefix[9..12]);
     }
@@ -287,6 +295,10 @@ test "HTTP reports identity rejection and peer creation failures" {
 
         var read_buffer: [512]u8 = undefined;
         var reader = stream.reader(io, &read_buffer);
+        if (case.status.len == 0) {
+            try std.testing.expectError(error.EndOfStream, reader.interface.takeByte());
+            continue;
+        }
         const prefix = try reader.interface.take(12);
         try std.testing.expectEqualStrings(case.status, prefix[9..12]);
     }
