@@ -231,6 +231,7 @@ pub const Peer = struct {
 
     wakeup: Wakeup = .{},
     subscriber: ?*Wakeup = null,
+    idle_sequence: ?Wakeup.Token = null,
 
     state: State = .new,
     stopping: bool = false,
@@ -732,6 +733,10 @@ pub const Peer = struct {
             if (self.queue_pop_test_hook) |hook| hook(self);
         }
 
+        // Every enqueue and state change signals the wakeup under the lock, so an unchanged sequence means still empty.
+        const sequence = self.wakeup.sequence.load(.acquire);
+        if (self.idle_sequence == sequence) return null;
+
         const lock_zone = trace.zone(@src(), "peer.poll.lock");
         self.mutex.lockUncancelable(self.io);
         lock_zone.end();
@@ -743,7 +748,9 @@ pub const Peer = struct {
 
         if (!self.options.disable_trickle or !self.gathered or self.description_sent) {
             defer self.mutex.unlock(self.io);
-            return self.dequeueLocked(output, signals_only);
+            const event = try self.dequeueLocked(output, signals_only);
+            if (event == null and self.queue.count == 0) self.idle_sequence = sequence;
+            return event;
         }
         self.mutex.unlock(self.io);
 
@@ -1835,6 +1842,58 @@ test "unreliable drops preserve capacity for reliable traffic" {
 
     peer.enqueue(3, "x");
     try std.testing.expectEqual(State.failed, peer.getState());
+}
+
+test "idle polls notice every later callback" {
+    const peer = try Peer.create(std.testing.allocator, std.testing.io, .{});
+    defer peer.destroy();
+    var output: [16]u8 = undefined;
+
+    try std.testing.expect((try peer.poll(&output)) == null);
+    try std.testing.expect(peer.idle_sequence != null);
+    peer.enqueue(3, &.{ 0, 42 });
+    try std.testing.expectEqualSlices(u8, &.{ 0, 42 }, (try peer.poll(&output)).?.reliable_fragment);
+
+    peer.enqueue(3, &.{ 0, 43 });
+    try std.testing.expect((try peer.pollRestricted(&output, true)) == null);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 43 }, (try peer.poll(&output)).?.reliable_fragment);
+    try std.testing.expect((try peer.poll(&output)) == null);
+
+    peer.enqueue(2, "candidate");
+    try std.testing.expectEqualStrings("candidate", (try peer.pollRestricted(&output, true)).?.candidate);
+    try std.testing.expect((try peer.pollRestricted(&output, true)) == null);
+
+    Peer.onError(0, null, peer);
+    try std.testing.expectError(error.ConnectionClosed, peer.poll(&output));
+}
+
+test "concurrent callbacks are never missed by an idle poller" {
+    const io = std.testing.io;
+    const count = 20_000;
+    const peer = try Peer.create(std.testing.allocator, io, .{ .queue_entries = count + 1 });
+    defer peer.destroy();
+
+    const Producer = struct {
+        fn run(target: *Peer) !void {
+            for (0..count) |i| target.enqueue(3, &.{ 0, @truncate(i) });
+        }
+    };
+    var producer = try io.concurrent(Producer.run, .{peer});
+    defer producer.cancel(io) catch {};
+
+    var output: [16]u8 = undefined;
+    var received: usize = 0;
+    while (received < count) {
+        const token = peer.wakeup.prepare();
+        if (try peer.poll(&output)) |event| {
+            try std.testing.expectEqual(@as(u8, @truncate(received)), event.reliable_fragment[1]);
+            received += 1;
+            continue;
+        }
+        try peer.wakeup.wait(io, token, wake.deadline(std.Io.Clock.awake.now(io), 10_000));
+        if (!peer.wakeup.signaled(token)) try std.testing.expect(!peer.hasPending(false));
+    }
+    try producer.await(io);
 }
 
 test "default callback queue accepts a maximum-sized signaling event" {

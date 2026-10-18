@@ -269,6 +269,7 @@ pub const Connection = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     peer: *native.Peer,
+    idle_sequence: ?wake.Wakeup.Token = null,
 
     role: Role,
     id: u64,
@@ -589,6 +590,9 @@ pub const Connection = struct {
     }
 
     fn pollInternal(self: *Connection, signals_only: bool) !?Event {
+        // An idle established connection has no deadlines, so only a peer callback can give it work.
+        if (self.idle_sequence == self.peer.wakeup.sequence.load(.acquire)) return null;
+
         const zone = trace.zone(@src(), "connection.poll");
         defer zone.end();
         errdefer {
@@ -642,6 +646,9 @@ pub const Connection = struct {
                     assembly.buffer.capacity > framing.maximum_segment_payload)
                     assembly.clear(self.allocator);
             }
+            if (self.established and self.negotiation_scratch == null and
+                self.assemblies[0].started == null and self.assemblies[1].started == null)
+                self.idle_sequence = self.peer.idle_sequence;
             return null;
         };
 
@@ -1003,6 +1010,7 @@ test "completed reassembly releases large buffers and reuses small ones" {
         try connection.peer.queue.push(3, frame[0..size]);
         frame[0] = 0;
         try connection.peer.queue.push(3, frame[0..size]);
+        connection.peer.wakeup.signal(std.testing.io);
         const message = try connection.receive();
         try std.testing.expectEqual(2 * (size - 1), message.data.len);
         for (message.data) |byte| try std.testing.expectEqual(@as(u8, 42), byte);
@@ -1412,8 +1420,32 @@ test "a transient disconnect neither closes nor stops the connection" {
     try std.testing.expectEqual(native.State.connected, connection.state());
 
     connection.peer.state = .failed;
+    connection.peer.wakeup.signal(std.testing.io);
     try std.testing.expectError(error.ConnectionClosed, connection.poll());
     try std.testing.expectEqual(native.State.closed, connection.state());
+}
+
+test "idle connections wake on new fragments and close" {
+    const io = std.testing.io;
+    const connection = try Connection.create(std.testing.allocator, io, .client, 1, "remote", .{});
+    defer connection.destroy();
+    connection.established = true;
+    connection.peer.gathered = true;
+
+    try std.testing.expect((try connection.poll()) == null);
+    try std.testing.expect(connection.idle_sequence != null);
+    try std.testing.expect((try connection.poll()) == null);
+
+    try connection.peer.queue.push(3, &.{ 1, 'a' });
+    connection.peer.wakeup.signal(io);
+    try std.testing.expect((try connection.poll()) == null);
+    try connection.peer.queue.push(3, &.{ 0, 'b' });
+    connection.peer.wakeup.signal(io);
+    try std.testing.expectEqualStrings("ab", (try connection.poll()).?.message.data);
+    try std.testing.expect((try connection.poll()) == null);
+
+    connection.close();
+    try std.testing.expectError(error.ConnectionClosed, connection.poll());
 }
 
 fn signedOffer(
