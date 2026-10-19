@@ -14,6 +14,7 @@ const c = @cImport({
 });
 
 pub const maximum_signal_size = 1024 * 1024;
+const maximum_sctp_message = framing.maximum_segment_payload + 1;
 
 /// Skips the safe-build 0xAA fill so large buffers only become resident as they are used.
 pub fn allocLazy(allocator: std.mem.Allocator, len: usize) error{OutOfMemory}![]u8 {
@@ -132,6 +133,7 @@ fn hasUsableLocalCandidate(sdp: []const u8) bool {
 
 pub const CallbackStats = struct {
     dropped_unreliable_packets: u64,
+    receive_pauses: u64,
     queue_high_water_bytes: usize,
     queue_high_water_entries: usize,
 };
@@ -269,6 +271,8 @@ pub const Peer = struct {
     queue: Queue,
     queued_signals: usize = 0,
     dropped_unreliable_packets: u64 = 0,
+    receive_paused: bool = false,
+    receive_pauses: u64 = 0,
     segment_payload: std.atomic.Value(usize) = .init(0),
 
     pub fn create(allocator: std.mem.Allocator, io: std.Io, options: Options) !*Peer {
@@ -307,7 +311,7 @@ pub const Peer = struct {
 
         var config = std.mem.zeroes(c.rtcConfiguration);
         config.disableAutoNegotiation = true;
-        config.maxMessageSize = framing.maximum_segment_payload + 1;
+        config.maxMessageSize = maximum_sctp_message;
         config.mtu = 1200;
         config.iceServers = @ptrCast(@constCast(options.ice_servers.ptr));
         config.iceServersCount = @intCast(options.ice_servers.len);
@@ -467,6 +471,7 @@ pub const Peer = struct {
         defer self.mutex.unlock(self.io);
         return .{
             .dropped_unreliable_packets = self.dropped_unreliable_packets,
+            .receive_pauses = self.receive_pauses,
             .queue_high_water_bytes = self.queue.high_water_bytes,
             .queue_high_water_entries = self.queue.high_water_entries,
         };
@@ -831,6 +836,7 @@ pub const Peer = struct {
             null) orelse return null;
 
         if (entry.tag < 3) self.queued_signals -= 1;
+        self.resumeReceiveLocked();
         if (entry.tag <= 1) uppercaseLocalFingerprintDigests(output[0..entry.data.len]);
         return switch (entry.tag) {
             0 => .{ .offer = entry.data },
@@ -1029,7 +1035,27 @@ pub const Peer = struct {
             self.state = .failed;
             self.drain_queued_on_close = false;
         }
+        if (tag >= 3) self.pauseReceiveLocked();
         self.notify();
+    }
+
+    // SCTP reads stop before the queue can overflow, so unread data closes the receive window
+    // instead of failing the connection. Native calls stay under the lock to keep them ordered.
+    fn pauseReceiveLocked(self: *Peer) void {
+        if (self.receive_paused or self.id < 0 or
+            (self.queue.bytes.len - self.queue.used_bytes >= maximum_sctp_message and
+                self.queue.entries.len - self.queue.count >= 2)) return;
+        self.receive_paused = true;
+        self.receive_pauses +|= 1;
+        _ = c.rtcSetSctpReceivePaused(self.id, true);
+    }
+
+    fn resumeReceiveLocked(self: *Peer) void {
+        if (!self.receive_paused or self.stopping or self.id < 0 or
+            self.queue.bytes.len - self.queue.used_bytes < @max(self.queue.bytes.len / 2, maximum_sctp_message) or
+            self.queue.entries.len - self.queue.count < @max(self.queue.entries.len / 2, 2)) return;
+        self.receive_paused = false;
+        _ = c.rtcSetSctpReceivePaused(self.id, false);
     }
 
     fn onDescription(
@@ -1873,6 +1899,38 @@ test "unreliable drops preserve capacity for reliable traffic" {
 
     peer.enqueue(3, "x");
     try std.testing.expectEqual(State.failed, peer.getState());
+}
+
+test "reliable pressure pauses receive before overflow and resumes after draining half" {
+    const peer = try Peer.create(std.testing.allocator, std.testing.io, .{
+        .queue_bytes = 2 * maximum_sctp_message,
+        .queue_entries = 8,
+    });
+    defer peer.destroy();
+    var output: [maximum_sctp_message]u8 = undefined;
+
+    for (0..6) |_| peer.enqueue(3, &.{ 0, 42 });
+    try std.testing.expect(!peer.receive_paused);
+    peer.enqueue(3, &.{ 0, 43 });
+    try std.testing.expect(peer.receive_paused);
+    peer.enqueue(3, &.{ 0, 44 });
+    try std.testing.expectEqual(State.new, peer.getState());
+
+    for (0..3) |_| _ = (try peer.poll(&output)).?;
+    try std.testing.expect(peer.receive_paused);
+    _ = (try peer.poll(&output)).?;
+    try std.testing.expect(!peer.receive_paused);
+
+    const large = try std.testing.allocator.alloc(u8, maximum_sctp_message);
+    defer std.testing.allocator.free(large);
+    @memset(large, 0);
+    peer.enqueue(3, large[0..2]);
+    peer.enqueue(3, large);
+    try std.testing.expect(peer.receive_paused);
+    try std.testing.expectEqual(@as(u64, 2), peer.callbackStats().receive_pauses);
+    while (try peer.poll(&output)) |_| {}
+    try std.testing.expect(!peer.receive_paused);
+    try std.testing.expectEqual(State.new, peer.getState());
 }
 
 test "idle polls notice every later callback" {

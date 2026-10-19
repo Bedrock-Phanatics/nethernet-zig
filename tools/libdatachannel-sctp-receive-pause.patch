@@ -1,0 +1,113 @@
+diff --git a/include/rtc/rtc.h b/include/rtc/rtc.h
+index 73a0567..5d5441d 100644
+--- a/include/rtc/rtc.h
++++ b/include/rtc/rtc.h
+@@ -236,6 +236,8 @@ RTC_C_EXPORT bool rtcIsNegotiationNeeded(int pc);
+ 
+ RTC_C_EXPORT int rtcGetMaxDataChannelStream(int pc);
+ RTC_C_EXPORT int rtcGetRemoteMaxMessageSize(int pc);
++// Unread SCTP data stays in the receive window while paused, throttling the remote sender
++RTC_C_EXPORT int rtcSetSctpReceivePaused(int pc, bool paused);
+ 
+ // DataChannel, Track, and WebSocket common API
+ 
+diff --git a/src/capi.cpp b/src/capi.cpp
+index 4777e9a..a8eb4b1 100644
+--- a/src/capi.cpp
++++ b/src/capi.cpp
+@@ -718,6 +718,14 @@ int rtcGetRemoteMaxMessageSize(int pc) {
+ 	});
+ }
+ 
++int rtcSetSctpReceivePaused(int pc, bool paused) {
++	return wrap([&] {
++		auto peerConnection = getPeerConnection(pc);
++		peerConnection->setSctpReceivePaused(paused);
++		return RTC_ERR_SUCCESS;
++	});
++}
++
+ int rtcSetOpenCallback(int id, rtcOpenCallbackFunc cb) {
+ 	return wrap([&] {
+ 		auto channel = getChannel(id);
+diff --git a/include/rtc/peerconnection.hpp b/include/rtc/peerconnection.hpp
+index f7a76a1..2fa5a49 100644
+--- a/include/rtc/peerconnection.hpp
++++ b/include/rtc/peerconnection.hpp
+@@ -95,6 +95,7 @@ public:
+ 	optional<string> remoteAddress() const;
+ 	uint16_t maxDataChannelId() const;
+ 	bool getSelectedCandidatePair(Candidate *local, Candidate *remote);
++	void setSctpReceivePaused(bool paused);
+ 
+ 	void setLocalDescription(Description::Type type = Description::Type::Unspec, LocalDescriptionInit init = {});
+ 	void gatherLocalCandidates(std::vector<IceServer> additionalIceServers = {});
+diff --git a/src/peerconnection.cpp b/src/peerconnection.cpp
+index 135f458..66772ba 100644
+--- a/src/peerconnection.cpp
++++ b/src/peerconnection.cpp
+@@ -388,6 +388,11 @@ bool PeerConnection::getSelectedCandidatePair(Candidate *local, Candidate *remot
+ 	return iceTransport ? iceTransport->getSelectedCandidatePair(local, remote) : false;
+ }
+ 
++void PeerConnection::setSctpReceivePaused(bool paused) {
++	if (auto sctpTransport = impl()->getSctpTransport())
++		sctpTransport->setRecvPaused(paused);
++}
++
+ void PeerConnection::clearStats() {
+ 	if (auto sctpTransport = impl()->getSctpTransport())
+ 		return sctpTransport->clearStats();
+diff --git a/src/impl/sctptransport.hpp b/src/impl/sctptransport.hpp
+index 769b505..4e75a71 100644
+--- a/src/impl/sctptransport.hpp
++++ b/src/impl/sctptransport.hpp
+@@ -51,6 +51,7 @@ public:
+ 	bool flush();
+ 	void closeStream(unsigned int stream);
+ 	void close();
++	void setRecvPaused(bool paused);
+ 
+ 	unsigned int maxStream() const;
+ 
+@@ -103,6 +104,7 @@ private:
+ 
+ 	Processor mProcessor;
+ 	std::atomic<int> mPendingRecvCount = 0;
++	std::atomic<bool> mRecvPaused = false;
+ 	std::atomic<int> mPendingFlushCount = 0;
+ 	std::mutex mRecvMutex;
+ 	std::recursive_mutex mSendMutex; // buffered amount callback is synchronous
+diff --git a/src/impl/sctptransport.cpp b/src/impl/sctptransport.cpp
+index 87f7d0b..86212cd 100644
+--- a/src/impl/sctptransport.cpp
++++ b/src/impl/sctptransport.cpp
+@@ -421,6 +421,7 @@ void SctpTransport::closeStream(unsigned int stream) {
+ }
+ 
+ void SctpTransport::close() {
++	setRecvPaused(false);
+ 	mSendQueue.stop();
+ 	if (state() == State::Connected) {
+ 		mProcessor.enqueue(&SctpTransport::flush, shared_from_this());
+@@ -438,6 +439,11 @@ void SctpTransport::close() {
+ 	}
+ }
+ 
++void SctpTransport::setRecvPaused(bool paused) {
++	if (mRecvPaused.exchange(paused) && !paused)
++		enqueueRecv();
++}
++
+ unsigned int SctpTransport::maxStream() const {
+ 	unsigned int streamsCount = mNegotiatedStreamsCount.value_or(MAX_SCTP_STREAMS_COUNT);
+ 	return streamsCount > 0 ? streamsCount - 1 : 0;
+@@ -478,7 +484,7 @@ void SctpTransport::doRecv() {
+ 	std::lock_guard lock(mRecvMutex);
+ 	--mPendingRecvCount;
+ 	try {
+-		while (state() != State::Disconnected && state() != State::Failed) {
++		while (!mRecvPaused && state() != State::Disconnected && state() != State::Failed) {
+ 			const size_t bufferSize = 65536;
+ 			byte buffer[bufferSize];
+ 			socklen_t fromlen = 0;

@@ -1,4 +1,5 @@
 test {
+    _ = @import("backpressure.zig");
     _ = @import("concurrency.zig");
     _ = @import("edges.zig");
     _ = @import("endpoint.zig");
