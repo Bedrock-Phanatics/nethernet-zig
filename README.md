@@ -57,8 +57,14 @@ Keep the identity file across restarts so players only confirm the server once.
 | `identity_issuer.Authority` | Verifies client identities against Minecraft's keys |
 | `Peer.setNativeThreadPoolSize` | Native worker count, at most four by default |
 
-Messages returned by `receive` and `poll` are borrowed until the next call. Set
+Messages returned by `receive` and `poll` are borrowed until the next call. Poll a connection from
+one thread, while `send`, `close` and `closeGracefully` are safe from any thread. Set
 `allow_anonymous = true` to accept clients without an identity, for testing.
+
+When a connection's receive queue (`queue_bytes`, `queue_entries`) fills up, it stops reading SCTP
+until half of it is drained, so a slow reader throttles its sender instead of losing the connection.
+`callbackStats().receive_pauses` counts these pauses. If the peer closes the whole connection while
+reading is paused, data still waiting in the SCTP buffer is dropped with it.
 
 ## Networking
 
@@ -69,8 +75,10 @@ Messages returned by `receive` and `poll` are borrowed until the next call. Set
 | 7551 | UDP | LAN discovery |
 
 Every connection gets its own UDP socket by default. `.native = .{ .enable_ice_udp_mux = true }`
-shares one socket and uses less CPU, but on Linux raise `net.core.rmem_max` before serving many
-players with it.
+shares one socket and uses less CPU. A client address is only bound to a session after an
+authenticated ICE check, so reconnects and reused NAT ports reach the right session. The mux is not
+yet verified against vanilla clients, so it stays opt-in, and on Linux raise `net.core.rmem_max`
+before serving many players with it.
 
 ## Examples
 
@@ -91,7 +99,7 @@ sh tests/interop/run.sh            # needs Go
 ```
 
 `tools/stress-diagnostics.sh asan|tsan|zig-tsan|valgrind` runs the stress harness under sanitizers
-on Linux. `zig build echo-install` and `tests/interop/load` measure a server against go-nethernet
+on Linux, or the integration tests with `NETHERNET_DIAGNOSTICS_STEP=test-integration`. `zig build echo-install` and `tests/interop/load` measure a server against go-nethernet
 clients from another process.
 
 ## License
