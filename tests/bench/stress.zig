@@ -6,6 +6,8 @@ const Connection = nethernet.Connection;
 const Reliability = nethernet.Reliability;
 const ns_per_ms = std.time.ns_per_ms;
 
+pub const std_options: std.Options = if (@import("runtime_options").signal_stack) .{} else .{ .signal_stack_size = null };
+
 // Zig links TSan statically, so it has to start before libstdc++ constructors take their first lock.
 extern fn __tsan_init() callconv(.c) void;
 const tsan_preinit = [1]*const fn () callconv(.c) void{&__tsan_init};

@@ -63,7 +63,14 @@ fn addNativeRuntime(
 ) void {
     run.addPathDir(b.pathJoin(&.{ prefix, "bin" }));
     // The instrumented native build needs its runtime loaded before anything else.
-    if (sanitizer_runtime) |runtime| run.setEnvironmentVariable("LD_PRELOAD", runtime);
+    if (sanitizer_runtime) |runtime| {
+        run.setEnvironmentVariable("LD_PRELOAD", runtime);
+        // Zig threads install their own signal stack, which ASan would otherwise unmap at thread exit.
+        if (std.mem.indexOf(u8, runtime, "libasan") != null) run.setEnvironmentVariable(
+            "ASAN_OPTIONS",
+            b.fmt("use_sigaltstack=0:{s}", .{b.graph.environ_map.get("ASAN_OPTIONS") orelse ""}),
+        );
+    }
 
     switch (target.result.os.tag) {
         .linux => run.setEnvironmentVariable(
@@ -121,6 +128,19 @@ pub fn build(b: *std.Build) void {
     const build_options = b.addOptions();
     build_options.addOption(usize, "fuzz_iterations", fuzz_iterations);
     build_options.addOption(usize, "handshake_pairs", handshake_pairs);
+
+    // Zig's per-thread signal stack is unaligned, which a preloaded ASan cannot unpoison
+    // when native code throws, so ASan builds run without it.
+    const runtime_options = b.addOptions();
+    runtime_options.addOption(bool, "signal_stack", native_sanitizer != .address);
+    const test_runner: ?std.Build.Step.Compile.TestRunner = if (native_sanitizer == .address) blk: {
+        const source = b.graph.zig_lib_directory.handle.readFileAlloc(b.graph.io, "compiler/test_runner.zig", b.allocator, .limited(1 << 20)) catch |err|
+            std.debug.panic("cannot read the Zig test runner: {t}", .{err});
+        const options = "pub const std_options: std.Options = .{\n";
+        if (std.mem.indexOf(u8, source, options) == null) @panic("unexpected Zig test runner layout");
+        const patched = std.mem.replaceOwned(u8, b.allocator, source, options, options ++ "    .signal_stack_size = null,\n") catch @panic("OOM");
+        break :blk .{ .path = b.addWriteFiles().add("test_runner.zig", patched), .mode = .server };
+    } else null;
 
     const trace_options = b.addOptions();
     trace_options.addOption(bool, "tracy", tracy);
@@ -186,6 +206,7 @@ pub fn build(b: *std.Build) void {
     const integration_tests = b.addTest(.{
         .root_module = integration_module,
         .filters = native_filters,
+        .test_runner = test_runner,
     });
     const run_integration = b.addRunArtifact(integration_tests);
     addNativeRuntime(b, run_integration, target, native_prefix, sanitizer_runtime);
@@ -193,6 +214,7 @@ pub fn build(b: *std.Build) void {
     const library_tests = b.addTest(.{
         .root_module = nethernet,
         .filters = native_filters,
+        .test_runner = test_runner,
     });
     const run_library_tests = b.addRunArtifact(library_tests);
     addNativeRuntime(b, run_library_tests, target, native_prefix, sanitizer_runtime);
@@ -257,6 +279,7 @@ pub fn build(b: *std.Build) void {
 
     const stress_module = createModule(b, "tests/bench/stress.zig", target, optimize);
     stress_module.addImport("nethernet", nethernet);
+    stress_module.addOptions("runtime_options", runtime_options);
     if (sanitize_thread) stress_module.sanitize_thread = true;
     if (target.result.os.tag == .windows) stress_module.linkSystemLibrary("psapi", .{});
 
