@@ -11,7 +11,16 @@ const Relay = struct {
     client: ?std.Io.net.IpAddress = null,
     server: ?std.Io.net.IpAddress = null,
     blocked: std.atomic.Value(bool) = .init(false),
+    stopped: std.atomic.Value(bool) = .init(false),
     group: std.Io.Group = .init,
+
+    // A wake datagram ends the loop, since canceling a blocked Windows receive is not reliable.
+    fn stop(self: *Relay) void {
+        self.stopped.store(true, .release);
+        const own = std.Io.net.IpAddress.parseIp4("127.0.0.1", self.socket.address.getPort()) catch unreachable;
+        self.socket.send(self.io, &own, "x") catch {};
+        self.group.await(self.io) catch {};
+    }
 
     fn run(self: *Relay) std.Io.Cancelable!void {
         var buffer: [2048]u8 = undefined;
@@ -20,6 +29,7 @@ const Relay = struct {
                 error.Canceled => return error.Canceled,
                 else => continue,
             };
+            if (self.stopped.load(.acquire)) return;
             if (self.blocked.load(.acquire)) continue;
             self.mutex.lockUncancelable(self.io);
             const client = self.client;
@@ -119,7 +129,7 @@ test "a client that vanished silently does not capture its address from a new mu
     var relay: Relay = .{ .io = io, .socket = try address.bind(io, .{ .mode = .dgram, .protocol = .udp }) };
     defer relay.socket.close(io);
     try relay.group.concurrent(io, Relay.run, .{&relay});
-    defer relay.group.cancel(io);
+    defer relay.stop();
     const server_port = try freePort(io);
 
     const old_server = try createServer(io, 1, server_port);
@@ -133,6 +143,8 @@ test "a client that vanished silently does not capture its address from a new mu
         relay.blocked.store(true, .release);
     }
     relay.blocked.store(false, .release);
+    // The old session must still own the address when the new client arrives.
+    try std.testing.expectEqual(nethernet.State.connected, old_server.state());
 
     for (2..5) |id| {
         const server = try createServer(io, id, server_port);
@@ -146,7 +158,4 @@ test "a client that vanished silently does not capture its address from a new mu
         try server.send("back", .reliable);
         try std.testing.expectEqualStrings("back", (try receiveDeadline(client, std.Io.Clock.awake.now(io))).data);
     }
-
-    const state = old_server.state();
-    try std.testing.expect(state == .connected or state == .disconnected);
 }
