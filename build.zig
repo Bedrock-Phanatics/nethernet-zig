@@ -70,6 +70,10 @@ fn addNativeRuntime(
             "ASAN_OPTIONS",
             b.fmt("use_sigaltstack=0:{s}", .{b.graph.environ_map.get("ASAN_OPTIONS") orelse ""}),
         );
+        if (std.mem.indexOf(u8, runtime, "libtsan") != null) run.setEnvironmentVariable(
+            "TSAN_OPTIONS",
+            b.fmt("suppressions={s}:{s}", .{ b.pathFromRoot("tools/tsan.supp"), b.graph.environ_map.get("TSAN_OPTIONS") orelse "" }),
+        );
     }
 
     switch (target.result.os.tag) {

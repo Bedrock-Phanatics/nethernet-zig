@@ -1,0 +1,2 @@
+# Native code is not instrumented in Zig TSan runs, so its internal locking is invisible
+race:libdatachannel.so

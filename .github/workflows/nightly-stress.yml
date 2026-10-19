@@ -37,7 +37,8 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.16.0
-      - if: matrix.mode != 'zig-tsan'
+      # TSan defers the signals Zig uses to cancel blocked accepts, so only ASan runs the listener tests.
+      - if: matrix.mode == 'asan'
         run: sh tools/stress-diagnostics.sh ${{ matrix.mode }}
         env:
           NETHERNET_DIAGNOSTICS_STEP: test-integration
