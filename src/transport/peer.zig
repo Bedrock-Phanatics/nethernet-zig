@@ -365,7 +365,16 @@ pub const Peer = struct {
         self.mutex.unlock(self.io);
 
         const delete_zone = trace.zone(@src(), "rtcDeletePeerConnection");
-        if (id >= 0) _ = c.rtcDeletePeerConnection(id);
+        if (id >= 0) {
+            // Deletion only starts an async SCTP stop, but clearing a callback waits for its running call.
+            _ = c.rtcSetStateChangeCallback(id, null);
+            _ = c.rtcSetIceStateChangeCallback(id, null);
+            _ = c.rtcSetGatheringStateChangeCallback(id, null);
+            _ = c.rtcSetLocalDescriptionCallback(id, null);
+            _ = c.rtcSetLocalCandidateCallback(id, null);
+            _ = c.rtcSetDataChannelCallback(id, null);
+            _ = c.rtcDeletePeerConnection(id);
+        }
         for (channels) |channel| {
             if (channel >= 0) _ = c.rtcDeleteDataChannel(channel);
         }
