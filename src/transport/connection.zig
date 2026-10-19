@@ -409,8 +409,8 @@ pub const Connection = struct {
         self.allocator.destroy(self);
     }
 
+    /// Safe from any thread. Pending candidates belong to the signaling thread and are freed there or in destroy.
     pub fn close(self: *Connection) void {
-        self.clearPendingCandidates();
         self.peer.close();
     }
 
@@ -435,7 +435,6 @@ pub const Connection = struct {
     }
 
     pub fn closeGracefully(self: *Connection) !void {
-        defer self.clearPendingCandidates();
         try self.peer.closeGracefully(self.options.graceful_shutdown_timeout_ms);
     }
     pub fn ready(self: *Connection) bool {
@@ -500,7 +499,10 @@ pub const Connection = struct {
 
         if (!matches_connection) return error.UnexpectedSignal;
 
-        errdefer self.close();
+        errdefer {
+            self.clearPendingCandidates();
+            self.close();
+        }
 
         switch (self.state()) {
             .failed, .closed => return error.ConnectionClosed,
@@ -962,8 +964,46 @@ test "graceful close from another thread unblocks receive" {
         defer connection.destroy();
         connection.established = true;
         var receiving = try io.concurrent(Connection.receive, .{connection});
-        try connection.closeGracefully();
+        const closed = connection.closeGracefully();
         try std.testing.expectError(error.ConnectionClosed, receiving.await(io));
+        try closed;
+    }
+}
+
+test "concurrent closes, cancellation and receive never share candidate cleanup" {
+    const io = std.testing.io;
+    const candidate: Signal = .{
+        .kind = Signal.candidate,
+        .connection_id = 1,
+        .network_id = "remote",
+        .data = "candidate:1 1 udp 2122260223 127.0.0.1 9999 typ host",
+    };
+    const Closer = struct {
+        fn graceful(connection: *Connection) void {
+            connection.closeGracefully() catch {};
+        }
+    };
+    for (0..200) |round| {
+        const connection = try Connection.create(std.testing.allocator, io, .client, 1, "remote", .{});
+        defer connection.destroy();
+        connection.established = true;
+        for (0..4) |_| try connection.applySignal(candidate);
+
+        var receiving = try io.concurrent(Connection.receive, .{connection});
+        var closing = try io.concurrent(Connection.close, .{connection});
+        var draining = try io.concurrent(Closer.graceful, .{connection});
+        if (round % 2 == 0) {
+            connection.close();
+            try std.testing.expectError(error.ConnectionClosed, receiving.await(io));
+        } else {
+            _ = receiving.cancel(io) catch {};
+            connection.close();
+        }
+        closing.await(io);
+        draining.await(io);
+
+        try std.testing.expectError(error.ConnectionClosed, connection.applySignal(candidate));
+        try std.testing.expectEqual(@as(usize, 0), connection.pending_candidates.items.len);
     }
 }
 
