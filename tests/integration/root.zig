@@ -4,6 +4,7 @@ test {
     _ = @import("edges.zig");
     _ = @import("endpoint.zig");
     _ = @import("lan.zig");
+    _ = @import("mux.zig");
     _ = @import("network.zig");
     _ = @import("transport.zig");
 }

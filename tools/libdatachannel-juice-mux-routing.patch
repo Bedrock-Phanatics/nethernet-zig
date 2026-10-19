@@ -1,0 +1,77 @@
+diff --git a/deps/libjuice/src/conn_mux.c b/deps/libjuice/src/conn_mux.c
+index aa1235f..cda11fc 100644
+--- a/deps/libjuice/src/conn_mux.c
++++ b/deps/libjuice/src/conn_mux.c
+@@ -332,15 +332,12 @@ static juice_agent_t *lookup_agent(conn_registry_t *registry, char *buf, size_t
+ 
+ 	registry_impl_t *registry_impl = registry->impl;
+ 	map_entry_t *entry = find_map_entry(registry_impl, src, false);
+-	juice_agent_t *agent = entry && entry->type == MAP_ENTRY_TYPE_FULL ? entry->agent : NULL;
+-	if (agent) {
+-		JLOG_DEBUG("Found agent from address");
+-		return agent;
+-	}
++	juice_agent_t *mapped = entry && entry->type == MAP_ENTRY_TYPE_FULL ? entry->agent : NULL;
+ 
+ 	if (!is_stun_datagram(buf, len)) {
+-		JLOG_INFO("Got non-STUN message from unknown source address");
+-		return NULL;
++		if (!mapped)
++			JLOG_INFO("Got non-STUN message from unknown source address");
++		return mapped;
+ 	}
+ 
+ 	JLOG_VERBOSE("Looking up agent from STUN message content");
+@@ -363,10 +360,19 @@ static juice_agent_t *lookup_agent(conn_registry_t *registry, char *buf, size_t
+ 		}
+ 		*separator = '\0';
+ 		const char *local_ufrag = username;
++		if (is_ready(mapped) && strcmp(local_ufrag, mapped->local.ice_ufrag) == 0)
++			return mapped;
++
++		// The address is new, stale, or reused by another session. It is only bound to an agent
++		// once the request authenticates, so a forged request cannot redirect a live session.
+ 		for (int i = 0; i < registry->agents_size; ++i) {
+-			agent = registry->agents[i];
++			juice_agent_t *agent = registry->agents[i];
+ 			if (is_ready(agent)) {
+ 				if (strcmp(local_ufrag, agent->local.ice_ufrag) == 0) {
++					if (agent_verify_stun_binding(agent, buf, len, &msg) != 0) {
++						JLOG_WARN("Dropping unauthenticated STUN request for mapped ufrag");
++						return NULL;
++					}
+ 					JLOG_DEBUG("Found agent from ICE ufrag");
+ 					insert_map_entry(registry_impl, src, agent);
+ 					return agent;
+@@ -395,21 +401,24 @@ static juice_agent_t *lookup_agent(conn_registry_t *registry, char *buf, size_t
+ 
+ 			return NULL;
+ 		}
+-	} else {
+-		if (!STUN_IS_RESPONSE(msg.msg_class)) {
+-			JLOG_INFO("Got unexpected STUN message from unknown source address");
+-			return NULL;
+-		}
++	} else if (STUN_IS_RESPONSE(msg.msg_class)) {
++		// A stale address mapping must not swallow responses meant for a newer session
++		if (is_ready(mapped) && agent_find_entry_from_transaction_id(mapped, msg.transaction_id))
++			return mapped;
+ 
+ 		for (int i = 0; i < registry->agents_size; ++i) {
+-			agent = registry->agents[i];
+-			if (is_ready(agent)) {
++			juice_agent_t *agent = registry->agents[i];
++			if (agent != mapped && is_ready(agent)) {
+ 				if (agent_find_entry_from_transaction_id(agent, msg.transaction_id)) {
+ 					JLOG_DEBUG("Found agent from transaction ID");
+ 					return agent;
+ 				}
+ 			}
+ 		}
++	} else {
++		if (!mapped)
++			JLOG_INFO("Got unexpected STUN message from unknown source address");
++		return mapped;
+ 	}
+ 
+ 	return NULL;

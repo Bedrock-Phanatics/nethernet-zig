@@ -106,6 +106,7 @@ Apply-LibdatachannelPatch (Join-Path $root 'tools/libdatachannel-sctp-timer-whee
 Apply-LibdatachannelPatch (Join-Path $root 'tools/libdatachannel-juice-timers.patch')
 Apply-LibdatachannelPatch (Join-Path $root 'tools/libdatachannel-sctp-receive-pause.patch')
 Apply-LibdatachannelPatch (Join-Path $root 'tools/libdatachannel-dtls-incoming.patch')
+Apply-LibdatachannelPatch (Join-Path $root 'tools/libdatachannel-juice-mux-routing.patch')
 if ($Backend -eq 'MbedTLS') {
     Apply-LibdatachannelPatch (Join-Path $root 'tools/libdatachannel-mbedtls-link-order.patch')
 }
