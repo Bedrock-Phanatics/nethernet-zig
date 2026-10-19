@@ -377,11 +377,12 @@ pub const Peer = struct {
             _ = c.rtcSetLocalDescriptionCallback(id, null);
             _ = c.rtcSetLocalCandidateCallback(id, null);
             _ = c.rtcSetDataChannelCallback(id, null);
-            _ = c.rtcDeletePeerConnection(id);
         }
+        // Channels close here first, otherwise the async close of the peer races with their deletion.
         for (channels) |channel| {
             if (channel >= 0) _ = c.rtcDeleteDataChannel(channel);
         }
+        if (id >= 0) _ = c.rtcDeletePeerConnection(id);
         delete_zone.end();
 
         self.mutex.lockUncancelable(self.io);
