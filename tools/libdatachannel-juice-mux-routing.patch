@@ -1,8 +1,20 @@
 diff --git a/deps/libjuice/src/conn_mux.c b/deps/libjuice/src/conn_mux.c
-index aa1235f..cda11fc 100644
+index aa1235f..79c49b2 100644
 --- a/deps/libjuice/src/conn_mux.c
 +++ b/deps/libjuice/src/conn_mux.c
-@@ -332,15 +332,12 @@ static juice_agent_t *lookup_agent(conn_registry_t *registry, char *buf, size_t
+@@ -253,6 +253,11 @@ int conn_mux_registry_init(conn_registry_t *registry, udp_socket_config_t *confi
+ 		return -1;
+ 	}
+ 
++	// Every agent shares this socket, so it asks for a larger buffer than one connection needs
++	const sockopt_t buffer_size = 8 * 1024 * 1024;
++	setsockopt(registry_impl->sock, SOL_SOCKET, SO_RCVBUF, (const char *)&buffer_size, sizeof(buffer_size));
++	setsockopt(registry_impl->sock, SOL_SOCKET, SO_SNDBUF, (const char *)&buffer_size, sizeof(buffer_size));
++
+ 	registry_impl->port = udp_get_port(registry_impl->sock);
+ 
+ 	mutex_init(&registry_impl->send_mutex, 0);
+@@ -332,15 +337,12 @@ static juice_agent_t *lookup_agent(conn_registry_t *registry, char *buf, size_t
  
  	registry_impl_t *registry_impl = registry->impl;
  	map_entry_t *entry = find_map_entry(registry_impl, src, false);
@@ -22,7 +34,7 @@ index aa1235f..cda11fc 100644
  	}
  
  	JLOG_VERBOSE("Looking up agent from STUN message content");
-@@ -363,10 +360,19 @@ static juice_agent_t *lookup_agent(conn_registry_t *registry, char *buf, size_t
+@@ -363,10 +365,19 @@ static juice_agent_t *lookup_agent(conn_registry_t *registry, char *buf, size_t
  		}
  		*separator = '\0';
  		const char *local_ufrag = username;
@@ -43,7 +55,7 @@ index aa1235f..cda11fc 100644
  					JLOG_DEBUG("Found agent from ICE ufrag");
  					insert_map_entry(registry_impl, src, agent);
  					return agent;
-@@ -395,21 +401,24 @@ static juice_agent_t *lookup_agent(conn_registry_t *registry, char *buf, size_t
+@@ -395,21 +406,24 @@ static juice_agent_t *lookup_agent(conn_registry_t *registry, char *buf, size_t
  
  			return NULL;
  		}

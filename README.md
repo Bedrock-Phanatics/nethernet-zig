@@ -77,8 +77,9 @@ reading is paused, data still waiting in the SCTP buffer is dropped with it.
 Every connection gets its own UDP socket by default. `.native = .{ .enable_ice_udp_mux = true }`
 shares one socket and uses less CPU. A client address is only bound to a session after an
 authenticated ICE check, so reconnects and reused NAT ports reach the right session. The mux is not
-yet verified against vanilla clients, so it stays opt-in, and on Linux raise `net.core.rmem_max`
-before serving many players with it.
+yet verified against vanilla clients, so it stays opt-in. The shared socket asks for an 8 MiB
+buffer, so on Linux raise `net.core.rmem_max` and `net.core.wmem_max` to 8388608 before serving
+many players with it, otherwise bursts overflow the default buffer.
 
 ## Examples
 
