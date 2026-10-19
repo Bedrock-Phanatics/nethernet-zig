@@ -31,13 +31,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: [asan, tsan]
+        mode: [asan, tsan, zig-tsan]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.16.0
+      - if: matrix.mode != 'zig-tsan'
+        run: sh tools/stress-diagnostics.sh ${{ matrix.mode }}
+        env:
+          NETHERNET_DIAGNOSTICS_STEP: test-integration
       - run: >
           sh tools/stress-diagnostics.sh ${{ matrix.mode }}
-          --connections 2 --duration-ms 10000 --payload-size 8192
+          --connections 8 --duration-ms 20000 --payload-size 8192
           --churn-messages 200

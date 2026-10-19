@@ -59,8 +59,11 @@ fn addNativeRuntime(
     run: *std.Build.Step.Run,
     target: std.Build.ResolvedTarget,
     prefix: []const u8,
+    sanitizer_runtime: ?[]const u8,
 ) void {
     run.addPathDir(b.pathJoin(&.{ prefix, "bin" }));
+    // The instrumented native build needs its runtime loaded before anything else.
+    if (sanitizer_runtime) |runtime| run.setEnvironmentVariable("LD_PRELOAD", runtime);
 
     switch (target.result.os.tag) {
         .linux => run.setEnvironmentVariable(
@@ -91,8 +94,18 @@ pub fn build(b: *std.Build) void {
     const native_sanitizer = b.option(
         NativeSanitizer,
         "native-sanitizer",
-        "Link a matching instrumented native dependency build",
+        "Preload the runtime of a matching instrumented native dependency build",
     );
+    const native_compiler = b.option([]const u8, "native-compiler", "C compiler that built the native dependencies") orelse "cc";
+    const sanitizer_runtime: ?[]const u8 = if (native_sanitizer) |sanitizer| blk: {
+        const library = switch (sanitizer) {
+            .address => "libasan.so",
+            .thread => "libtsan.so",
+        };
+        const path = std.mem.trimEnd(u8, b.run(&.{ native_compiler, b.fmt("-print-file-name={s}", .{library}) }), "\r\n");
+        if (std.mem.indexOfScalar(u8, path, '/') == null) std.debug.panic("{s} cannot find {s}", .{ native_compiler, library });
+        break :blk path;
+    } else null;
     const native_test_filter = b.option(
         []const u8,
         "native-test-filter",
@@ -175,14 +188,14 @@ pub fn build(b: *std.Build) void {
         .filters = native_filters,
     });
     const run_integration = b.addRunArtifact(integration_tests);
-    addNativeRuntime(b, run_integration, target, native_prefix);
+    addNativeRuntime(b, run_integration, target, native_prefix, sanitizer_runtime);
 
     const library_tests = b.addTest(.{
         .root_module = nethernet,
         .filters = native_filters,
     });
     const run_library_tests = b.addRunArtifact(library_tests);
-    addNativeRuntime(b, run_library_tests, target, native_prefix);
+    addNativeRuntime(b, run_library_tests, target, native_prefix, sanitizer_runtime);
 
     const integration_step = b.step(
         "test-integration",
@@ -246,12 +259,6 @@ pub fn build(b: *std.Build) void {
     stress_module.addImport("nethernet", nethernet);
     if (sanitize_thread) stress_module.sanitize_thread = true;
     if (target.result.os.tag == .windows) stress_module.linkSystemLibrary("psapi", .{});
-    if (native_sanitizer) |sanitizer| {
-        stress_module.linkSystemLibrary(switch (sanitizer) {
-            .address => "asan",
-            .thread => "tsan",
-        }, .{});
-    }
 
     const stress = b.addExecutable(.{
         .name = "transport-stress",
@@ -266,7 +273,7 @@ pub fn build(b: *std.Build) void {
     stress_install_step.dependOn(&install_stress.step);
 
     const run_stress = b.addRunArtifact(stress);
-    addNativeRuntime(b, run_stress, target, native_prefix);
+    addNativeRuntime(b, run_stress, target, native_prefix, sanitizer_runtime);
     if (b.args) |args| run_stress.addArgs(args);
     const stress_step = b.step(
         "stress",
@@ -280,7 +287,7 @@ pub fn build(b: *std.Build) void {
     b.step("echo-install", "Install the out-of-process echo server").dependOn(&b.addInstallArtifact(echo, .{}).step);
 
     const run_stress_smoke = b.addRunArtifact(stress);
-    addNativeRuntime(b, run_stress_smoke, target, native_prefix);
+    addNativeRuntime(b, run_stress_smoke, target, native_prefix, sanitizer_runtime);
     run_stress_smoke.addArgs(&.{
         "--connections",
         "2",
