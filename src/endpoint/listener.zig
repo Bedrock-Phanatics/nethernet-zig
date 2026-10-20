@@ -37,6 +37,53 @@ pub const Options = struct {
     wakeup: ?*Wakeup = null,
 };
 
+/// TIME_WAIT from closed requests blocks a quick restart on Linux, so the port is reused, but only with
+/// SO_REUSEADDR: std's option also sets SO_REUSEPORT, which lets a second server take half the joins.
+fn listenExclusive(io: std.Io, address: std.Io.net.IpAddress) !std.Io.net.Server {
+    if (builtin.os.tag != .linux) return address.listen(io, .{});
+    const linux = std.os.linux;
+    const family: u32 = if (address == .ip4) linux.AF.INET else linux.AF.INET6;
+    const opened = linux.socket(family, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, linux.IPPROTO.TCP);
+    switch (linux.errno(opened)) {
+        .SUCCESS => {},
+        .AFNOSUPPORT => return error.AddressFamilyUnsupported,
+        else => return error.SystemResources,
+    }
+    const fd: linux.fd_t = @intCast(opened);
+    errdefer _ = linux.close(fd);
+    try std.posix.setsockopt(fd, linux.SOL.SOCKET, linux.SO.REUSEADDR, &std.mem.toBytes(@as(c_int, 1)));
+
+    var storage: linux.sockaddr.in6 = undefined;
+    var len: linux.socklen_t = undefined;
+    switch (address) {
+        .ip4 => |ip4| {
+            const in: *linux.sockaddr.in = @ptrCast(&storage);
+            in.* = .{ .port = std.mem.nativeToBig(u16, ip4.port), .addr = @bitCast(ip4.bytes) };
+            len = @sizeOf(linux.sockaddr.in);
+        },
+        .ip6 => |ip6| {
+            storage = .{ .port = std.mem.nativeToBig(u16, ip6.port), .flowinfo = ip6.flow, .addr = ip6.bytes, .scope_id = ip6.interface.index };
+            len = @sizeOf(linux.sockaddr.in6);
+        },
+    }
+    switch (linux.errno(linux.bind(fd, @ptrCast(&storage), len))) {
+        .SUCCESS => {},
+        .ADDRINUSE => return error.AddressInUse,
+        .ADDRNOTAVAIL => return error.AddressUnavailable,
+        .ACCES, .PERM => return error.AccessDenied,
+        else => return error.Unexpected,
+    }
+    if (linux.errno(linux.listen(fd, 128)) != .SUCCESS) return error.Unexpected;
+    if (linux.errno(linux.getsockname(fd, @ptrCast(&storage), &len)) != .SUCCESS) return error.Unexpected;
+
+    var bound = address;
+    switch (bound) {
+        .ip4 => |*ip4| ip4.port = std.mem.bigToNative(u16, @as(*const linux.sockaddr.in, @ptrCast(&storage)).port),
+        .ip6 => |*ip6| ip6.port = std.mem.bigToNative(u16, storage.port),
+    }
+    return .{ .socket = .{ .handle = fd, .address = bound }, .options = {} };
+}
+
 pub const Listener = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -80,8 +127,7 @@ pub const Listener = struct {
         );
         errdefer allocator.free(slots);
 
-        // TIME_WAIT from closed requests blocks a quick restart on Linux. Windows rebinds anyway.
-        var server = try address.listen(io, .{ .reuse_address = builtin.os.tag != .windows });
+        var server = try listenExclusive(io, address);
         errdefer server.deinit(io);
 
         var actual_options = options;
@@ -849,4 +895,13 @@ test "HTTP capacity exhaustion returns 503 and releases reservations" {
         try std.testing.expectEqual(@as(usize, 0), accepts);
         try std.testing.expectEqual(@as(usize, 0), negotiations);
     }
+}
+
+test "a second listener cannot take a port that is already serving" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    const first = try Listener.listen(std.testing.allocator, io, try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0"), .{ .connection = .{ .allow_anonymous = true }, .maximum_http_workers = 1, .maximum_negotiations = 1 });
+    defer first.destroy();
+    const taken: std.Io.net.IpAddress = .{ .ip4 = .loopback(first.server.socket.address.getPort()) };
+    try std.testing.expectError(error.AddressInUse, Listener.listen(std.testing.allocator, io, taken, .{ .connection = .{ .allow_anonymous = true }, .maximum_http_workers = 1, .maximum_negotiations = 1 }));
 }
