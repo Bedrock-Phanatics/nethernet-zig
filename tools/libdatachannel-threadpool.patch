@@ -17,7 +17,7 @@ index 1cc2073..295a5ca 100644
 +	std::function<void()> func = [task = std::move(task)]() { return (*task)(); };
  
 -	mTasks.push({time, [task = std::move(task)]() { return (*task)(); }});
-+	// Allocate and notify outside the lock so the woken worker does not block on it again
++	// The woken worker should not have to wait for this lock
 +	{
 +		std::unique_lock lock(mMutex);
 +		mTasks.push({time, std::move(func)});

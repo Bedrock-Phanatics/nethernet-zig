@@ -36,22 +36,22 @@ for setting in "set MBEDTLS_SSL_DTLS_SRTP" "set MBEDTLS_AES_ROM_TABLES" \
         -f .deps/mbedtls/include/mbedtls/mbedtls_config.h $setting
 done
 
-apply_patch() {
-    patch="$1"
-    if ! git -C .deps/libdatachannel apply --reverse --check "$patch" 2>/dev/null; then
+patches=""
+for name in bounds mbedtls-link-order threadpool dtls-timer sctp-timer-wheel juice-timers \
+    sctp-receive-pause dtls-incoming juice-mux-routing; do
+    patches="$patches $(pwd)/tools/libdatachannel-$name.patch"
+done
+# Patches are reapplied to a clean tree whenever one changes, so edited patches take effect.
+stamp=.deps/libdatachannel/.git/nethernet-patches
+wanted="$(cat $patches | git hash-object --stdin)"
+if [ "$(cat "$stamp" 2>/dev/null)" != "$wanted" ]; then
+    git -C .deps/libdatachannel checkout -q -- .
+    git -C .deps/libdatachannel submodule foreach --quiet --recursive git checkout -q -- .
+    for patch in $patches; do
         git -C .deps/libdatachannel apply "$patch"
-    fi
-}
-
-apply_patch "$(pwd)/tools/libdatachannel-bounds.patch"
-apply_patch "$(pwd)/tools/libdatachannel-mbedtls-link-order.patch"
-apply_patch "$(pwd)/tools/libdatachannel-threadpool.patch"
-apply_patch "$(pwd)/tools/libdatachannel-dtls-timer.patch"
-apply_patch "$(pwd)/tools/libdatachannel-sctp-timer-wheel.patch"
-apply_patch "$(pwd)/tools/libdatachannel-juice-timers.patch"
-apply_patch "$(pwd)/tools/libdatachannel-sctp-receive-pause.patch"
-apply_patch "$(pwd)/tools/libdatachannel-dtls-incoming.patch"
-apply_patch "$(pwd)/tools/libdatachannel-juice-mux-routing.patch"
+    done
+    echo "$wanted" > "$stamp"
+fi
 
 prefix="${NETHERNET_NATIVE_PREFIX:-$(pwd)/.deps/native}"
 mbedtls_build="${NETHERNET_MBEDTLS_BUILD:-.deps/mbedtls-build}"

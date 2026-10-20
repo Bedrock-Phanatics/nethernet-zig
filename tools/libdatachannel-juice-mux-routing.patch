@@ -2,11 +2,10 @@ diff --git a/deps/libjuice/src/conn_mux.c b/deps/libjuice/src/conn_mux.c
 index aa1235f..79c49b2 100644
 --- a/deps/libjuice/src/conn_mux.c
 +++ b/deps/libjuice/src/conn_mux.c
-@@ -253,6 +253,11 @@ int conn_mux_registry_init(conn_registry_t *registry, udp_socket_config_t *confi
+@@ -253,6 +253,10 @@ int conn_mux_registry_init(conn_registry_t *registry, udp_socket_config_t *confi
  		return -1;
  	}
  
-+	// Every agent shares this socket, so it asks for a larger buffer than one connection needs
 +	const sockopt_t buffer_size = 8 * 1024 * 1024;
 +	setsockopt(registry_impl->sock, SOL_SOCKET, SO_RCVBUF, (const char *)&buffer_size, sizeof(buffer_size));
 +	setsockopt(registry_impl->sock, SOL_SOCKET, SO_SNDBUF, (const char *)&buffer_size, sizeof(buffer_size));
@@ -14,7 +13,7 @@ index aa1235f..79c49b2 100644
  	registry_impl->port = udp_get_port(registry_impl->sock);
  
  	mutex_init(&registry_impl->send_mutex, 0);
-@@ -332,15 +337,12 @@ static juice_agent_t *lookup_agent(conn_registry_t *registry, char *buf, size_t
+@@ -332,15 +336,12 @@ static juice_agent_t *lookup_agent(conn_registry_t *registry, char *buf, size_t
  
  	registry_impl_t *registry_impl = registry->impl;
  	map_entry_t *entry = find_map_entry(registry_impl, src, false);
@@ -34,15 +33,14 @@ index aa1235f..79c49b2 100644
  	}
  
  	JLOG_VERBOSE("Looking up agent from STUN message content");
-@@ -363,10 +365,19 @@ static juice_agent_t *lookup_agent(conn_registry_t *registry, char *buf, size_t
+@@ -363,10 +364,18 @@ static juice_agent_t *lookup_agent(conn_registry_t *registry, char *buf, size_t
  		}
  		*separator = '\0';
  		const char *local_ufrag = username;
 +		if (is_ready(mapped) && strcmp(local_ufrag, mapped->local.ice_ufrag) == 0)
 +			return mapped;
 +
-+		// The address is new, stale, or reused by another session. It is only bound to an agent
-+		// once the request authenticates, so a forged request cannot redirect a live session.
++		// Only an authenticated request may bind an address, so a forged one cannot redirect a session
  		for (int i = 0; i < registry->agents_size; ++i) {
 -			agent = registry->agents[i];
 +			juice_agent_t *agent = registry->agents[i];
@@ -55,7 +53,7 @@ index aa1235f..79c49b2 100644
  					JLOG_DEBUG("Found agent from ICE ufrag");
  					insert_map_entry(registry_impl, src, agent);
  					return agent;
-@@ -395,21 +406,24 @@ static juice_agent_t *lookup_agent(conn_registry_t *registry, char *buf, size_t
+@@ -395,21 +404,24 @@ static juice_agent_t *lookup_agent(conn_registry_t *registry, char *buf, size_t
  
  			return NULL;
  		}
@@ -65,7 +63,7 @@ index aa1235f..79c49b2 100644
 -			return NULL;
 -		}
 +	} else if (STUN_IS_RESPONSE(msg.msg_class)) {
-+		// A stale address mapping must not swallow responses meant for a newer session
++		// A stale mapping must not swallow responses for a newer session
 +		if (is_ready(mapped) && agent_find_entry_from_transaction_id(mapped, msg.transaction_id))
 +			return mapped;
  

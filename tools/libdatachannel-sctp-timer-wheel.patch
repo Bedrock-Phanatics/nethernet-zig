@@ -2,7 +2,7 @@ diff --git a/deps/usrsctp/usrsctplib/netinet/sctp_callout.c b/deps/usrsctp/usrsc
 index ee6cd4c..7679325 100755
 --- a/deps/usrsctp/usrsctplib/netinet/sctp_callout.c
 +++ b/deps/usrsctp/usrsctplib/netinet/sctp_callout.c
-@@ -76,11 +76,33 @@ uint32_t sctp_get_tick_count(void) {
+@@ -76,11 +76,30 @@ uint32_t sctp_get_tick_count(void) {
  
  /*
   * SCTP_TIMERQ_LOCK protects:
@@ -12,10 +12,7 @@ index ee6cd4c..7679325 100755
   */
  static sctp_os_timer_t *sctp_os_timer_next = NULL;
  
-+/*
-+ * Timers hash into a wheel by expiry tick, so a tick only visits the buckets
-+ * that elapsed instead of every pending timer.
-+ */
++/* Timers hash into a wheel by expiry tick so a tick only visits elapsed buckets */
 +#define SCTP_CALLWHEEL_SIZE 1024
 +static struct calloutlist sctp_callwheel[SCTP_CALLWHEEL_SIZE];
 +static int sctp_callwheel_ready = 0;
@@ -37,7 +34,7 @@ index ee6cd4c..7679325 100755
  void
  sctp_os_timer_init(sctp_os_timer_t *c)
  {
-@@ -104,7 +126,7 @@ sctp_os_timer_start(sctp_os_timer_t *c, uint32_t to_ticks, void (*ftn) (void *),
+@@ -104,7 +123,7 @@ sctp_os_timer_start(sctp_os_timer_t *c, uint32_t to_ticks, void (*ftn) (void *),
  		if (c == sctp_os_timer_next) {
  			sctp_os_timer_next = TAILQ_NEXT(c, tqe);
  		}
@@ -46,7 +43,7 @@ index ee6cd4c..7679325 100755
  		/*
  		 * part of the normal "stop a pending callout" process
  		 * is to clear the CALLOUT_ACTIVE and CALLOUT_PENDING
-@@ -124,7 +146,7 @@ sctp_os_timer_start(sctp_os_timer_t *c, uint32_t to_ticks, void (*ftn) (void *),
+@@ -124,7 +143,7 @@ sctp_os_timer_start(sctp_os_timer_t *c, uint32_t to_ticks, void (*ftn) (void *),
  	c->c_flags = (SCTP_CALLOUT_ACTIVE | SCTP_CALLOUT_PENDING);
  	c->c_func = ftn;
  	c->c_time = ticks + to_ticks;
@@ -55,7 +52,7 @@ index ee6cd4c..7679325 100755
  	SCTP_TIMERQ_UNLOCK();
  	return (ret);
  }
-@@ -145,7 +167,7 @@ sctp_os_timer_stop(sctp_os_timer_t *c)
+@@ -145,7 +164,7 @@ sctp_os_timer_stop(sctp_os_timer_t *c)
  	if (c == sctp_os_timer_next) {
  		sctp_os_timer_next = TAILQ_NEXT(c, tqe);
  	}
@@ -64,7 +61,7 @@ index ee6cd4c..7679325 100755
  	SCTP_TIMERQ_UNLOCK();
  	return (1);
  }
-@@ -156,24 +178,29 @@ sctp_handle_tick(uint32_t elapsed_ticks)
+@@ -156,24 +175,29 @@ sctp_handle_tick(uint32_t elapsed_ticks)
  	sctp_os_timer_t *c;
  	void (*c_func)(void *);
  	void *c_arg;

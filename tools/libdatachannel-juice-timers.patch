@@ -34,12 +34,11 @@ index 6af8833..aa1235f 100644
  
  	int count = registry->agents_count;
  	registry_impl_t *impl = registry->impl;
-@@ -419,8 +415,14 @@ static juice_agent_t *lookup_agent(conn_registry_t *registry, char *buf, size_t
+@@ -419,8 +415,13 @@ static juice_agent_t *lookup_agent(conn_registry_t *registry, char *buf, size_t
  	return NULL;
  }
  
-+// Agents that received datagrams are updated directly. Every agent is only visited once the
-+// earliest deadline passes, so a wakeup does not cost a scan of the whole registry.
++// Only agents that received datagrams are updated until the earliest deadline passes
  int conn_mux_process(conn_registry_t *registry, struct pollfd *pfd) {
  	mutex_lock(&registry->mutex);
 +	registry_impl_t *registry_impl = registry->impl;
@@ -49,7 +48,7 @@ index 6af8833..aa1235f 100644
  
  	if (pfd->revents & POLLNVAL || pfd->revents & POLLERR) {
  		JLOG_ERROR("Error when polling socket");
-@@ -458,7 +460,11 @@ int conn_mux_process(conn_registry_t *registry, struct pollfd *pfd) {
+@@ -458,7 +459,11 @@ int conn_mux_process(conn_registry_t *registry, struct pollfd *pfd) {
  				continue;
  			}
  
@@ -62,7 +61,7 @@ index 6af8833..aa1235f 100644
  		}
  
  		if (ret < 0) {
-@@ -468,17 +474,28 @@ int conn_mux_process(conn_registry_t *registry, struct pollfd *pfd) {
+@@ -468,17 +473,28 @@ int conn_mux_process(conn_registry_t *registry, struct pollfd *pfd) {
  		}
  	}
  
@@ -94,7 +93,7 @@ index 6af8833..aa1235f 100644
  		}
  	}
  
-@@ -558,6 +575,7 @@ int conn_mux_init(juice_agent_t *agent, conn_registry_t *registry, udp_socket_co
+@@ -558,6 +574,7 @@ int conn_mux_init(juice_agent_t *agent, conn_registry_t *registry, udp_socket_co
  
  	conn_impl->registry = registry;
  	agent->conn_impl = conn_impl;
@@ -102,7 +101,7 @@ index 6af8833..aa1235f 100644
  	return 0;
  }
  
-@@ -611,6 +629,9 @@ int conn_mux_interrupt(juice_agent_t *agent) {
+@@ -611,6 +628,9 @@ int conn_mux_interrupt(juice_agent_t *agent) {
  
  	mutex_lock(&registry->mutex);
  	conn_impl->next_timestamp = current_timestamp();
@@ -112,18 +111,17 @@ index 6af8833..aa1235f 100644
  	mutex_unlock(&registry->mutex);
  
  	return conn_mux_interrupt_registry(registry);
-@@ -631,6 +652,10 @@ int conn_mux_send(juice_agent_t *agent, const addr_record_t *dst, const char *da
+@@ -631,6 +651,9 @@ int conn_mux_send(juice_agent_t *agent, const addr_record_t *dst, const char *da
  			registry_impl->send_ds = -1; // disable for next time
  	}
  
-+	// Every agent sends through this socket, so only the DSCP change is serialized. A concurrent
-+	// change can mark a datagram with the other class, which does not affect delivery.
++	// A racing DSCP change only marks one datagram with the other class
 +	mutex_unlock(&registry_impl->send_mutex);
 +
  	JLOG_VERBOSE("Sending datagram, size=%d", size);
  
  	int ret = udp_sendto(registry_impl->sock, data, size, dst);
-@@ -644,7 +669,6 @@ int conn_mux_send(juice_agent_t *agent, const addr_record_t *dst, const char *da
+@@ -644,7 +667,6 @@ int conn_mux_send(juice_agent_t *agent, const addr_record_t *dst, const char *da
  			JLOG_WARN("Send failed, errno=%d", sockerrno);
  	}
  
@@ -183,16 +181,15 @@ index 7d6ed7b..ba4a76f 100644
  		if (agent_conn_update(agent, &conn_impl->next_timestamp) != 0) {
  			JLOG_WARN("Agent update failed");
  			conn_impl->state = CONN_STATE_FINISHED;
-@@ -458,6 +458,8 @@ int conn_poll_process(conn_registry_t *registry, pfds_record_t *pfds) {
+@@ -458,6 +458,7 @@ int conn_poll_process(conn_registry_t *registry, pfds_record_t *pfds) {
  
  	mutex_lock(&registry->mutex);
  
-+	// One clock read per pass, since every agent is visited on each wakeup
 +	timestamp_t now = current_timestamp();
  	nfds_t i = 1;
  	for (int j = 0; j < registry->agents_size; ++j) {
  		juice_agent_t *agent = registry->agents[j];
-@@ -475,7 +477,7 @@ int conn_poll_process(conn_registry_t *registry, pfds_record_t *pfds) {
+@@ -475,7 +476,7 @@ int conn_poll_process(conn_registry_t *registry, pfds_record_t *pfds) {
  		if (udp_pfd->fd != conn_impl->udp_sock)
  			break;
  
@@ -201,7 +198,7 @@ index 7d6ed7b..ba4a76f 100644
  		i++;
  
  		if (conn_impl->tcp_sock == INVALID_SOCKET)
-@@ -485,7 +487,7 @@ int conn_poll_process(conn_registry_t *registry, pfds_record_t *pfds) {
+@@ -485,7 +486,7 @@ int conn_poll_process(conn_registry_t *registry, pfds_record_t *pfds) {
  		if (tcp_pfd->fd != conn_impl->tcp_sock)
  			break;
  

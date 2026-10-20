@@ -2,11 +2,10 @@ diff --git a/include/rtc/rtc.h b/include/rtc/rtc.h
 index 73a0567..5d5441d 100644
 --- a/include/rtc/rtc.h
 +++ b/include/rtc/rtc.h
-@@ -236,6 +236,8 @@ RTC_C_EXPORT bool rtcIsNegotiationNeeded(int pc);
+@@ -236,6 +236,7 @@ RTC_C_EXPORT bool rtcIsNegotiationNeeded(int pc);
  
  RTC_C_EXPORT int rtcGetMaxDataChannelStream(int pc);
  RTC_C_EXPORT int rtcGetRemoteMaxMessageSize(int pc);
-+// Unread SCTP data stays in the receive window while paused, throttling the remote sender
 +RTC_C_EXPORT int rtcSetSctpReceivePaused(int pc, bool paused);
  
  // DataChannel, Track, and WebSocket common API

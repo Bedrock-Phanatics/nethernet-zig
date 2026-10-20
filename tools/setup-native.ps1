@@ -16,17 +16,6 @@ function Run-Native([string]$Program, [string[]]$Arguments) {
     }
 }
 
-function Apply-LibdatachannelPatch([string]$Patch) {
-    $savedErrorActionPreference = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    & git -C .deps/libdatachannel apply --reverse --check $Patch 2>$null
-    $alreadyApplied = $LASTEXITCODE -eq 0
-    $ErrorActionPreference = $savedErrorActionPreference
-
-    if (!$alreadyApplied) {
-        Run-Native git @('-C', '.deps/libdatachannel', 'apply', $Patch)
-    }
-}
 
 if ((& zig version) -ne '0.16.0') {
     throw 'This build requires Zig 0.16.0.'
@@ -99,16 +88,23 @@ if ($Backend -eq 'MbedTLS') {
     }
 }
 
-Apply-LibdatachannelPatch (Join-Path $root 'tools/libdatachannel-bounds.patch')
-Apply-LibdatachannelPatch (Join-Path $root 'tools/libdatachannel-threadpool.patch')
-Apply-LibdatachannelPatch (Join-Path $root 'tools/libdatachannel-dtls-timer.patch')
-Apply-LibdatachannelPatch (Join-Path $root 'tools/libdatachannel-sctp-timer-wheel.patch')
-Apply-LibdatachannelPatch (Join-Path $root 'tools/libdatachannel-juice-timers.patch')
-Apply-LibdatachannelPatch (Join-Path $root 'tools/libdatachannel-sctp-receive-pause.patch')
-Apply-LibdatachannelPatch (Join-Path $root 'tools/libdatachannel-dtls-incoming.patch')
-Apply-LibdatachannelPatch (Join-Path $root 'tools/libdatachannel-juice-mux-routing.patch')
+$patchNames = @('bounds', 'threadpool', 'dtls-timer', 'sctp-timer-wheel', 'juice-timers',
+    'sctp-receive-pause', 'dtls-incoming', 'juice-mux-routing')
 if ($Backend -eq 'MbedTLS') {
-    Apply-LibdatachannelPatch (Join-Path $root 'tools/libdatachannel-mbedtls-link-order.patch')
+    $patchNames += 'mbedtls-link-order'
+}
+$patches = $patchNames | ForEach-Object { Join-Path $root "tools/libdatachannel-$_.patch" }
+# Patches are reapplied to a clean tree whenever one changes, so edited patches take effect.
+$stamp = '.deps/libdatachannel/.git/nethernet-patches'
+$wanted = ($patches | ForEach-Object { (Get-FileHash -LiteralPath $_).Hash }) -join ','
+$applied = if (Test-Path -LiteralPath $stamp) { (Get-Content -LiteralPath $stamp -Raw).Trim() } else { '' }
+if ($applied -ne $wanted) {
+    Run-Native git @('-C', '.deps/libdatachannel', 'checkout', '-q', '--', '.')
+    Run-Native git @('-C', '.deps/libdatachannel', 'submodule', 'foreach', '--quiet', '--recursive', 'git checkout -q -- .')
+    foreach ($patch in $patches) {
+        Run-Native git @('-C', '.deps/libdatachannel', 'apply', $patch)
+    }
+    Set-Content -LiteralPath $stamp -Value $wanted
 }
 
 $nativeZigCacheRoot = Join-Path $root '.deps/zig-native-cache'
