@@ -367,6 +367,56 @@ test "endpoint listener keeps one server identity key for its lifetime" {
     try std.testing.expectEqualSlices(u8, &first_key, &second_key);
 }
 
+test "endpoint listener signals a shared wakeup and polls accepts" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var wakeup: nethernet.Wakeup = .{};
+
+    const listener = try Listener.listen(
+        allocator,
+        io,
+        try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0"),
+        .{ .connection = .{ .allow_anonymous = true }, .wakeup = &wakeup },
+    );
+    defer listener.destroy();
+    try std.testing.expectEqual(null, try listener.pollAccept());
+
+    const origin = try std.fmt.allocPrint(
+        allocator,
+        "http://127.0.0.1:{d}",
+        .{listener.server.socket.address.getPort()},
+    );
+    defer allocator.free(origin);
+
+    const dialed = wakeup.prepare();
+    const client = try nethernet.dialEndpoint(allocator, io, origin, 3, .{});
+    defer client.destroy();
+
+    const limit: std.Io.Clock.Timestamp = .{ .raw = std.Io.Clock.awake.now(io).addDuration(.fromSeconds(10)), .clock = .awake };
+    const server = while (true) {
+        const token = wakeup.prepare();
+        if (try listener.pollAccept()) |connection| break connection;
+        if (std.Io.Clock.awake.now(io).nanoseconds >= limit.raw.nanoseconds) return error.Timeout;
+        try wakeup.wait(io, token, .{ .deadline = limit });
+    };
+    defer server.destroy();
+    try std.testing.expect(wakeup.signaled(dialed));
+    try std.testing.expectEqual(null, try listener.pollAccept());
+
+    server.peer.subscribe(&wakeup);
+    defer server.peer.subscribe(null);
+    const sent = wakeup.prepare();
+    try client.send("shared wakeup", .reliable);
+    try wakeup.wait(io, sent, .{ .deadline = limit });
+    try std.testing.expect(wakeup.signaled(sent));
+    try std.testing.expectEqualStrings("shared wakeup", (try server.receive()).data);
+
+    const closing = wakeup.prepare();
+    listener.close();
+    try std.testing.expect(wakeup.signaled(closing));
+    try std.testing.expectError(error.Closed, listener.pollAccept());
+}
+
 test "HTTP signaling uses application/sdp and an opaque network ID" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;

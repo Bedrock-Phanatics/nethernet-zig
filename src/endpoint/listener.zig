@@ -5,6 +5,7 @@ const auth = @import("../auth/sdp.zig");
 const jwt = @import("../auth/token.zig");
 const Signal = @import("../protocol/signal.zig").Signal;
 const conn = @import("../transport/connection.zig");
+const Wakeup = @import("../internal/wakeup.zig").Wakeup;
 const maximum_sdp_size = @import("client.zig").maximum_sdp_size;
 
 pub const maximum_status_response_size = 16 * 1024;
@@ -32,6 +33,8 @@ pub const Options = struct {
     request_timeout_ms: u32 = 15000,
     status_provider: ?StatusProvider = null,
     trace: bool = false,
+    /// Signaled whenever a connection becomes ready to accept and when accepting stops.
+    wakeup: ?*Wakeup = null,
 };
 
 pub const Listener = struct {
@@ -124,6 +127,19 @@ pub const Listener = struct {
         return connection;
     }
 
+    /// Returns a ready connection, or null when none is ready, without blocking.
+    pub fn pollAccept(self: *Listener) !?*conn.Connection {
+        var connection: [1]*conn.Connection = undefined;
+        if (try self.accepted.get(self.io, &connection, 0) == 0) return null;
+        self.releaseAccept();
+        return connection[0];
+    }
+
+    fn closeAccepted(self: *Listener) void {
+        self.accepted.close(self.io);
+        if (self.options.wakeup) |wakeup| wakeup.signal(self.io);
+    }
+
     fn reserveAccept(self: *Listener) bool {
         self.accept_mutex.lockUncancelable(self.io);
         defer self.accept_mutex.unlock(self.io);
@@ -159,7 +175,7 @@ pub const Listener = struct {
         if (self.closed) return;
 
         self.closed = true;
-        self.accepted.close(self.io);
+        self.closeAccepted();
         self.group.cancel(self.io);
         self.server.deinit(self.io);
 
@@ -262,7 +278,7 @@ pub const Listener = struct {
                     continue;
                 },
                 else => {
-                    self.accepted.close(self.io);
+                    self.closeAccepted();
                     return;
                 },
             };
@@ -638,6 +654,7 @@ pub const Listener = struct {
             return error.ConnectionClosed;
         transferred = true;
         accept_reserved = false;
+        if (self.options.wakeup) |wakeup| wakeup.signal(self.io);
         self.trace("both data channels open; connection accepted", .{});
     }
 };

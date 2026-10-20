@@ -198,6 +198,62 @@ test "LAN host bounds malformed traffic and server count" {
     try std.testing.expectEqual(@as(u64, 1), server.dropped_servers);
 }
 
+test "LAN listener shares an external wakeup with pollAccept" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const server_address = try std.Io.net.IpAddress.parseLiteral("0.0.0.0:7551");
+    const server_discovery = try Discovery.listen(allocator, io, server_address, .{ .network_id = 22 });
+    defer server_discovery.destroy();
+    const client_discovery = try Discovery.listen(allocator, io, try std.Io.net.IpAddress.parseLiteral("0.0.0.0:0"), .{ .network_id = 11 });
+    defer client_discovery.destroy();
+
+    try server_discovery.setServerData(.{ .server_name = "LAN" });
+    try client_discovery.request(client_discovery.options.broadcast_endpoint.?);
+    _ = try server_discovery.poll(1000);
+    _ = try client_discovery.poll(1000);
+    try std.testing.expect(client_discovery.servers.contains(22));
+
+    var wakeup: nethernet.Wakeup = .{};
+    const listener = try Listener.listen(allocator, server_discovery, .{
+        .connection = .{ .allow_anonymous = true },
+        .wakeup = &wakeup,
+    });
+    defer listener.destroy();
+    try std.testing.expect(server_discovery.isSubscribed(&wakeup));
+    try std.testing.expectEqual(null, try listener.pollAccept());
+
+    const dialed = wakeup.prepare();
+    var dialing = try io.concurrent(
+        nethernet.dialLan,
+        .{ allocator, client_discovery, @as(u64, 22), ConnectionOptions{} },
+    );
+    var taken = false;
+    defer if (!taken) {
+        if (dialing.cancel(io)) |value| value.destroy() else |_| {}
+    };
+
+    const limit: std.Io.Clock.Timestamp = .{ .raw = std.Io.Clock.awake.now(io).addDuration(.fromSeconds(10)), .clock = .awake };
+    const server = while (true) {
+        const token = wakeup.prepare();
+        if (try listener.pollAccept()) |connection| break connection;
+        if (std.Io.Clock.awake.now(io).nanoseconds >= limit.raw.nanoseconds) return error.Timeout;
+        try wakeup.wait(io, token, .{ .deadline = limit });
+    };
+    defer server.destroy();
+    try std.testing.expect(wakeup.signaled(dialed));
+    try std.testing.expectEqual(null, server.peer.subscriber);
+
+    const client = try dialing.await(io);
+    taken = true;
+    defer client.destroy();
+
+    const closing = wakeup.prepare();
+    listener.close();
+    try std.testing.expect(wakeup.signaled(closing));
+    try std.testing.expect(server_discovery.subscriber == null);
+    try std.testing.expectError(error.ConnectionClosed, listener.pollAccept());
+}
+
 test "LAN accept cancels and close detaches the wakeup" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;

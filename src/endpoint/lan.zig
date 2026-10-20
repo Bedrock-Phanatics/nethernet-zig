@@ -10,6 +10,8 @@ pub const Options = struct {
     connection: conn.Options = .{},
     maximum_negotiations: usize = 64,
     maximum_negotiations_per_peer: usize = 4,
+    /// Signaled on discovery traffic and negotiation progress instead of the listener's own wakeup.
+    wakeup: ?*wake.Wakeup = null,
 };
 
 pub const Listener = struct {
@@ -58,15 +60,19 @@ pub const Listener = struct {
             .pending = pending,
         };
 
-        discovery.subscribe(&self.wakeup);
+        discovery.subscribe(self.notifier());
         return self;
+    }
+
+    fn notifier(self: *Listener) *wake.Wakeup {
+        return self.options.wakeup orelse &self.wakeup;
     }
 
     pub fn close(self: *Listener) void {
         if (self.closed) return;
         self.closed = true;
-        self.wakeup.signal(self.discovery.io);
-        self.discovery.unsubscribe(&self.wakeup);
+        self.notifier().signal(self.discovery.io);
+        self.discovery.unsubscribe(self.notifier());
 
         for (self.pending) |*slot| {
             if (slot.*) |connection| {
@@ -86,7 +92,7 @@ pub const Listener = struct {
         try self.discovery.beginOperation();
         defer self.discovery.endOperation();
         while (true) {
-            const token = self.wakeup.prepare();
+            const token = self.notifier().prepare();
             if (try self.pollAcceptOwned()) |connection| return connection;
             var deadline = self.discovery.tickDeadline();
             var pending_work = false;
@@ -97,14 +103,23 @@ pub const Listener = struct {
                 }
             }
             try self.discovery.io.checkCancel();
-            if (!pending_work) try self.wakeup.wait(self.discovery.io, token, deadline);
+            if (!pending_work) try self.notifier().wait(self.discovery.io, token, deadline);
         }
     }
 
     pub fn pollAccept(self: *Listener) !?*conn.Connection {
         try self.discovery.beginOperation();
         defer self.discovery.endOperation();
-        return self.pollAcceptOwned();
+        const accepted = try self.pollAcceptOwned();
+        // Each poll handles one event per negotiation, so wake the host again while more are queued.
+        if (accepted == null) for (self.pending) |slot| {
+            const connection = slot orelse continue;
+            if (connection.peer.hasPending(true) or connection.ready()) {
+                self.notifier().signal(self.discovery.io);
+                break;
+            }
+        };
+        return accepted;
     }
 
     pub fn rejectedNegotiations(self: *const Listener) u64 {
@@ -224,7 +239,7 @@ pub const Listener = struct {
             return;
         };
 
-        connection.peer.subscribe(&self.wakeup);
+        connection.peer.subscribe(self.notifier());
         slot.* = connection;
     }
 
