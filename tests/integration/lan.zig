@@ -181,7 +181,7 @@ test "LAN host bounds malformed traffic and server count" {
     const client = try Discovery.listen(std.testing.allocator, io, .{ .ip4 = .loopback(0) }, .{ .network_id = 11 });
     defer client.destroy();
 
-    const malformed = [_]u8{0} ** 65507;
+    const malformed: [65507]u8 = @splat(0);
     for ([_]usize{ 0, 1, 31, malformed.len }) |length| {
         try client.socket.send(io, &address, malformed[0..length]);
         _ = try server.poll(1000);

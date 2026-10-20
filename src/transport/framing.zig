@@ -266,7 +266,7 @@ test "malformed, reordered, duplicate, oversized and unreliable fragments fail c
 }
 
 test "reliable countdown supports 1 through 256 fragments" {
-    const data = [_]u8{42} ** (maximum_segments + 1);
+    const data: [maximum_segments + 1]u8 = @splat(42);
     var storage: [maximum_segments]u8 = undefined;
     var reassembler = Reassembler.init(&storage, .reliable);
     var fragment: [2]u8 = undefined;
@@ -337,7 +337,7 @@ test "reliable message-size boundaries match 256 segment representation" {
 
 test "a negotiated segment size bounds fragmentation and unreliable sends" {
     const segment = 1023;
-    const data = [_]u8{42} ** (segment * 2 + 1);
+    const data: [segment * 2 + 1]u8 = @splat(42);
 
     var encoder = try Encoder.init(&data, .reliable, data.len, segment);
     var storage: [data.len]u8 = undefined;

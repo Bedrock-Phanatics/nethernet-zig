@@ -24,7 +24,7 @@ const prefix =
 
 const infix = [_]u8{ 0xa1, 0x64, 0x03, 0x62, 0x00 };
 
-const template = prefix ++ [_]u8{0} ** scalar_size ++ infix ++ [_]u8{0} ** point_size;
+const template = prefix ++ @as([scalar_size]u8, @splat(0)) ++ infix ++ @as([point_size]u8, @splat(0));
 
 const scalar_offset = prefix.len;
 const public_key_offset = scalar_offset + scalar_size + infix.len;
@@ -235,7 +235,7 @@ test "PKCS#8 round-trips against an openssl-generated P-384 key" {
 }
 
 test "PKCS#8 encoding round-trips a generated key" {
-    const key = try KeyPair.generateDeterministic(.{7} ** 48);
+    const key = try KeyPair.generateDeterministic(@splat(7));
 
     var encoded: [encoded_size]u8 = undefined;
     const decoded = try decode(encode(key, &encoded));
@@ -249,7 +249,7 @@ test "PKCS#8 encoding round-trips a generated key" {
 
 test "malformed PKCS#8 identities are rejected without panicking" {
     var encoded: [encoded_size]u8 = undefined;
-    _ = encode(try KeyPair.generateDeterministic(.{8} ** 48), &encoded);
+    _ = encode(try KeyPair.generateDeterministic(@splat(8)), &encoded);
 
     for (0..encoded.len) |length| {
         try std.testing.expectError(error.InvalidKeyFile, decode(encoded[0..length]));
@@ -358,9 +358,9 @@ test "identity files persist across calls and are never silently replaced" {
 
 test "PKCS#8 rejects inconsistent public keys and trailing nested data" {
     var encoded: [encoded_size]u8 = undefined;
-    const key = try KeyPair.generateDeterministic(.{21} ** 48);
+    const key = try KeyPair.generateDeterministic(@splat(21));
     _ = encode(key, &encoded);
-    const other = try KeyPair.generateDeterministic(.{22} ** 48);
+    const other = try KeyPair.generateDeterministic(@splat(22));
     @memcpy(encoded[public_key_offset..], &other.public_key.toUncompressedSec1());
     try std.testing.expectError(error.InvalidKeyFile, decode(&encoded));
     _ = encode(key, &encoded);

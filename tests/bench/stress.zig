@@ -763,12 +763,13 @@ fn parseArgs(args: std.process.Args, allocator: std.mem.Allocator) !Config {
         const name = buffer[0 .. argument.len - 2];
         @memcpy(name, argument[2..]);
         std.mem.replaceScalar(u8, name, '-', '_');
-        inline for (@typeInfo(Config).@"struct".fields) |field| {
-            if (std.mem.eql(u8, name, field.name)) {
-                @field(result, field.name) = switch (@typeInfo(field.type)) {
+        const info = @typeInfo(Config).@"struct";
+        inline for (info.field_names, info.field_types) |field_name, field_type| {
+            if (std.mem.eql(u8, name, field_name)) {
+                @field(result, field_name) = switch (@typeInfo(field_type)) {
                     .bool => true,
-                    .int => try std.fmt.parseInt(field.type, iterator.next() orelse return error.MissingArgument, 10),
-                    .@"enum" => std.meta.stringToEnum(field.type, iterator.next() orelse return error.MissingArgument) orelse
+                    .int => try std.fmt.parseInt(field_type, iterator.next() orelse return error.MissingArgument, 10),
+                    .@"enum" => std.meta.stringToEnum(field_type, iterator.next() orelse return error.MissingArgument) orelse
                         return error.InvalidArgument,
                     else => comptime unreachable,
                 };

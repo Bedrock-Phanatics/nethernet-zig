@@ -247,7 +247,7 @@ pub const Listener = struct {
         var writer = stream.writer(self.io, &buffer);
         writer.interface.print(
             "HTTP/1.1 {d} {s}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            .{ @intFromEnum(status), status.phrase() orelse "Error" },
+            .{ @backingInt(status), status.phrase() orelse "Error" },
         ) catch return;
         writer.interface.flush() catch {};
     }
@@ -303,7 +303,7 @@ pub const Listener = struct {
                     response_state.load(.acquire) == .pending)
                 {
                     const status = errorStatus(err);
-                    self.trace("HTTP {d} ({s})", .{ @intFromEnum(status), @errorName(err) });
+                    self.trace("HTTP {d} ({s})", .{ @backingInt(status), @errorName(err) });
                     self.writeError(stream, status);
                 }
                 return err;
@@ -393,7 +393,7 @@ pub const Listener = struct {
                 .bad_request
             else
                 .not_found;
-            self.trace("HTTP {d} (invalid route)", .{@intFromEnum(status)});
+            self.trace("HTTP {d} (invalid route)", .{@backingInt(status)});
             return respond(&request, response_state, "", .{
                 .status = status,
                 .keep_alive = false,
@@ -451,7 +451,7 @@ pub const Listener = struct {
                 error.OutOfMemory => .internal_server_error,
                 else => .bad_request,
             };
-            self.trace("POST HTTP {d} (body read: {s})", .{ @intFromEnum(status), @errorName(err) });
+            self.trace("POST HTTP {d} (body read: {s})", .{ @backingInt(status), @errorName(err) });
             return respond(&request, response_state, "", .{
                 .status = status,
                 .keep_alive = false,
@@ -542,7 +542,7 @@ pub const Listener = struct {
             .data = body,
         }) catch |err| {
             const status = errorStatus(err);
-            self.trace("offer rejected ({s}); HTTP {d}", .{ @errorName(err), @intFromEnum(status) });
+            self.trace("offer rejected ({s}); HTTP {d}", .{ @errorName(err), @backingInt(status) });
             return respond(&request, response_state, "", .{
                 .status = status,
                 .keep_alive = false,

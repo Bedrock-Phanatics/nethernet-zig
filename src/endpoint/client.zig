@@ -93,23 +93,46 @@ fn exchangeWork(
 
     var uri = try std.Uri.parse(url);
     var host_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
-    const host = (try uri.getHost(&host_buffer)).bytes;
+    const host = try (uri.host orelse return error.UriMissingHost).toRaw(&host_buffer);
     const ipv6 = host.len >= 2 and host[0] == '[' and host[host.len - 1] == ']';
     if (ipv6) uri.host = .{ .raw = host[1 .. host.len - 1] };
 
-    const result = try client.fetch(.{
-        .location = .{ .uri = uri },
-        .method = .POST,
-        .payload = offer,
-        .response_writer = &writer,
+    const protocol = std.http.Client.Protocol.fromUri(uri) orelse return error.UnsupportedUriScheme;
+    // std.http rejects IP literals as host names, but its resolver still connects to them.
+    var request = try client.request(.POST, uri, .{
+        .redirect_behavior = .unhandled,
+        .connection = if (ipv6) try client.connectTcp(.{ .bytes = uri.host.?.raw }, uri.port.?, protocol) else null,
         .headers = .{
             .host = if (ipv6) .{ .override = base[uri.scheme.len + 3 ..] } else .default,
             .content_type = .{ .override = "application/sdp" },
             .user_agent = .{ .override = "libhttpclient/1.0.0.0" },
         },
     });
+    defer request.deinit();
 
-    const status = @intFromEnum(result.status);
+    request.transfer_encoding = .{ .content_length = offer.len };
+    var request_body = try request.sendBodyUnflushed(&.{});
+    try request_body.writer.writeAll(offer);
+    try request_body.end();
+    try request.connection.?.flush();
+
+    var response = try request.receiveHead(&.{});
+    const decompress_buffer: []u8 = switch (response.head.content_encoding) {
+        .identity => &.{},
+        .zstd => try allocator.alloc(u8, std.compress.zstd.default_window_len),
+        .deflate, .gzip => try allocator.alloc(u8, std.compress.flate.max_window_len),
+        .compress => return error.UnsupportedCompressionMethod,
+    };
+    defer allocator.free(decompress_buffer);
+    var transfer_buffer: [64]u8 = undefined;
+    var decompress: std.http.Decompress = undefined;
+    const reader = response.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer);
+    _ = reader.streamRemaining(&writer) catch |err| switch (err) {
+        error.ReadFailed => return response.bodyErr().?,
+        else => |e| return e,
+    };
+
+    const status = @backingInt(response.head.status);
     if (status < 200 or status >= 300) return error.HttpFailure;
 
     const body = writer.buffered();
@@ -311,7 +334,7 @@ test "endpoint exchanges reject empty, control, and oversized IDs" {
     const allocator = std.testing.allocator;
     var output: [64]u8 = undefined;
 
-    for ([_][]const u8{ "", "tab\there", &.{ '1', 0 }, "a" ** (connection.maximum_network_id_length + 1) }) |id| {
+    for ([_][]const u8{ "", "tab\there", &.{ '1', 0 }, &@as([connection.maximum_network_id_length + 1]u8, @splat('a')) }) |id| {
         try std.testing.expectError(error.InvalidNetworkId, exchangeWork(
             allocator,
             undefined,

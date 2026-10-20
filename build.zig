@@ -9,7 +9,7 @@ fn createModule(
     b: *std.Build,
     path: []const u8,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.builtin.Optimize,
 ) *std.Build.Module {
     return b.createModule(.{
         .root_source_file = b.path(path),
@@ -22,36 +22,27 @@ fn addNative(
     b: *std.Build,
     module: *std.Build.Module,
     target: std.Build.ResolvedTarget,
+    optimize: std.builtin.Optimize,
     prefix: []const u8,
 ) void {
-    module.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "include" }) });
-    module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib" }) });
+    const include = b.graph.cwdRelativePath(b.pathJoin(&.{ prefix, "include" }));
+    const rtc = b.addTranslateC(.{
+        .root_source_file = include.path(b, "rtc/rtc.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    rtc.addIncludePath(include);
+    rtc.defineCMacro("RTC_ENABLE_MEDIA", "0");
+    rtc.defineCMacro("RTC_ENABLE_WEBSOCKET", "0");
+    module.addImport("rtc", rtc.createModule());
+    module.addLibraryPath(b.graph.cwdRelativePath(b.pathJoin(&.{ prefix, "lib" })));
 
     if (target.result.os.tag == .windows) {
-        module.addObjectFile(.{
-            .cwd_relative = b.pathJoin(&.{ prefix, "lib", "libdatachannel.dll.a" }),
-        });
+        module.addObjectFile(b.graph.cwdRelativePath(b.pathJoin(&.{ prefix, "lib", "libdatachannel.dll.a" })));
         return;
     }
 
     module.linkSystemLibrary("datachannel", .{});
-}
-
-fn createNativeModule(
-    b: *std.Build,
-    path: []const u8,
-    target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-    prefix: []const u8,
-) *std.Build.Module {
-    const module = b.createModule(.{
-        .root_source_file = b.path(path),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    addNative(b, module, target, prefix);
-    return module;
 }
 
 fn addNativeRuntime(
@@ -61,7 +52,6 @@ fn addNativeRuntime(
     prefix: []const u8,
     sanitizer_runtime: ?[]const u8,
 ) void {
-    run.addPathDir(b.pathJoin(&.{ prefix, "bin" }));
     if (sanitizer_runtime) |runtime| {
         run.setEnvironmentVariable("LD_PRELOAD", runtime);
         // Zig threads bring their own signal stack, which ASan would unmap at thread exit.
@@ -71,11 +61,19 @@ fn addNativeRuntime(
         );
         if (std.mem.indexOf(u8, runtime, "libtsan") != null) run.setEnvironmentVariable(
             "TSAN_OPTIONS",
-            b.fmt("suppressions={s}:{s}", .{ b.pathFromRoot("tools/tsan.supp"), b.graph.environ_map.get("TSAN_OPTIONS") orelse "" }),
+            b.fmt("suppressions={s}:{s}", .{ rootPath(b, "tools/tsan.supp"), b.graph.environ_map.get("TSAN_OPTIONS") orelse "" }),
         );
     }
 
     switch (target.result.os.tag) {
+        .windows => {
+            // Prepend so the patched DLL wins over any other libdatachannel on PATH.
+            const bin = b.pathJoin(&.{ prefix, "bin" });
+            run.setEnvironmentVariable("PATH", if (run.getEnvMap().get("PATH")) |path|
+                b.fmt("{s}{c}{s}", .{ bin, std.fs.path.delimiter, path })
+            else
+                bin);
+        },
         .linux => run.setEnvironmentVariable(
             "LD_LIBRARY_PATH",
             b.pathJoin(&.{ prefix, "lib" }),
@@ -88,6 +86,25 @@ fn addNativeRuntime(
     }
 }
 
+fn rootPath(b: *std.Build, sub_path: []const u8) []const u8 {
+    var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const len = b.root.root_dir.handle.realPath(b.graph.io, &buffer) catch |err|
+        std.debug.panic("cannot resolve the build root: {t}", .{err});
+    return b.pathJoin(&.{ buffer[0..len], b.root.sub_path, sub_path });
+}
+
+fn zigLibPath(b: *std.Build) []const u8 {
+    var diagnostics: std.zon.parse.Diagnostics = undefined;
+    const env = std.zon.parse.fromSlice(struct { lib_dir: []const u8 }, .{
+        .gpa = b.allocator,
+        .arena = b.allocator,
+        .source = b.allocator.dupeSentinel(u8, b.run(&.{ b.graph.zig_exe, "env" }), 0) catch @panic("OOM"),
+        .diagnostics = &diagnostics,
+        .ignore_unknown_fields = true,
+    }) catch @panic("cannot parse zig env");
+    return env.lib_dir;
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -95,7 +112,7 @@ pub fn build(b: *std.Build) void {
         []const u8,
         "native-prefix",
         "Installation prefix of patched libdatachannel",
-    ) orelse b.pathFromRoot(".deps/native");
+    ) orelse rootPath(b, ".deps/native");
     const fuzz_iterations = b.option(
         usize,
         "fuzz-iterations",
@@ -136,7 +153,7 @@ pub fn build(b: *std.Build) void {
     const runtime_options = b.addOptions();
     runtime_options.addOption(bool, "signal_stack", native_sanitizer != .address);
     const test_runner: ?std.Build.Step.Compile.TestRunner = if (native_sanitizer == .address) blk: {
-        const source = b.graph.zig_lib_directory.handle.readFileAlloc(b.graph.io, "compiler/test_runner.zig", b.allocator, .limited(1 << 20)) catch |err|
+        const source = std.Io.Dir.cwd().readFileAlloc(b.graph.io, b.pathJoin(&.{ zigLibPath(b), "compiler", "test_runner.zig" }), b.allocator, .limited(1 << 20)) catch |err|
             std.debug.panic("cannot read the Zig test runner: {t}", .{err});
         const options = "pub const std_options: std.Options = .{\n";
         if (std.mem.indexOf(u8, source, options) == null) @panic("unexpected Zig test runner layout");
@@ -153,17 +170,30 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    addNative(b, nethernet, target, native_prefix);
+    addNative(b, nethernet, target, optimize, native_prefix);
     nethernet.addOptions("trace_options", trace_options);
     if (sanitize_thread) nethernet.sanitize_thread = true;
     if (tracy) {
-        if (b.lazyDependency("ztracy", .{
-            .target = target,
-            .optimize = optimize,
-            .enable_ztracy = true,
-        })) |ztracy| {
-            nethernet.addImport("ztracy", ztracy.module("root"));
-            nethernet.linkLibrary(ztracy.artifact("tracy"));
+        if (b.lazyDependency("tracy", .{})) |dependency| {
+            const library = b.addLibrary(.{
+                .name = "tracy",
+                .root_module = b.createModule(.{
+                    .target = target,
+                    .optimize = optimize,
+                    .link_libc = true,
+                    .link_libcpp = true,
+                }),
+            });
+            library.root_module.addCMacro("TRACY_ENABLE", "");
+            library.root_module.addCSourceFile(.{
+                .file = dependency.path("public/TracyClient.cpp"),
+                .flags = &.{"-fno-sanitize=undefined"},
+            });
+            if (target.result.os.tag == .windows) {
+                library.root_module.linkSystemLibrary("ws2_32", .{});
+                library.root_module.linkSystemLibrary("dbghelp", .{});
+            }
+            nethernet.linkLibrary(library);
         }
     }
 
@@ -244,7 +274,7 @@ pub fn build(b: *std.Build) void {
 
     if (target.result.os.tag == .windows) {
         b.installDirectory(.{
-            .source_dir = .{ .cwd_relative = b.pathJoin(&.{ native_prefix, "bin" }) },
+            .source_dir = b.graph.cwdRelativePath(b.pathJoin(&.{ native_prefix, "bin" })),
             .install_dir = .bin,
             .install_subdir = "",
             .include_extensions = &.{".dll"},
@@ -255,19 +285,19 @@ pub fn build(b: *std.Build) void {
         b,
         "tests/bench/main.zig",
         target,
-        .ReleaseFast,
+        .fast,
     );
     benchmark_module.addImport(
         "discovery_codec",
-        createModule(b, "src/discovery/codec.zig", target, .ReleaseFast),
+        createModule(b, "src/discovery/codec.zig", target, .fast),
     );
     benchmark_module.addImport(
         "framing",
-        createModule(b, "src/transport/framing.zig", target, .ReleaseFast),
+        createModule(b, "src/transport/framing.zig", target, .fast),
     );
     benchmark_module.addImport(
         "queue",
-        createModule(b, "src/internal/queue.zig", target, .ReleaseFast),
+        createModule(b, "src/internal/queue.zig", target, .fast),
     );
     const benchmark = b.addExecutable(.{
         .name = "nethernet-benchmark",
@@ -299,7 +329,7 @@ pub fn build(b: *std.Build) void {
 
     const run_stress = b.addRunArtifact(stress);
     addNativeRuntime(b, run_stress, target, native_prefix, sanitizer_runtime);
-    if (b.args) |args| run_stress.addArgs(args);
+    run_stress.addPassthruArgs();
     const stress_step = b.step(
         "stress",
         "Run configurable real-transport stress diagnostics",

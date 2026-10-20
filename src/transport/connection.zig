@@ -426,7 +426,7 @@ pub const Connection = struct {
             candidate.len > maximum_pending_candidate_bytes - self.pending_candidate_bytes)
             return error.TooManyRemoteCandidates;
 
-        const copy = try self.allocator.dupeZ(u8, candidate);
+        const copy = try self.allocator.dupeSentinel(u8, candidate, 0);
         errdefer self.allocator.free(copy);
         try self.pending_candidates.append(self.allocator, copy);
         self.pending_candidate_bytes += candidate.len;
@@ -531,7 +531,7 @@ pub const Connection = struct {
         if (is_candidate and !self.remote_description_set)
             return self.queueCandidate(signal.data);
 
-        const terminated = try self.allocator.dupeZ(u8, signal.data);
+        const terminated = try self.allocator.dupeSentinel(u8, signal.data, 0);
         defer self.allocator.free(terminated);
 
         if (is_candidate) return self.peer.remoteCandidate(terminated);
@@ -817,10 +817,10 @@ fn assemblyAllocationScenario(allocator: std.mem.Allocator) !void {
     };
     defer assembly.buffer.deinit(allocator);
 
-    const frame = [_]u8{1} ++ [_]u8{42} ** 1024;
+    const frame = [_]u8{1} ++ @as([1024]u8, @splat(42));
     _ = try assembly.push(allocator, std.testing.io, &frame, 4096);
 
-    const final = [_]u8{0} ++ [_]u8{43} ** 1024;
+    const final = [_]u8{0} ++ @as([1024]u8, @splat(43));
     const message = (try assembly.push(allocator, std.testing.io, &final, 4096)).?;
 
     try std.testing.expectEqual(@as(usize, 2048), message.len);
@@ -1179,7 +1179,7 @@ test "candidates before an answer are bounded and released" {
     );
     defer limited.destroy();
 
-    const large = [_]u8{'x'} ** 16384;
+    const large: [16384]u8 = @splat('x');
     for (0..maximum_pending_candidate_bytes / large.len) |_| {
         try limited.applySignal(.{
             .kind = Signal.candidate,
@@ -1395,7 +1395,7 @@ test "applied descriptions reach the transport without an identity attribute" {
     );
     defer connection.destroy();
 
-    const key = try jwt.Scheme.KeyPair.generateDeterministic(.{13} ** 48);
+    const key = try jwt.Scheme.KeyPair.generateDeterministic(@splat(13));
     const token = try jwt.serverToken(
         allocator,
         key,
@@ -1514,7 +1514,7 @@ test "an application verifier cannot be bypassed by the remote identity" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
 
-    const key = try jwt.Scheme.KeyPair.generateDeterministic(.{16} ** 48);
+    const key = try jwt.Scheme.KeyPair.generateDeterministic(@splat(16));
     const offer = try signedOffer(allocator, io, key);
     defer allocator.free(offer);
 
@@ -1531,7 +1531,7 @@ test "an application verifier cannot be bypassed by the remote identity" {
             return error.IdentityRefused;
         }
         fn substitute(_: ?*anyopaque, _: []const u8) anyerror!?auth.Key {
-            const other = try jwt.Scheme.KeyPair.generateDeterministic(.{17} ** 48);
+            const other = try jwt.Scheme.KeyPair.generateDeterministic(@splat(17));
             return other.public_key;
         }
         fn accept(_: ?*anyopaque, _: []const u8) anyerror!?auth.Key {
@@ -1594,7 +1594,7 @@ test "proof of possession alone is not issuer verification" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
 
-    const key = try jwt.Scheme.KeyPair.generateDeterministic(.{18} ** 48);
+    const key = try jwt.Scheme.KeyPair.generateDeterministic(@splat(18));
     const offer = try signedOffer(allocator, io, key);
     defer allocator.free(offer);
 
@@ -1626,14 +1626,14 @@ test "network IDs are opaque but bounded" {
         "..",
         "a/b?c#d% e",
         "\xff\xfe",
-        "a" ** maximum_network_id_length,
+        &@as([maximum_network_id_length]u8, @splat('a')),
     }) |id| try std.testing.expect(validNetworkId(id));
 
     for ([_][]const u8{
         "",
         "tab\there",
         &.{ '1', 0 },
-        "a" ** (maximum_network_id_length + 1),
+        &@as([maximum_network_id_length + 1]u8, @splat('a')),
     }) |id| try std.testing.expect(!validNetworkId(id));
 }
 

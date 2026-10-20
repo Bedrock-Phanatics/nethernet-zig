@@ -88,6 +88,6 @@ test "signaling error codes retain their wire values" {
         .identity_not_allowed,
     };
     for (codes, 0..) |code, value| {
-        try std.testing.expectEqual(@as(u8, @intCast(value)), @intFromEnum(code));
+        try std.testing.expectEqual(@as(u8, @intCast(value)), @backingInt(code));
     }
 }

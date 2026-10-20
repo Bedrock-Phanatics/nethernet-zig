@@ -66,7 +66,7 @@ pub const Keys = struct {
         if (signature.len != modulus.len) return error.InvalidIdentity;
         const signed = token[0 .. parts[0].len + 1 + parts[1].len];
         switch (modulus.len) {
-            inline 256, 384, 512 => |length| rsa.PKCS1v1_5Signature.verify(length, signature[0..length].*, signed, public_key, std.crypto.hash.sha2.Sha256) catch return error.SignatureVerificationFailed,
+            inline 256, 384, 512 => |length| rsa.PKCS1v1_5Signature.verify(length, signature[0..length], signed, public_key, std.crypto.hash.sha2.Sha256) catch return error.SignatureVerificationFailed,
             else => return error.UnsupportedKey,
         }
         const claims_bytes = try jwt.decode64(allocator, parts[1]);

@@ -141,7 +141,7 @@ pub fn main(init: std.process.Init) !void {
         try nethernet.EndpointListener.listen(
             init.gpa,
             init.io,
-            .{ .ip6 = .{ .bytes = .{0} ** 16, .port = address.getPort() } },
+            .{ .ip6 = .{ .bytes = @splat(0), .port = address.getPort() } },
             listener.options,
         )
     else

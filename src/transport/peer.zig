@@ -7,11 +7,7 @@ const wake = @import("../internal/wakeup.zig");
 const Wakeup = wake.Wakeup;
 const framing = @import("framing.zig");
 
-const c = @cImport({
-    @cDefine("RTC_ENABLE_MEDIA", "0");
-    @cDefine("RTC_ENABLE_WEBSOCKET", "0");
-    @cInclude("rtc/rtc.h");
-});
+const c = @import("rtc");
 
 pub const maximum_signal_size = 1024 * 1024;
 const maximum_sctp_message = framing.maximum_segment_payload + 1;
@@ -882,7 +878,7 @@ pub const Peer = struct {
             segment,
         );
 
-        const channel = channels[@intFromEnum(reliability)];
+        const channel = channels[@backingInt(reliability)];
         const buffered_zone = trace.zone(@src(), "rtcGetBufferedAmount");
         const buffered = c.rtcGetBufferedAmount(channel);
         buffered_zone.end();
@@ -1887,7 +1883,7 @@ test "unreliable drops preserve capacity for reliable traffic" {
     });
     defer peer.destroy();
 
-    const unreliable = [_]u8{0} ++ [_]u8{42} ** (framing.maximum_segment_payload - 8);
+    const unreliable = [_]u8{0} ++ @as([framing.maximum_segment_payload - 8]u8, @splat(42));
     peer.enqueue(4, &unreliable);
     peer.enqueue(4, &.{ 0, 1 });
     peer.enqueue(3, "reliable");

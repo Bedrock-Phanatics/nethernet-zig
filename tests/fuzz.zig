@@ -85,7 +85,7 @@ test "deterministic malformed input campaign" {
 test "identity decoder survives mutations of a valid key" {
     var encoded: [identity_file.encoded_size]u8 = undefined;
     _ = identity_file.encode(
-        try identity_file.KeyPair.generateDeterministic(.{9} ** 48),
+        try identity_file.KeyPair.generateDeterministic(@splat(9)),
         &encoded,
     );
 
@@ -137,7 +137,7 @@ test "identity decoder survives mutations of a valid key" {
 test "SDP identity verifier survives mutations of a signed assertion" {
     const allocator = std.testing.allocator;
 
-    const key = try identity.Scheme.KeyPair.generateDeterministic(.{3} ** 48);
+    const key = try identity.Scheme.KeyPair.generateDeterministic(@splat(3));
     const token = try identity.serverToken(allocator, key, 1000);
     defer allocator.free(token);
 

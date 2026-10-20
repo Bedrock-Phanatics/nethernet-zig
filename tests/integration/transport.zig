@@ -29,7 +29,7 @@ test "native peers negotiate and exchange both channel types" {
         for ([_]*Peer{ a, b }, [_]*Peer{ b, a }) |source, destination| {
             if (try source.poll(buffer)) |event| switch (event) {
                 .offer, .answer => |sdp| {
-                    const terminated = try allocator.dupeZ(u8, sdp);
+                    const terminated = try allocator.dupeSentinel(u8, sdp, 0);
                     defer allocator.free(terminated);
 
                     try destination.remoteDescription(
@@ -241,7 +241,7 @@ test "a negotiated 1024-byte SCTP limit bounds fragments and unreliable sends" {
                         advertised = true;
                     }
 
-                    const terminated = try allocator.dupeZ(u8, patched);
+                    const terminated = try allocator.dupeSentinel(u8, patched, 0);
                     defer allocator.free(terminated);
 
                     try destination.remoteDescription(
@@ -372,7 +372,7 @@ test "the local description matches current vanilla WebRTC configuration" {
     const fingerprints = parsed.value.object.get("fingerprint").?.array.items;
     try std.testing.expect(fingerprints.len > 0);
 
-    const key = try nethernet.IdentityKeyPair.generateDeterministic(.{9} ** 48);
+    const key = try nethernet.IdentityKeyPair.generateDeterministic(@splat(9));
     const token = try nethernet.identity.serverToken(allocator, key, 1000);
     defer allocator.free(token);
     const signed = try auth.add(allocator, sdp, .{ .key = key, .token = token });
@@ -578,7 +578,7 @@ test "ICE UDP mux serves concurrent connections from one server port" {
             try std.testing.expectEqualStrings(expected_local[0..expected_len], selected.local);
         }
 
-        const payload = [_]u8{@intCast(index)} ** 3000;
+        const payload: [3000]u8 = @splat(@intCast(index));
         try client.send(&payload, .reliable);
         const message = try server.receive();
         try std.testing.expectEqualSlices(u8, &payload, message.data);

@@ -41,7 +41,7 @@ fn bindWindows(io: std.Io, address: net.IpAddress) !net.Socket {
             .GroupID = 0,
             .AddressFamily = Threaded.posixAddressFamily(&address),
             .SocketType = ws.SOCK.DGRAM,
-            .Protocol = @intFromEnum(net.Protocol.udp),
+            .Protocol = @backingInt(net.Protocol.udp),
             .TransportDeviceNameLength = 0,
             .TransportDeviceName = undefined,
         } },
@@ -99,7 +99,7 @@ fn bindPosix(io: std.Io, address: net.IpAddress) !net.Socket {
     const has_cloexec = @hasDecl(posix.SOCK, "CLOEXEC");
     const flags = posix.SOCK.DGRAM | if (has_cloexec) posix.SOCK.CLOEXEC else 0;
     const fd: posix.socket_t = while (true) {
-        const rc = posix.system.socket(Threaded.posixAddressFamily(&address), flags, @intFromEnum(net.Protocol.udp));
+        const rc = posix.system.socket(Threaded.posixAddressFamily(&address), flags, @backingInt(net.Protocol.udp));
         switch (posix.errno(rc)) {
             .SUCCESS => break @intCast(rc),
             .INTR => try io.checkCancel(),

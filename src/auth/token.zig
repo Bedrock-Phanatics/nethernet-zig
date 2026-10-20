@@ -365,7 +365,7 @@ pub fn claimPublicKey(
 
 test "server identity, temporal claims, detached signatures, and tampering" {
     const allocator = std.testing.allocator;
-    const key = try Scheme.KeyPair.generateDeterministic(.{1} ** 48);
+    const key = try Scheme.KeyPair.generateDeterministic(@splat(1));
 
     const token = try serverToken(allocator, key, 1000);
     defer allocator.free(token);
@@ -400,11 +400,11 @@ test "server identity, temporal claims, detached signatures, and tampering" {
 test "identity JSON nesting is bounded and quoted brackets are ignored" {
     const allocator = std.testing.allocator;
 
-    const maximum = [_]u8{'['} ** 64 ++ [_]u8{'0'} ++ [_]u8{']'} ** 64;
+    const maximum = @as([64]u8, @splat('[')) ++ [_]u8{'0'} ++ @as([64]u8, @splat(']'));
     const accepted = try parse(allocator, &maximum);
     defer accepted.deinit();
 
-    const nested = [_]u8{'['} ** 65 ++ [_]u8{'0'} ++ [_]u8{']'} ** 65;
+    const nested = @as([65]u8, @splat('[')) ++ [_]u8{'0'} ++ @as([65]u8, @splat(']'));
     try std.testing.expectError(error.IdentityTooDeep, parse(allocator, &nested));
 
     const quoted = try parse(allocator, "{\"value\":\"[[[{{{\"}");
@@ -444,7 +444,7 @@ fn testToken(
 
 test "client and server identity validation policies" {
     const allocator = std.testing.allocator;
-    const key = try Scheme.KeyPair.generateDeterministic(.{4} ** 48);
+    const key = try Scheme.KeyPair.generateDeterministic(@splat(4));
 
     var encoded_key_buffer: [160]u8 = undefined;
     const encoded_key = testPublicKey(key, &encoded_key_buffer);
@@ -505,7 +505,7 @@ test "client and server identity validation policies" {
     _ = try claimPublicKey(allocator, self_signed, 2060, .server);
     try std.testing.expectError(error.ExpiredIdentity, claimPublicKey(allocator, self_signed, 2061, .server));
 
-    const other_key = try Scheme.KeyPair.generateDeterministic(.{5} ** 48);
+    const other_key = try Scheme.KeyPair.generateDeterministic(@splat(5));
     const wrongly_signed = try testToken(
         allocator,
         other_key,
@@ -558,7 +558,7 @@ test "client and server identity validation policies" {
 }
 
 fn allocationScenario(allocator: std.mem.Allocator) !void {
-    const key = try Scheme.KeyPair.generateDeterministic(.{3} ** 48);
+    const key = try Scheme.KeyPair.generateDeterministic(@splat(3));
     const token = try serverToken(allocator, key, 1000);
     defer allocator.free(token);
 
@@ -575,7 +575,7 @@ test "every identity allocation failure releases partial state" {
 
 test "generated server tokens carry a P-384 JWK cpk bound to the private key" {
     const allocator = std.testing.allocator;
-    const key = try Scheme.KeyPair.generateDeterministic(.{10} ** 48);
+    const key = try Scheme.KeyPair.generateDeterministic(@splat(10));
 
     const token = try serverToken(allocator, key, 1000);
     defer allocator.free(token);
@@ -626,7 +626,7 @@ test "generated server tokens carry a P-384 JWK cpk bound to the private key" {
 
 test "cpk claims reject wrong key types, curves and malformed coordinates" {
     const allocator = std.testing.allocator;
-    const key = try Scheme.KeyPair.generateDeterministic(.{11} ** 48);
+    const key = try Scheme.KeyPair.generateDeterministic(@splat(11));
     const sec1 = key.public_key.toUncompressedSec1();
 
     var x_buffer: [base64_url.Encoder.calcSize(48)]u8 = undefined;
@@ -679,7 +679,7 @@ test "cpk claims reject wrong key types, curves and malformed coordinates" {
 
 test "base64 DER cpk claims from older peers still parse" {
     const allocator = std.testing.allocator;
-    const key = try Scheme.KeyPair.generateDeterministic(.{12} ** 48);
+    const key = try Scheme.KeyPair.generateDeterministic(@splat(12));
 
     var der_buffer: [160]u8 = undefined;
     const claims = try std.fmt.allocPrint(
@@ -702,7 +702,7 @@ test "base64 DER cpk claims from older peers still parse" {
 
 test "server token temporal claims are optional but must be well formed" {
     const allocator = std.testing.allocator;
-    const key = try Scheme.KeyPair.generateDeterministic(.{14} ** 48);
+    const key = try Scheme.KeyPair.generateDeterministic(@splat(14));
 
     var der_buffer: [160]u8 = undefined;
     const encoded_key = testPublicKey(key, &der_buffer);
@@ -755,7 +755,7 @@ test "server token temporal claims are optional but must be well formed" {
     );
     defer allocator.free(claims);
 
-    const foreign = try Scheme.KeyPair.generateDeterministic(.{15} ** 48);
+    const foreign = try Scheme.KeyPair.generateDeterministic(@splat(15));
     const forged = try testToken(allocator, foreign, "ES384", claims);
     defer allocator.free(forged);
 
@@ -771,7 +771,7 @@ test "server token temporal claims are optional but must be well formed" {
 
 test "identity claims must be a JSON object" {
     const allocator = std.testing.allocator;
-    const key = try Scheme.KeyPair.generateDeterministic(.{16} ** 48);
+    const key = try Scheme.KeyPair.generateDeterministic(@splat(16));
     for ([_][]const u8{ "null", "[]", "true", "0", "\"claims\"" }) |claims| {
         const token = try testToken(allocator, key, "ES384", claims);
         defer allocator.free(token);

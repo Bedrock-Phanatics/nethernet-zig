@@ -74,7 +74,7 @@ pub const Urls = struct {
                 }
 
                 const owned = if (is_stun or !has_credentials)
-                    try allocator.dupeZ(u8, url)
+                    try allocator.dupeSentinel(u8, url, 0)
                 else
                     try authenticatedUrl(
                         allocator,

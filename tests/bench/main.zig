@@ -168,7 +168,7 @@ fn report(io: std.Io, start: std.Io.Timestamp, operation: []const u8, bytes: usi
 }
 
 fn backlogBenchmark(io: std.Io, allocator: std.mem.Allocator) !void {
-    const fragment = [_]u8{0} ++ [_]u8{42} ** 1199;
+    const fragment = [_]u8{0} ++ @as([1199]u8, @splat(42));
     const bytes = try allocator.alloc(u8, 1024 * 1024);
     defer allocator.free(bytes);
     var entries: [513]Queue.Entry = undefined;
@@ -194,7 +194,7 @@ fn backlogBenchmark(io: std.Io, allocator: std.mem.Allocator) !void {
 
 fn pressureBenchmark(io: std.Io, drop_unreliable: bool) !void {
     const iterations = 10_000;
-    const payload = [_]u8{0} ++ [_]u8{42} ** 511;
+    const payload = [_]u8{0} ++ @as([511]u8, @splat(42));
     var bytes: [4096]u8 = undefined;
     var entries: [16]Queue.Entry = undefined;
     var output: [512]u8 = undefined;

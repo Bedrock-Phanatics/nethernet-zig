@@ -11,7 +11,7 @@ test "trusted issuer verifies independent RS256 tokens and rejects invalid claim
     defer fixture.deinit();
     const keys = try issuer.Keys.init(allocator, fixture.value.jwks, "https://issuer.test/", "test-audience");
     defer keys.deinit();
-    const secret = try @import("nethernet_core").identity.Scheme.SecretKey.fromBytes(.{0} ** 47 ++ .{1});
+    const secret = try @import("nethernet_core").identity.Scheme.SecretKey.fromBytes(@as([47]u8, @splat(0)) ++ [_]u8{1});
     const expected = try @import("nethernet_core").identity.Scheme.KeyPair.fromSecretKey(secret);
     for (fixture.value.vectors) |vector| {
         const failure: ?anyerror = if (std.mem.eql(u8, vector.name, "issuer")) error.UntrustedIssuer else if (std.mem.eql(u8, vector.name, "audience")) error.InvalidAudience else if (std.mem.eql(u8, vector.name, "expired")) error.ExpiredIdentity else if (std.mem.eql(u8, vector.name, "future")) error.InvalidIdentity else null;

@@ -145,10 +145,11 @@ test "fingerprint collection cleans up allocation failures and malformed later e
         allocator,
         "a=fingerprint:sha-256 00:11\r\na=fingerprint:sha-384\r\n",
     ));
-    try std.testing.expectError(error.IdentityTooLarge, fingerprintPayload(allocator, "a" ** (jwt.maximum_size + 1)));
+    try std.testing.expectError(error.IdentityTooLarge, fingerprintPayload(allocator, &@as([jwt.maximum_size + 1]u8, @splat('a'))));
+    const line = "a=fingerprint:a b\r\n";
     try std.testing.expectError(error.IdentityTooLarge, fingerprintPayload(
         allocator,
-        "a=fingerprint:a b\r\n" ** (jwt.maximum_size / "a=fingerprint:a b\r\n".len),
+        std.mem.asBytes(&@as([jwt.maximum_size / line.len][line.len]u8, @splat(line.*))),
     ));
 }
 
@@ -268,7 +269,7 @@ test "SDP identity requires a valid fingerprint and explicit verifier acceptance
             return null;
         }
     };
-    const key = try jwt.Scheme.KeyPair.generateDeterministic(.{3} ** 48);
+    const key = try jwt.Scheme.KeyPair.generateDeterministic(@splat(3));
     const token = try jwt.serverToken(allocator, key, 1000);
     defer allocator.free(token);
     const signed = try add(
@@ -285,7 +286,7 @@ test "SDP identity requires a valid fingerprint and explicit verifier acceptance
 
 test "identity insertion ignores m equals inside attribute values" {
     const allocator = std.testing.allocator;
-    const key = try jwt.Scheme.KeyPair.generateDeterministic(.{4} ** 48);
+    const key = try jwt.Scheme.KeyPair.generateDeterministic(@splat(4));
     const token = try jwt.serverToken(allocator, key, 1000);
     defer allocator.free(token);
     const source =
@@ -310,7 +311,7 @@ test "identity insertion ignores m equals inside attribute values" {
 
 test "duplicate SDP identity assertions are rejected" {
     const allocator = std.testing.allocator;
-    const key = try jwt.Scheme.KeyPair.generateDeterministic(.{5} ** 48);
+    const key = try jwt.Scheme.KeyPair.generateDeterministic(@splat(5));
     const token = try jwt.serverToken(allocator, key, 1000);
     defer allocator.free(token);
 
@@ -328,7 +329,7 @@ test "duplicate SDP identity assertions are rejected" {
 
 test "SDP identity assertions must be session level" {
     const allocator = std.testing.allocator;
-    const key = try jwt.Scheme.KeyPair.generateDeterministic(.{6} ** 48);
+    const key = try jwt.Scheme.KeyPair.generateDeterministic(@splat(6));
     const token = try jwt.serverToken(allocator, key, 1000);
     defer allocator.free(token);
 
@@ -353,7 +354,7 @@ test "SDP identity assertions must be session level" {
 
 test "SDP identity binds every fingerprint in wire order" {
     const allocator = std.testing.allocator;
-    const key = try jwt.Scheme.KeyPair.generateDeterministic(.{2} ** 48);
+    const key = try jwt.Scheme.KeyPair.generateDeterministic(@splat(2));
 
     const token = try jwt.serverToken(allocator, key, 1000);
     defer allocator.free(token);
@@ -395,7 +396,7 @@ test "SDP identity binds every fingerprint in wire order" {
 
 test "identity envelopes with an empty idp domain are accepted" {
     const allocator = std.testing.allocator;
-    const key = try jwt.Scheme.KeyPair.generateDeterministic(.{7} ** 48);
+    const key = try jwt.Scheme.KeyPair.generateDeterministic(@splat(7));
     const token = try jwt.serverToken(allocator, key, 1000);
     defer allocator.free(token);
 
@@ -473,7 +474,7 @@ test "stripping an identity preserves every other SDP byte" {
     };
 
     for (cases) |case| {
-        const buffer = try allocator.dupeZ(u8, case.input);
+        const buffer = try allocator.dupeSentinel(u8, case.input, 0);
         defer allocator.free(buffer);
         try std.testing.expectEqualStrings(case.expected, removeIdentity(buffer));
     }
@@ -481,7 +482,7 @@ test "stripping an identity preserves every other SDP byte" {
 
 test "a verified identity is stripped before the description is used" {
     const allocator = std.testing.allocator;
-    const key = try jwt.Scheme.KeyPair.generateDeterministic(.{8} ** 48);
+    const key = try jwt.Scheme.KeyPair.generateDeterministic(@splat(8));
     const token = try jwt.serverToken(allocator, key, 1000);
     defer allocator.free(token);
 

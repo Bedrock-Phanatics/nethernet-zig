@@ -75,7 +75,7 @@ pub const Codec = struct {
         }
 
         std.mem.writeInt(u16, scratch[0..2], @intCast(size), .little);
-        std.mem.writeInt(u16, scratch[2..4], @intFromEnum(packet), .little);
+        std.mem.writeInt(u16, scratch[2..4], @backingInt(packet), .little);
         std.mem.writeInt(u64, scratch[4..12], sender_id, .little);
         @memset(scratch[12..20], 0);
 
@@ -255,9 +255,9 @@ pub fn decodePayload(payload: []u8) !Decoded {
 
 test "all packet kinds roundtrip and reject tampering" {
     const Tag = std.meta.Tag(Packet);
-    try std.testing.expectEqual(@as(u16, 0), @intFromEnum(Tag.request));
-    try std.testing.expectEqual(@as(u16, 1), @intFromEnum(Tag.response));
-    try std.testing.expectEqual(@as(u16, 2), @intFromEnum(Tag.message));
+    try std.testing.expectEqual(@as(u16, 0), @backingInt(Tag.request));
+    try std.testing.expectEqual(@as(u16, 1), @backingInt(Tag.response));
+    try std.testing.expectEqual(@as(u16, 2), @backingInt(Tag.message));
 
     const codec = Codec.init();
 
@@ -329,7 +329,7 @@ test "all packet kinds roundtrip and reject tampering" {
 }
 
 test "declared message length keeps vanilla trailing signal bytes" {
-    var payload = [_]u8{0} ** 41;
+    var payload: [41]u8 = @splat(0);
     std.mem.writeInt(u16, payload[0..2], payload.len, .little);
     std.mem.writeInt(u16, payload[2..4], 2, .little);
     std.mem.writeInt(u64, payload[4..12], 7, .little);
@@ -345,7 +345,7 @@ test "a truncated declared length still yields the whole vanilla signal" {
         "CONNECTREQUEST 3671553456937775104 v=0\r\n" ++
         "a=candidate:1 1 udp 2130706431 192.168.0.2 52000 typ host generation 0\r\n";
 
-    var payload = [_]u8{0} ** (32 + signal.len);
+    var payload: [32 + signal.len]u8 = @splat(0);
     std.mem.writeInt(u16, payload[0..2], payload.len, .little);
     std.mem.writeInt(u16, payload[2..4], 2, .little);
     std.mem.writeInt(u64, payload[4..12], 0x1020304050607080, .little);

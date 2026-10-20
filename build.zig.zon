@@ -1,12 +1,12 @@
 .{
     .name = .nethernet,
-    .version = "1.3.0",
+    .version = "1.4.0",
     .fingerprint = 0x8b6cc58fa8d39a76,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
-        .ztracy = .{
-            .url = "https://github.com/zig-gamedev/ztracy/archive/d95d2a193b9f97944a17026c9a42b5d0f9a88c94.tar.gz",
-            .hash = "ztracy-0.14.0-dev-zHJSqzUHGQAmhJybhlwtl1QKevUBw4M5YKZqPfWx2y99",
+        .tracy = .{
+            .url = "https://github.com/wolfpld/tracy/archive/refs/tags/v0.13.0.tar.gz",
+            .hash = "N-V-__8AAHW7KwHH_eNEviRWLkRfsxpWFrdOYM9f8VeCin4q",
             .lazy = true,
         },
     },

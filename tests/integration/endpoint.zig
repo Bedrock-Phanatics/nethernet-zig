@@ -505,7 +505,7 @@ test "HTTP signaling uses application/sdp and an opaque network ID" {
         null,
     )) != null);
 
-    const native_answer = try allocator.dupeZ(u8, answer);
+    const native_answer = try allocator.dupeSentinel(u8, answer, 0);
     defer allocator.free(native_answer);
     try offer.remoteDescription(native_answer, .answer);
     const deadline = std.Io.Clock.awake.now(io);
