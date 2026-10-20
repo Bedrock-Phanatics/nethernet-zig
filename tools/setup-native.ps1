@@ -17,8 +17,8 @@ function Run-Native([string]$Program, [string[]]$Arguments) {
 }
 
 
-if ((& zig version) -ne '0.16.0') {
-    throw 'This build requires Zig 0.16.0.'
+if ((& zig version) -ne '0.17.0') {
+    throw 'This build requires Zig 0.17.0.'
 }
 
 New-Item -ItemType Directory -Force .deps | Out-Null

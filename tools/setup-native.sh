@@ -2,7 +2,7 @@
 set -eu
 
 cd "$(dirname "$0")/.."
-test "$(zig version)" = 0.16.0
+test "$(zig version)" = 0.17.0
 mkdir -p .deps
 
 if [ ! -d .deps/libdatachannel/.git ]; then

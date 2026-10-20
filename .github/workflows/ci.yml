@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
-          version: 0.16.0
+          version: 0.17.0
       - run: git diff --check
       - run: zig fmt --check build.zig build.zig.zon src tests examples
       - run: zig build test
@@ -36,7 +36,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
-          version: 0.16.0
+          version: 0.17.0
       - run: sh tools/setup-native.sh
       - run: zig build -Doptimize=ReleaseSafe
       - run: zig build test-integration --summary all
@@ -56,7 +56,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
-          version: 0.16.0
+          version: 0.17.0
           # Restored Windows caches can reference missing Zig runtime libraries.
           use-cache: false
       - run: powershell -ExecutionPolicy Bypass -File tools/setup-native.ps1

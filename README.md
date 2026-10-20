@@ -7,7 +7,7 @@ Works with vanilla Bedrock 1.26.52 and [go-nethernet](https://github.com/df-mc/g
 
 ## Requirements
 
-- Zig 0.16.0
+- Zig 0.17.0
 - Git, CMake and a C/C++ toolchain
 - Linux or Windows, x86_64
 
