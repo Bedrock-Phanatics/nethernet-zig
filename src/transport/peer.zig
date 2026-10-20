@@ -429,6 +429,14 @@ pub const Peer = struct {
         return total;
     }
 
+    /// Starts libdatachannel's own close, which sends what SCTP still holds before shutting down.
+    /// Deleting right away would abort and drop it. Never blocks; the state change is notified.
+    pub fn shutdown(self: *Peer) void {
+        const handles = self.acquireNativeHandles() orelse return;
+        defer self.releaseNativeHandles();
+        _ = c.rtcClosePeerConnection(handles.id);
+    }
+
     fn forceClose(self: *Peer) void {
         self.close();
     }
@@ -1335,16 +1343,24 @@ fn gracefulDrain(
 
     const started = std.Io.Clock.awake.now(io);
     const timeout = wake.deadline(started, timeout_ms);
+    var shut = false;
     while (true) {
         const token = target.wakeup.prepare();
-        switch (target.drainStatus()) {
+        const status = target.drainStatus();
+        // Once our own shutdown finishes, the channels closing is how it ends
+        if (shut and status != .open) {
+            target.forceClose();
+            return;
+        }
+        switch (status) {
             .open => {},
             .closed => return,
             .failed => return error.ConnectionClosed,
         }
-        if (try target.bufferedAmount() == 0) {
-            target.forceClose();
-            return;
+        if (!shut and try target.bufferedAmount() == 0) {
+            target.shutdown();
+            shut = true;
+            continue;
         }
         if (std.Io.Clock.awake.now(io).nanoseconds >= timeout.deadline.raw.nanoseconds)
             return error.Timeout;
@@ -1363,6 +1379,7 @@ const DrainHarness = struct {
     buffered: std.atomic.Value(usize) = .init(0),
     status: std.atomic.Value(u8) = .init(0),
     closed: std.atomic.Value(bool) = .init(false),
+    shut: std.atomic.Value(bool) = .init(false),
     sends_stopped: std.atomic.Value(bool) = .init(false),
 
     fn stopSends(self: *DrainHarness) void {
@@ -1382,6 +1399,12 @@ const DrainHarness = struct {
 
     fn forceClose(self: *DrainHarness) void {
         self.closed.store(true, .release);
+        self.wakeup.signal(self.io);
+    }
+
+    fn shutdown(self: *DrainHarness) void {
+        self.shut.store(true, .release);
+        self.status.store(1, .release);
         self.wakeup.signal(self.io);
     }
 
@@ -1407,6 +1430,7 @@ test "graceful drain closes empty buffers and is repeatable" {
     try harness.drain(100);
     try harness.drain(100);
     try std.testing.expect(harness.sends_stopped.load(.acquire));
+    try std.testing.expect(harness.shut.load(.acquire));
     try std.testing.expect(harness.closed.load(.acquire));
 }
 

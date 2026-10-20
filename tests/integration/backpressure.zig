@@ -176,3 +176,24 @@ test "callbacks report arrivals and stop once cleared" {
     try std.testing.expectEqualStrings("pong", (try receiveDeadline(server, std.Io.Clock.awake.now(io))).data);
     try std.testing.expectEqual(cleared, counter.calls.load(.monotonic));
 }
+
+test "a graceful close delivers everything sent before it" {
+    const io = std.testing.io;
+    const pair = try createPair(io, 0xc105e);
+    const client, const server = pair;
+    defer server.destroy();
+
+    var payload: [8000]u8 = undefined;
+    for (0..100) |sequence| {
+        @memset(&payload, @truncate(sequence));
+        try client.send(&payload, .reliable);
+    }
+    try client.closeGracefully();
+    client.destroy();
+
+    for (0..100) |sequence| {
+        const message = try receiveDeadline(server, std.Io.Clock.awake.now(io));
+        try std.testing.expectEqual(payload.len, message.data.len);
+        try std.testing.expectEqual(@as(u8, @truncate(sequence)), message.data[0]);
+    }
+}

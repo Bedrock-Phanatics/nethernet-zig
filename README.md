@@ -52,13 +52,19 @@ Keep the identity file across restarts so players only confirm the server once.
 | `EndpointListener` | HTTP signaling server, `accept` returns established connections |
 | `dialEndpoint` | Connects to an HTTP signaling server |
 | `LanListener`, `dialLan` | LAN discovery and signaling |
-| `Connection` | `send`, `receive`, `poll`, `wait`, `closeGracefully`, `diagnostics` |
+| `Connection` | `send`, `receive`, `poll`, `wait`, `shutdown`, `closeGracefully`, `bufferedAmount`, `diagnostics` |
 | `Wakeup` | One wait across many connections via `connection.peer.subscribe` |
+| `Callback` | `connection.setCallback` runs a function instead, for hosts with their own scheduler |
 | `identity_issuer.Authority` | Verifies client identities against Minecraft's keys |
 | `Peer.setNativeThreadPoolSize` | Native worker count, at most four by default |
 
 Messages returned by `receive` and `poll` are borrowed until the next call. Poll a connection from
-one thread, while `send`, `close` and `closeGracefully` are safe from any thread. Set
+one thread, while `send`, `close` and `closeGracefully` are safe from any thread. A callback runs on
+a native thread with the connection locked, so it should only hand the work off; once
+`setCallback(null)` returns, none is running. `close` and `destroy` abort SCTP and drop anything it
+still holds, while `shutdown` (non-blocking) and `closeGracefully` let it go out first.
+`EndpointListener` can cap concurrent negotiations per client IP with
+`maximum_negotiations_per_address`. Set
 `allow_anonymous = true` to accept clients without an identity, for testing.
 
 When a connection's receive queue (`queue_bytes`, `queue_entries`) fills up, it stops reading SCTP

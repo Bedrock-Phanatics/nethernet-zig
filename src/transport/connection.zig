@@ -432,6 +432,11 @@ pub const Connection = struct {
         self.pending_candidate_bytes += candidate.len;
     }
 
+    /// Starts a graceful close without waiting, see `Peer.shutdown`.
+    pub fn shutdown(self: *Connection) void {
+        self.peer.shutdown();
+    }
+
     pub fn closeGracefully(self: *Connection) !void {
         try self.peer.closeGracefully(self.options.graceful_shutdown_timeout_ms);
     }
