@@ -28,6 +28,8 @@ pub const StatusProvider = struct {
 pub const Options = struct {
     connection: conn.Options = .{},
     maximum_negotiations: usize = 8,
+    /// Unlimited when null. Counts by IP, so clients behind one NAT share it.
+    maximum_negotiations_per_address: ?usize = null,
     maximum_http_workers: usize = 32,
     maximum_pending_accepts: usize = 64,
     request_timeout_ms: u32 = 15000,
@@ -93,6 +95,7 @@ pub const Listener = struct {
     group: std.Io.Group = .init,
     accepted: std.Io.Queue(*conn.Connection),
     slots: []*conn.Connection,
+    negotiators: []std.Io.net.IpAddress,
     accept_mutex: std.Io.Mutex = .init,
     reserved_accepts: usize = 0,
     active_negotiations: usize = 0,
@@ -110,6 +113,7 @@ pub const Listener = struct {
         try conn.validateServerIdentity(options.connection);
         if (options.maximum_negotiations == 0 or
             options.maximum_negotiations > 1024 or
+            options.maximum_negotiations_per_address == @as(?usize, 0) or
             options.maximum_http_workers == 0 or
             options.maximum_http_workers > 4096 or
             options.maximum_pending_accepts == 0 or
@@ -126,6 +130,9 @@ pub const Listener = struct {
             options.maximum_pending_accepts,
         );
         errdefer allocator.free(slots);
+
+        const negotiators = try allocator.alloc(std.Io.net.IpAddress, options.maximum_negotiations);
+        errdefer allocator.free(negotiators);
 
         var server = try listenExclusive(io, address);
         errdefer server.deinit(io);
@@ -144,6 +151,7 @@ pub const Listener = struct {
             .server = server,
             .options = actual_options,
             .slots = slots,
+            .negotiators = negotiators,
             .accepted = .init(slots),
         };
 
@@ -201,19 +209,29 @@ pub const Listener = struct {
         self.reserved_accepts -= 1;
     }
 
-    fn reserveNegotiation(self: *Listener) bool {
+    // One address can't take every negotiation slot and lock everyone else out.
+    fn reserveNegotiation(self: *Listener, address: std.Io.net.IpAddress) bool {
         self.accept_mutex.lockUncancelable(self.io);
         defer self.accept_mutex.unlock(self.io);
         if (self.active_negotiations >= self.options.maximum_negotiations)
             return false;
+        var same: usize = 0;
+        for (self.negotiators[0..self.active_negotiations]) |active| same += @intFromBool(sameHost(active, address));
+        if (same >= self.options.maximum_negotiations_per_address orelse same + 1) return false;
+        self.negotiators[self.active_negotiations] = address;
         self.active_negotiations += 1;
         return true;
     }
 
-    fn releaseNegotiation(self: *Listener) void {
+    fn releaseNegotiation(self: *Listener, address: std.Io.net.IpAddress) void {
         self.accept_mutex.lockUncancelable(self.io);
         defer self.accept_mutex.unlock(self.io);
         std.debug.assert(self.active_negotiations != 0);
+        const active = self.negotiators[0..self.active_negotiations];
+        for (active, 0..) |entry, i| if (entry.eql(&address)) {
+            active[i] = active[active.len - 1];
+            break;
+        };
         self.active_negotiations -= 1;
     }
 
@@ -234,6 +252,7 @@ pub const Listener = struct {
         self.close();
         if (self.token) |token| self.allocator.free(token);
         self.allocator.free(self.slots);
+        self.allocator.free(self.negotiators);
         self.allocator.destroy(self);
     }
 
@@ -558,14 +577,14 @@ pub const Listener = struct {
         var accept_reserved = true;
         defer if (accept_reserved) self.releaseAccept();
 
-        if (!self.reserveNegotiation()) {
+        if (!self.reserveNegotiation(stream.socket.address)) {
             self.trace("POST HTTP 503 (negotiation capacity)", .{});
             return respond(&request, response_state, "Negotiation capacity reached", .{
                 .status = .service_unavailable,
                 .keep_alive = false,
             });
         }
-        defer self.releaseNegotiation();
+        defer self.releaseNegotiation(stream.socket.address);
 
         var connection_options = self.options.connection;
         connection_options.native.disable_trickle = true;
@@ -710,6 +729,13 @@ test "identity verification failures produce HTTP 403" {
         try std.testing.expectEqual(std.http.Status.forbidden, Listener.errorStatus(failure));
     }
     try std.testing.expectEqual(std.http.Status.internal_server_error, Listener.errorStatus(error.OutOfMemory));
+}
+
+fn sameHost(a: std.Io.net.IpAddress, b: std.Io.net.IpAddress) bool {
+    return switch (a) {
+        .ip4 => |v4| b == .ip4 and std.mem.eql(u8, &v4.bytes, &b.ip4.bytes),
+        .ip6 => |v6| b == .ip6 and std.mem.eql(u8, &v6.bytes, &b.ip6.bytes),
+    };
 }
 
 const SdpSummary = struct {
@@ -867,11 +893,12 @@ test "HTTP capacity exhaustion returns 503 and releases reservations" {
     );
     defer listener.destroy();
 
+    const held: std.Io.net.IpAddress = .{ .ip4 = .loopback(1) };
     for ([_]bool{ false, true }) |negotiation| {
-        try std.testing.expect(if (negotiation) listener.reserveNegotiation() else listener.reserveAccept());
+        try std.testing.expect(if (negotiation) listener.reserveNegotiation(held) else listener.reserveAccept());
         var reserved = true;
         defer if (reserved) {
-            if (negotiation) listener.releaseNegotiation() else listener.releaseAccept();
+            if (negotiation) listener.releaseNegotiation(held) else listener.releaseAccept();
         };
 
         const stream = try listener.server.socket.address.connect(io, .{ .mode = .stream });
@@ -886,7 +913,7 @@ test "HTTP capacity exhaustion returns 503 and releases reservations" {
         var reader = stream.reader(io, &read_buffer);
         try std.testing.expectEqualStrings("HTTP/1.1 503", try reader.interface.take(12));
         _ = try reader.interface.discardRemaining();
-        if (negotiation) listener.releaseNegotiation() else listener.releaseAccept();
+        if (negotiation) listener.releaseNegotiation(held) else listener.releaseAccept();
         reserved = false;
         listener.accept_mutex.lockUncancelable(io);
         const accepts = listener.reserved_accepts;
@@ -904,4 +931,25 @@ test "a second listener cannot take a port that is already serving" {
     defer first.destroy();
     const taken: std.Io.net.IpAddress = .{ .ip4 = .loopback(first.server.socket.address.getPort()) };
     try std.testing.expectError(error.AddressInUse, Listener.listen(std.testing.allocator, io, taken, .{ .connection = .{ .allow_anonymous = true }, .maximum_http_workers = 1, .maximum_negotiations = 1 }));
+}
+
+test "one address cannot hold every negotiation slot" {
+    var negotiators: [4]std.Io.net.IpAddress = undefined;
+    var listener: Listener = undefined;
+    listener.io = std.testing.io;
+    listener.accept_mutex = .init;
+    listener.active_negotiations = 0;
+    listener.negotiators = &negotiators;
+    listener.options = .{ .maximum_negotiations = 4, .maximum_negotiations_per_address = 2 };
+    const first: std.Io.net.IpAddress = .{ .ip4 = .{ .bytes = .{ 10, 0, 0, 1 }, .port = 1 } };
+    const second: std.Io.net.IpAddress = .{ .ip4 = .{ .bytes = .{ 10, 0, 0, 1 }, .port = 2 } };
+    const third: std.Io.net.IpAddress = .{ .ip4 = .{ .bytes = .{ 10, 0, 0, 1 }, .port = 3 } };
+    const other: std.Io.net.IpAddress = .{ .ip4 = .{ .bytes = .{ 10, 0, 0, 2 }, .port = 1 } };
+    try std.testing.expect(listener.reserveNegotiation(first));
+    try std.testing.expect(listener.reserveNegotiation(second));
+    try std.testing.expect(!listener.reserveNegotiation(third));
+    try std.testing.expect(listener.reserveNegotiation(other));
+    listener.releaseNegotiation(first);
+    try std.testing.expect(listener.reserveNegotiation(third));
+    try std.testing.expectEqual(@as(usize, 3), listener.active_negotiations);
 }

@@ -39,6 +39,7 @@ pub const Address = connection.Address;
 pub const Message = connection.Message;
 const peer = @import("transport/peer.zig");
 pub const Peer = peer.Peer;
+pub const Callback = peer.Callback;
 pub const State = peer.State;
 pub const Wakeup = core.wakeup.Wakeup;
 

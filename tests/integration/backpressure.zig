@@ -141,3 +141,38 @@ test "closing a paused receiver neither hangs nor leaks" {
         server.destroy();
     }
 }
+
+test "callbacks report arrivals and stop once cleared" {
+    const io = std.testing.io;
+    const pair = try createPair(io, 0xca11);
+    defer for (pair) |connection| connection.destroy();
+    const client, const server = pair;
+
+    const Counter = struct {
+        calls: std.atomic.Value(u32) = .init(0),
+
+        fn bump(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            _ = self.calls.fetchAdd(1, .monotonic);
+        }
+    };
+    var counter: Counter = .{};
+    server.setCallback(.{ .context = &counter, .call = Counter.bump });
+    try std.testing.expectEqual(@as(u32, 1), counter.calls.load(.monotonic));
+
+    try client.send("ping", .reliable);
+    const started = std.Io.Clock.awake.now(io);
+    while (counter.calls.load(.monotonic) < 2) {
+        if (started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds() > 5_000) return error.Timeout;
+        try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    }
+    const message = try receiveDeadline(server, started);
+    try std.testing.expectEqualStrings("ping", message.data);
+    try std.testing.expectEqual(@as(usize, 0), try client.bufferedAmount());
+
+    server.setCallback(null);
+    const cleared = counter.calls.load(.monotonic);
+    try client.send("pong", .reliable);
+    try std.testing.expectEqualStrings("pong", (try receiveDeadline(server, std.Io.Clock.awake.now(io))).data);
+    try std.testing.expectEqual(cleared, counter.calls.load(.monotonic));
+}

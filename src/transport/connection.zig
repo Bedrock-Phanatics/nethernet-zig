@@ -439,6 +439,15 @@ pub const Connection = struct {
         return self.peer.ready();
     }
 
+    /// Bytes queued on both data channels that the peer has not taken yet.
+    pub fn bufferedAmount(self: *Connection) !usize {
+        return self.peer.bufferedAmount();
+    }
+
+    pub fn setCallback(self: *Connection, callback: ?native.Callback) void {
+        self.peer.setCallback(callback);
+    }
+
     pub fn callbackStats(self: *Connection) CallbackStats {
         return self.peer.callbackStats();
     }

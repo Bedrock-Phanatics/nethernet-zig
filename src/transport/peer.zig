@@ -213,6 +213,12 @@ pub const Options = struct {
     unreliable_reserve_entries: usize = 1,
 };
 
+/// Runs on native threads with the peer locked, so keep it short and never call into the peer from it.
+pub const Callback = struct {
+    context: *anyopaque,
+    call: *const fn (*anyopaque) void,
+};
+
 pub const Peer = struct {
     pub fn enableNativeTrace() void {
         c.rtcInitLogger(c.RTC_LOG_DEBUG, onNativeLog);
@@ -250,6 +256,7 @@ pub const Peer = struct {
 
     wakeup: Wakeup = .{},
     subscriber: ?*Wakeup = null,
+    callback: ?Callback = null,
     idle_sequence: ?Wakeup.Token = null,
 
     state: State = .new,
@@ -407,7 +414,7 @@ pub const Peer = struct {
         return .open;
     }
 
-    fn bufferedAmount(self: *Peer) !usize {
+    pub fn bufferedAmount(self: *Peer) !usize {
         const handles = self.acquireNativeHandles() orelse
             return error.ConnectionClosed;
         defer self.releaseNativeHandles();
@@ -441,11 +448,20 @@ pub const Peer = struct {
         self.notify();
     }
 
+    /// Calls back once right away. Once this returns with null, no call is running or will start.
+    pub fn setCallback(self: *Peer, callback: ?Callback) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        self.callback = callback;
+        self.notify();
+    }
+
     fn notify(self: *Peer) void {
         const zone = trace.zone(@src(), "peer.notify");
         defer zone.end();
         self.wakeup.signal(self.io);
         if (self.subscriber) |wakeup| wakeup.signal(self.io);
+        if (self.callback) |callback| callback.call(callback.context);
     }
 
     pub fn hasPending(self: *Peer, signals_only: bool) bool {
