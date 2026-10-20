@@ -75,7 +75,8 @@ reading is paused, data still waiting in the SCTP buffer is dropped with it.
 | 7551 | UDP | LAN discovery |
 
 Every connection gets its own UDP socket by default. `.native = .{ .enable_ice_udp_mux = true }`
-shares one socket and uses less CPU. A client address is only bound to a session after an
+shares one socket. On Linux it cut server CPU by 10-25% with 100 to 1000 clients, while on Windows
+it measured slower than separate sockets, so profile your own setup. A client address is only bound to a session after an
 authenticated ICE check, so reconnects and reused NAT ports reach the right session. The mux is not
 yet verified against vanilla clients, so it stays opt-in. The shared socket asks for an 8 MiB
 buffer, so on Linux raise `net.core.rmem_max` and `net.core.wmem_max` to 8388608 before serving
