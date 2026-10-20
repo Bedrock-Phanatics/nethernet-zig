@@ -102,8 +102,9 @@ const fetch_timeout_seconds = 15;
 pub const Authority = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
-    // One lock covers verify and refresh, so a key fetch can stall joins for up to 15 seconds.
     mutex: std.Io.Mutex = .init,
+    fetched: std.Io.Condition = .init,
+    fetching: bool = false,
     keys: ?Keys = null,
     refreshed: ?std.Io.Timestamp = null,
 
@@ -126,9 +127,20 @@ pub const Authority = struct {
         try self.refreshLocked();
     }
 
+    // The download runs unlocked so joins with known keys are never held up by it.
     fn refreshLocked(self: *Authority) !void {
+        if (self.fetching) {
+            while (self.fetching) try self.fetched.wait(self.io, &self.mutex);
+            return;
+        }
+        self.fetching = true;
         self.refreshed = std.Io.Clock.awake.now(self.io);
-        const keys = try fetch(self.allocator, self.io);
+        self.mutex.unlock(self.io);
+        const result = fetch(self.allocator, self.io);
+        self.mutex.lockUncancelable(self.io);
+        self.fetching = false;
+        self.fetched.broadcast(self.io);
+        const keys = try result;
         if (self.keys) |old| old.deinit();
         self.keys = keys;
     }
@@ -149,7 +161,8 @@ pub const Authority = struct {
                 return error.UnknownSigningKey;
         }
         try self.refreshLocked();
-        return try self.keys.?.verify(self.allocator, token, now);
+        const keys = &(self.keys orelse return error.UnknownSigningKey);
+        return try keys.verify(self.allocator, token, now);
     }
 };
 
@@ -185,6 +198,25 @@ fn download(allocator: std.mem.Allocator, io: std.Io) !Keys {
     });
     if (result.status != .ok) return error.IssuerFetchFailed;
     return Keys.init(allocator, writer.buffered(), minecraft_issuer, minecraft_audience);
+}
+
+test "a refresh during another fetch waits for it instead of fetching again" {
+    const io = std.testing.io;
+    var authority = Authority.init(std.testing.allocator, io);
+    defer authority.deinit();
+    authority.fetching = true;
+    var waiting = try io.concurrent(Authority.refresh, .{&authority});
+    try std.Io.sleep(io, .fromMilliseconds(20), .awake);
+
+    authority.mutex.lockUncancelable(io);
+    try std.testing.expect(authority.refreshed == null);
+    authority.fetching = false;
+    authority.fetched.broadcast(io);
+    authority.mutex.unlock(io);
+
+    try waiting.await(io);
+    try std.testing.expect(authority.refreshed == null);
+    try std.testing.expect(authority.keys == null);
 }
 
 test "authority refreshes unknown signing keys at most once per interval" {

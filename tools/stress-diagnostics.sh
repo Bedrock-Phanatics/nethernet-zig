@@ -22,7 +22,6 @@ case "$mode" in
       -Dnative-sanitizer="$sanitizer" -- "$@"
     ;;
   zig-tsan)
-    # Only Zig code is instrumented, so reports inside native code are noise.
     TSAN_OPTIONS="suppressions=$(pwd)/tools/zig-tsan.supp ${TSAN_OPTIONS:-}" \
       $norandom zig build "$step" -Doptimize=ReleaseSafe -Dsanitize-thread=true -- "$@"
     ;;

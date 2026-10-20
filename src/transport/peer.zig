@@ -370,7 +370,7 @@ pub const Peer = struct {
 
         const delete_zone = trace.zone(@src(), "rtcDeletePeerConnection");
         if (id >= 0) {
-            // Deletion only starts an async SCTP stop, but clearing a callback waits for its running call.
+            // Deleting only starts an async stop, but clearing a callback waits for a running call.
             _ = c.rtcSetStateChangeCallback(id, null);
             _ = c.rtcSetIceStateChangeCallback(id, null);
             _ = c.rtcSetGatheringStateChangeCallback(id, null);
@@ -378,7 +378,7 @@ pub const Peer = struct {
             _ = c.rtcSetLocalCandidateCallback(id, null);
             _ = c.rtcSetDataChannelCallback(id, null);
         }
-        // Channels close here first, otherwise the async close of the peer races with their deletion.
+        // Channels go first so the async peer close cannot race their deletion.
         for (channels) |channel| {
             if (channel >= 0) _ = c.rtcDeleteDataChannel(channel);
         }
@@ -528,7 +528,7 @@ pub const Peer = struct {
         return .{ .id = self.id, .channels = self.channels, .open = self.channels_open };
     }
 
-    // Channel state lives behind libdatachannel's global lock, so it is only queried until both open.
+    // Channel state sits behind libdatachannel's global lock, so it is only queried until both open.
     fn channelsOpen(self: *Peer, handles: NativeHandles) bool {
         if (handles.open) return true;
         if (handles.channels[0] < 0 or handles.channels[1] < 0 or
@@ -770,7 +770,7 @@ pub const Peer = struct {
             if (self.queue_pop_test_hook) |hook| hook(self);
         }
 
-        // Every enqueue and state change bumps the sequence under the lock, so an unchanged one means still empty.
+        // Every enqueue bumps the sequence, so an unchanged one means still empty.
         const sequence = self.wakeup.sequence.load(.acquire);
         if (self.idle_sequence == sequence) return null;
 
@@ -1040,8 +1040,8 @@ pub const Peer = struct {
         self.notify();
     }
 
-    // SCTP reads stop before the queue can overflow, so unread data closes the receive window
-    // instead of failing the connection. Native calls stay under the lock to keep them ordered.
+    // Pausing SCTP reads lets the receive window throttle the sender instead of overflowing the queue.
+    // The native calls stay under the lock so a pause and resume cannot reorder.
     fn pauseReceiveLocked(self: *Peer) void {
         if (self.receive_paused or self.id < 0 or
             (self.queue.bytes.len - self.queue.used_bytes >= maximum_sctp_message and

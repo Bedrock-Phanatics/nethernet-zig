@@ -62,10 +62,9 @@ fn addNativeRuntime(
     sanitizer_runtime: ?[]const u8,
 ) void {
     run.addPathDir(b.pathJoin(&.{ prefix, "bin" }));
-    // The instrumented native build needs its runtime loaded before anything else.
     if (sanitizer_runtime) |runtime| {
         run.setEnvironmentVariable("LD_PRELOAD", runtime);
-        // Zig threads install their own signal stack, which ASan would otherwise unmap at thread exit.
+        // Zig threads bring their own signal stack, which ASan would unmap at thread exit.
         if (std.mem.indexOf(u8, runtime, "libasan") != null) run.setEnvironmentVariable(
             "ASAN_OPTIONS",
             b.fmt("use_sigaltstack=0:{s}", .{b.graph.environ_map.get("ASAN_OPTIONS") orelse ""}),
@@ -133,8 +132,7 @@ pub fn build(b: *std.Build) void {
     build_options.addOption(usize, "fuzz_iterations", fuzz_iterations);
     build_options.addOption(usize, "handshake_pairs", handshake_pairs);
 
-    // Zig's per-thread signal stack is unaligned, which a preloaded ASan cannot unpoison
-    // when native code throws, so ASan builds run without it.
+    // ASan cannot unpoison Zig's unaligned signal stack when native code throws.
     const runtime_options = b.addOptions();
     runtime_options.addOption(bool, "signal_stack", native_sanitizer != .address);
     const test_runner: ?std.Build.Step.Compile.TestRunner = if (native_sanitizer == .address) blk: {

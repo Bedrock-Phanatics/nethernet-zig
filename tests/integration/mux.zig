@@ -14,7 +14,7 @@ const Relay = struct {
     stopped: std.atomic.Value(bool) = .init(false),
     group: std.Io.Group = .init,
 
-    // A wake datagram ends the loop, since canceling a blocked Windows receive is not reliable.
+    // Canceling a blocked receive is unreliable on Windows, so a datagram wakes the loop instead.
     fn stop(self: *Relay) void {
         self.stopped.store(true, .release);
         const own = std.Io.net.IpAddress.parseIp4("127.0.0.1", self.socket.address.getPort()) catch unreachable;
@@ -143,7 +143,6 @@ test "a client that vanished silently does not capture its address from a new mu
         relay.blocked.store(true, .release);
     }
     relay.blocked.store(false, .release);
-    // The old session must still own the address when the new client arrives.
     try std.testing.expectEqual(nethernet.State.connected, old_server.state());
 
     for (2..5) |id| {

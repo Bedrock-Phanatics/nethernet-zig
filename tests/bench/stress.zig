@@ -638,7 +638,6 @@ fn pumpClient(io: std.Io, run_started: std.Io.Timestamp, pair: *Pair, state: *St
     return progress;
 }
 
-// Every message takes the next sequence, so reliable ones must arrive in increasing order.
 fn checkOrder(last: *u64, message: nethernet.Message, sequence: u64, metrics: *Metrics) void {
     if (message.reliability != .reliable) return;
     if (sequence <= last.*) metrics.reliable_order_violations += 1;

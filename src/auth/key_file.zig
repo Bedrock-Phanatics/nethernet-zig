@@ -139,7 +139,7 @@ const Element = struct {
     contents: []const u8,
 };
 
-// The stdlib DER parser assumes checked lengths. Key files need bounds checks here.
+// The stdlib DER parser assumes checked lengths, so key files get their own bounds checks.
 fn take(
     bytes: []const u8,
     index: usize,

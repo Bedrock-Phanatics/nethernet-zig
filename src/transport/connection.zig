@@ -291,7 +291,6 @@ pub const Connection = struct {
     packet_scratch: []u8,
     negotiation_scratch: ?[]u8,
     send_buffer: []u8,
-    // Protects the send buffer and counters.
     send_mutex: std.Io.Mutex = .init,
     assemblies: [2]Assembly = .{
         .{ .decoder = framing.Reassembler.init(&.{}, .reliable) },
@@ -382,7 +381,6 @@ pub const Connection = struct {
                 .domain = self.options.server_identity_domain,
             };
         } else if (self.options.identity) |*identity| {
-            // Copied so callers can free theirs.
             self.owned_token = try allocator.dupe(u8, identity.token);
             identity.token = self.owned_token.?;
         }
@@ -409,7 +407,7 @@ pub const Connection = struct {
         self.allocator.destroy(self);
     }
 
-    /// Safe from any thread. Pending candidates belong to the signaling thread and are freed there or in destroy.
+    /// Safe to call from any thread.
     pub fn close(self: *Connection) void {
         self.peer.close();
     }
@@ -596,7 +594,7 @@ pub const Connection = struct {
     }
 
     fn pollInternal(self: *Connection, signals_only: bool) !?Event {
-        // Established and idle means no deadlines, so only a peer callback can bring work.
+        // Established and idle means no deadlines, so only a callback can bring work.
         if (self.idle_sequence == self.peer.wakeup.sequence.load(.acquire)) return null;
 
         const zone = trace.zone(@src(), "connection.poll");

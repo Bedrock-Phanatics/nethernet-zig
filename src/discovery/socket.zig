@@ -20,7 +20,7 @@ fn bindWindows(io: std.Io, address: net.IpAddress) !net.Socket {
     const ws = windows.ws2_32;
     var handle: windows.HANDLE = undefined;
     var status: windows.IO_STATUS_BLOCK = undefined;
-    // Use an AFD handle, matching std.Io's socket lifecycle.
+    // An AFD handle matches how std.Io manages sockets.
     switch (windows.ntdll.NtCreateFile(
         &handle,
         .{
