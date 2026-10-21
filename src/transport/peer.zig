@@ -1134,6 +1134,9 @@ pub const Peer = struct {
         if (self.stopping) return;
         if (state == c.RTC_FAILED) {
             self.drain_queued_on_close = false;
+        } else if ((mapped == .closed or mapped == .disconnected) and self.state != .failed) {
+            // A clean remote close can report this before the channels' own close, keep what already arrived
+            self.drain_queued_on_close = true;
         }
         if (self.state != .failed and self.state != .closed) {
             self.state = mapped;
