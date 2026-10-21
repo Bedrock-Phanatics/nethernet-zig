@@ -936,9 +936,10 @@ pub const Peer = struct {
                 fragment.ptr,
                 @intCast(fragment.len),
             )) catch |err| {
+                // A partly sent message would corrupt the stream, but what already arrived can still be read
                 self.releaseNativeHandles();
                 handles_acquired = false;
-                self.close();
+                self.stopSends();
                 return err;
             };
         }
