@@ -429,8 +429,15 @@ pub const Peer = struct {
         return total;
     }
 
-    /// Starts libdatachannel's own close, which sends what SCTP still holds before shutting down.
-    /// Deleting right away would abort and drop it. Never blocks; the state change is notified.
+    /// What SCTP still holds until the far end acknowledges it, which the close would otherwise drop.
+    pub fn unackedAmount(self: *Peer) usize {
+        const handles = self.acquireNativeHandles() orelse return 0;
+        defer self.releaseNativeHandles();
+        return @intCast(@max(c.rtcGetSctpUnackedAmount(handles.id), 0));
+    }
+
+    /// Starts libdatachannel's own close. Its teardown aborts SCTP, so anything not yet acknowledged
+    /// is lost; wait for `unackedAmount` to reach zero first. Never blocks; the state change is notified.
     pub fn shutdown(self: *Peer) void {
         const handles = self.acquireNativeHandles() orelse return;
         defer self.releaseNativeHandles();
@@ -1336,6 +1343,8 @@ test "non-trickle SDP requires a usable local ICE candidate" {
     ));
 }
 
+const unacked_poll_ms = 5;
+
 fn gracefulDrain(
     comptime T: type,
     target: *T,
@@ -1361,14 +1370,19 @@ fn gracefulDrain(
             .closed => return,
             .failed => return error.ConnectionClosed,
         }
+        var wait = timeout;
         if (!shut and try target.bufferedAmount() == 0) {
-            target.shutdown();
-            shut = true;
-            continue;
+            if (target.unackedAmount() == 0) {
+                target.shutdown();
+                shut = true;
+                continue;
+            }
+            // Acknowledgements raise no event, so look again shortly
+            wait = wake.earliest(timeout, wake.deadline(std.Io.Clock.awake.now(io), unacked_poll_ms));
         }
         if (std.Io.Clock.awake.now(io).nanoseconds >= timeout.deadline.raw.nanoseconds)
             return error.Timeout;
-        try target.wakeup.wait(io, token, timeout);
+        try target.wakeup.wait(io, token, wait);
     }
 }
 
@@ -1381,6 +1395,7 @@ const DrainHarness = struct {
     wakeup: Wakeup = .{},
     observed: std.Io.Event = .unset,
     buffered: std.atomic.Value(usize) = .init(0),
+    unacked: std.atomic.Value(usize) = .init(0),
     status: std.atomic.Value(u8) = .init(0),
     closed: std.atomic.Value(bool) = .init(false),
     shut: std.atomic.Value(bool) = .init(false),
@@ -1399,6 +1414,10 @@ const DrainHarness = struct {
     fn bufferedAmount(self: *DrainHarness) !usize {
         self.observed.set(self.io);
         return self.buffered.load(.acquire);
+    }
+
+    fn unackedAmount(self: *DrainHarness) usize {
+        return self.unacked.load(.acquire);
     }
 
     fn forceClose(self: *DrainHarness) void {
@@ -1446,6 +1465,20 @@ test "graceful drain waits for buffered-low wakeup" {
     defer release.cancel(io) catch {};
     try harness.drain(1000);
     try release.await(io);
+    try std.testing.expect(harness.closed.load(.acquire));
+}
+
+test "graceful drain waits for SCTP to have everything acknowledged" {
+    const io = std.testing.io;
+    var harness: DrainHarness = .{ .io = io };
+    harness.unacked.store(1, .release);
+    var draining = try io.concurrent(DrainHarness.drain, .{ &harness, @as(u32, 1000) });
+    defer draining.cancel(io) catch {};
+    try io.sleep(.fromMilliseconds(4 * unacked_poll_ms), .awake);
+    try std.testing.expect(!harness.shut.load(.acquire));
+    harness.unacked.store(0, .release);
+    try draining.await(io);
+    try std.testing.expect(harness.shut.load(.acquire));
     try std.testing.expect(harness.closed.load(.acquire));
 }
 

@@ -432,9 +432,14 @@ pub const Connection = struct {
         self.pending_candidate_bytes += candidate.len;
     }
 
-    /// Starts a graceful close without waiting, see `Peer.shutdown`.
+    /// Starts a graceful close without waiting, see `Peer.shutdown`. Wait for `unackedAmount` to reach
+    /// zero first, or the far end can miss what SCTP still held.
     pub fn shutdown(self: *Connection) void {
         self.peer.shutdown();
+    }
+
+    pub fn unackedAmount(self: *Connection) usize {
+        return self.peer.unackedAmount();
     }
 
     pub fn closeGracefully(self: *Connection) !void {

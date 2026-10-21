@@ -1,0 +1,99 @@
+diff --git a/include/rtc/rtc.h b/include/rtc/rtc.h
+--- a/include/rtc/rtc.h
++++ b/include/rtc/rtc.h
+@@ -237,6 +237,8 @@
+ RTC_C_EXPORT int rtcGetMaxDataChannelStream(int pc);
+ RTC_C_EXPORT int rtcGetRemoteMaxMessageSize(int pc);
+ RTC_C_EXPORT int rtcSetSctpReceivePaused(int pc, bool paused);
++// Bytes SCTP still holds until the far end acknowledges them
++RTC_C_EXPORT int rtcGetSctpUnackedAmount(int pc);
+ 
+ // DataChannel, Track, and WebSocket common API
+ 
+diff --git a/src/capi.cpp b/src/capi.cpp
+--- a/src/capi.cpp
++++ b/src/capi.cpp
+@@ -14,6 +14,7 @@
+ #include <algorithm>
+ #include <chrono>
+ #include <exception>
++#include <limits>
+ #include <mutex>
+ #include <type_traits>
+ #include <unordered_map>
+@@ -726,6 +727,14 @@
+ 	});
+ }
+ 
++int rtcGetSctpUnackedAmount(int pc) {
++	return wrap([&] {
++		auto peerConnection = getPeerConnection(pc);
++		return int(std::min(peerConnection->sctpUnackedAmount(),
++		                    size_t(std::numeric_limits<int>::max())));
++	});
++}
++
+ int rtcSetOpenCallback(int id, rtcOpenCallbackFunc cb) {
+ 	return wrap([&] {
+ 		auto channel = getChannel(id);
+diff --git a/include/rtc/peerconnection.hpp b/include/rtc/peerconnection.hpp
+--- a/include/rtc/peerconnection.hpp
++++ b/include/rtc/peerconnection.hpp
+@@ -96,6 +96,7 @@
+ 	uint16_t maxDataChannelId() const;
+ 	bool getSelectedCandidatePair(Candidate *local, Candidate *remote);
+ 	void setSctpReceivePaused(bool paused);
++	size_t sctpUnackedAmount();
+ 
+ 	void setLocalDescription(Description::Type type = Description::Type::Unspec, LocalDescriptionInit init = {});
+ 	void gatherLocalCandidates(std::vector<IceServer> additionalIceServers = {});
+diff --git a/src/peerconnection.cpp b/src/peerconnection.cpp
+--- a/src/peerconnection.cpp
++++ b/src/peerconnection.cpp
+@@ -393,6 +393,11 @@
+ 		sctpTransport->setRecvPaused(paused);
+ }
+ 
++size_t PeerConnection::sctpUnackedAmount() {
++	auto sctpTransport = impl()->getSctpTransport();
++	return sctpTransport ? sctpTransport->unackedAmount() : 0;
++}
++
+ void PeerConnection::clearStats() {
+ 	if (auto sctpTransport = impl()->getSctpTransport())
+ 		return sctpTransport->clearStats();
+diff --git a/src/impl/sctptransport.hpp b/src/impl/sctptransport.hpp
+--- a/src/impl/sctptransport.hpp
++++ b/src/impl/sctptransport.hpp
+@@ -52,6 +52,7 @@
+ 	void closeStream(unsigned int stream);
+ 	void close();
+ 	void setRecvPaused(bool paused);
++	size_t unackedAmount();
+ 
+ 	unsigned int maxStream() const;
+ 
+diff --git a/src/impl/sctptransport.cpp b/src/impl/sctptransport.cpp
+--- a/src/impl/sctptransport.cpp
++++ b/src/impl/sctptransport.cpp
+@@ -444,6 +444,20 @@
+ 		enqueueRecv();
+ }
+ 
++// The output queue only shrinks as the far end acknowledges data, so zero means it has everything
++size_t SctpTransport::unackedAmount() {
++	struct {
++		sctp_assoc_t ss_assoc_id;
++		uint32_t ss_total_sndbuf;
++		uint32_t ss_total_recv_buf;
++	} stat = {};
++	socklen_t len = sizeof(stat);
++	const int SctpGetSndbufUse = 0x00001101; // SCTP_GET_SNDBUF_USE, not in usrsctp.h
++	if (usrsctp_getsockopt(mSock, IPPROTO_SCTP, SctpGetSndbufUse, &stat, &len))
++		return 0;
++	return stat.ss_total_sndbuf;
++}
++
+ unsigned int SctpTransport::maxStream() const {
+ 	unsigned int streamsCount = mNegotiatedStreamsCount.value_or(MAX_SCTP_STREAMS_COUNT);
+ 	return streamsCount > 0 ? streamsCount - 1 : 0;
