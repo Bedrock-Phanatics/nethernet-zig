@@ -1,0 +1,27 @@
+diff --git a/src/impl/peerconnection.cpp b/src/impl/peerconnection.cpp
+--- a/src/impl/peerconnection.cpp
++++ b/src/impl/peerconnection.cpp
+@@ -1346,8 +1346,9 @@
+ 	PLOG_INFO << "Changed state to " << s.str();
+ 
+ 	if (newState == State::Closed) {
+-		auto callback = std::move(stateChangeCallback); // steal the callback
+-		callback(State::Closed);                        // call it synchronously
++		// Called under its lock, so whoever clears it waits for the call to finish
++		stateChangeCallback(State::Closed);
++		stateChangeCallback = nullptr;
+ 	} else {
+ 		mProcessor.enqueue(&PeerConnection::trigger<State>, shared_from_this(),
+ 		                   &stateChangeCallback, newState);
+@@ -1364,8 +1365,9 @@
+ 	PLOG_INFO << "Changed ICE state to " << s.str();
+ 
+ 	if (newState == IceState::Closed) {
+-		auto callback = std::move(iceStateChangeCallback); // steal the callback
+-		callback(IceState::Closed);                        // call it synchronously
++		// Called under its lock, so whoever clears it waits for the call to finish
++		iceStateChangeCallback(IceState::Closed);
++		iceStateChangeCallback = nullptr;
+ 	} else {
+ 		mProcessor.enqueue(&PeerConnection::trigger<IceState>, shared_from_this(),
+ 		                   &iceStateChangeCallback, newState);
