@@ -202,6 +202,8 @@ pub const Options = struct {
     queue_bytes: usize = maximum_signal_size,
     queue_entries: usize = 512,
     maximum_buffered_send: usize = framing.default_maximum_message_size + framing.maximum_segments,
+    // The buffered-amount-low callback fires once the send buffer drains to this
+    buffered_amount_low_threshold: usize = 0,
     maximum_message_size: usize = framing.default_maximum_message_size,
     ice_servers: []const [*:0]const u8 = &.{},
     bind_address: ?[:0]const u8 = null,
@@ -1042,7 +1044,7 @@ pub const Peer = struct {
         try check(c.rtcSetMessageCallback(channel, onMessage));
         try check(c.rtcSetClosedCallback(channel, onClosed));
         try check(c.rtcSetErrorCallback(channel, onError));
-        try check(c.rtcSetBufferedAmountLowThreshold(channel, 0));
+        try check(c.rtcSetBufferedAmountLowThreshold(channel, @intCast(@min(self.options.buffered_amount_low_threshold, std.math.maxInt(c_int)))));
         try check(c.rtcSetBufferedAmountLowCallback(channel, onBufferedAmountLow));
         self.mutex.lockUncancelable(self.io);
         self.notify();
