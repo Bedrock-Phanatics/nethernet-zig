@@ -38,7 +38,8 @@ done
 
 patches=""
 for name in bounds mbedtls-link-order threadpool dtls-timer sctp-timer-wheel juice-timers \
-    sctp-receive-pause dtls-incoming juice-mux-routing sctp-unacked closed-callbacks; do
+    sctp-receive-pause dtls-incoming juice-mux-routing sctp-unacked closed-callbacks \
+    sctp-close-drain dtls-close-notify; do
     patches="$patches $(pwd)/tools/libdatachannel-$name.patch"
 done
 # Patches are reapplied to a clean tree whenever one changes, so edited patches take effect.

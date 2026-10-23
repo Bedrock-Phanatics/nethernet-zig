@@ -142,6 +142,48 @@ test "closing a paused receiver neither hangs nor leaks" {
     }
 }
 
+test "a graceful remote close while reads are paused loses nothing" {
+    const io = std.testing.io;
+    const pair = try createPair(io, 47);
+    const client, const server = pair;
+    defer server.destroy();
+    var client_gone = false;
+    defer if (!client_gone) client.destroy();
+
+    const count = 300;
+    var payload: [message_size]u8 = undefined;
+    for (0..count) |sequence| {
+        std.mem.writeInt(u32, payload[0..4], @intCast(sequence), .little);
+        @memset(payload[4..], @truncate(sequence));
+        while (true) {
+            client.send(&payload, .reliable) catch |err| switch (err) {
+                error.Backpressure => {
+                    try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+                    continue;
+                },
+                else => return err,
+            };
+            break;
+        }
+    }
+    const started = std.Io.Clock.awake.now(io);
+    while (server.callbackStats().receive_pauses == 0) {
+        if (started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds() > 10_000) return error.Timeout;
+        try std.Io.sleep(io, .fromMilliseconds(5), .awake);
+    }
+    try client.closeGracefully();
+    client.destroy();
+    client_gone = true;
+    while (server.state() == .connected) {
+        if (started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds() > 10_000) return error.Timeout;
+        try std.Io.sleep(io, .fromMilliseconds(5), .awake);
+    }
+
+    try receiveInOrder(server, count, 0);
+    try std.testing.expectError(error.ConnectionClosed, server.receive());
+    try std.testing.expect(server.callbackStats().spilled_messages > 0);
+}
+
 test "callbacks report arrivals and stop once cleared" {
     const io = std.testing.io;
     const pair = try createPair(io, 0xca11);

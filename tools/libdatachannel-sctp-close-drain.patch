@@ -1,0 +1,61 @@
+--- a/src/impl/sctptransport.hpp
++++ b/src/impl/sctptransport.hpp
+@@ -83,6 +83,8 @@
+ 	bool outgoing(message_ptr message) override;
+ 
+ 	void doRecv();
++	void drainRecv();
++	void recvLoop();
+ 	void doFlush();
+ 	void enqueueRecv();
+ 	void enqueueFlush();
+@@ -106,6 +108,7 @@
+ 	Processor mProcessor;
+ 	std::atomic<int> mPendingRecvCount = 0;
+ 	std::atomic<bool> mRecvPaused = false;
++	std::atomic<bool> mClosing = false;
+ 	std::atomic<int> mPendingFlushCount = 0;
+ 	std::mutex mRecvMutex;
+ 	std::recursive_mutex mSendMutex; // buffered amount callback is synchronous
+--- a/src/impl/sctptransport.cpp
++++ b/src/impl/sctptransport.cpp
+@@ -421,7 +421,9 @@
+ }
+ 
+ void SctpTransport::close() {
+-	setRecvPaused(false);
++	// Reads paused by the receiver still hold data in usrsctp, which a close would drop
++	mClosing = true;
++	drainRecv();
+ 	mSendQueue.stop();
+ 	if (state() == State::Connected) {
+ 		mProcessor.enqueue(&SctpTransport::flush, shared_from_this());
+@@ -477,6 +479,9 @@
+ 
+ 	if (!message) {
+ 		PLOG_INFO << "SCTP disconnected";
++		// The lower layer is gone, but usrsctp still holds what the far end sent before it closed
++		mClosing = true;
++		drainRecv();
+ 		changeState(State::Disconnected);
+ 		recv(nullptr);
+ 		return;
+@@ -497,8 +502,17 @@
+ void SctpTransport::doRecv() {
+ 	std::lock_guard lock(mRecvMutex);
+ 	--mPendingRecvCount;
++	recvLoop();
++}
++
++void SctpTransport::drainRecv() {
++	std::lock_guard lock(mRecvMutex);
++	recvLoop();
++}
++
++void SctpTransport::recvLoop() {
+ 	try {
+-		while (!mRecvPaused && state() != State::Disconnected && state() != State::Failed) {
++		while ((mClosing || !mRecvPaused) && state() != State::Disconnected && state() != State::Failed) {
+ 			const size_t bufferSize = 65536;
+ 			byte buffer[bufferSize];
+ 			socklen_t fromlen = 0;

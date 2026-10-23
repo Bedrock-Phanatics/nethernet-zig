@@ -130,6 +130,7 @@ fn hasUsableLocalCandidate(sdp: []const u8) bool {
 pub const CallbackStats = struct {
     dropped_unreliable_packets: u64,
     receive_pauses: u64,
+    spilled_messages: u64,
     queue_high_water_bytes: usize,
     queue_high_water_entries: usize,
 };
@@ -211,6 +212,8 @@ pub const Options = struct {
     drop_unreliable_on_pressure: bool = true,
     unreliable_reserve_bytes: usize = framing.maximum_segment_payload + 1,
     unreliable_reserve_entries: usize = 1,
+    spill_bytes: usize = 1024 * 1024,
+    spill_entries: usize = 1024,
 };
 
 /// Runs on native threads with the peer locked, so keep it short and never call into the peer from it.
@@ -272,10 +275,12 @@ pub const Peer = struct {
 
     options: Options,
     queue: Queue,
+    spill: ?Queue = null,
     queued_signals: usize = 0,
     dropped_unreliable_packets: u64 = 0,
     receive_paused: bool = false,
     receive_pauses: u64 = 0,
+    spilled_messages: u64 = 0,
     segment_payload: std.atomic.Value(usize) = .init(0),
 
     pub fn create(allocator: std.mem.Allocator, io: std.Io, options: Options) !*Peer {
@@ -453,6 +458,10 @@ pub const Peer = struct {
         const allocator = self.allocator;
         freeLazy(allocator, self.queue.bytes);
         allocator.free(self.queue.entries);
+        if (self.spill) |spill| {
+            freeLazy(allocator, spill.bytes);
+            allocator.free(spill.entries);
+        }
         allocator.destroy(self);
     }
 
@@ -482,7 +491,11 @@ pub const Peer = struct {
     pub fn hasPending(self: *Peer, signals_only: bool) bool {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        return if (signals_only) self.queued_signals != 0 else self.queue.count != 0;
+        return if (signals_only) self.queued_signals != 0 else self.pendingLocked() != 0;
+    }
+
+    fn pendingLocked(self: *const Peer) usize {
+        return self.queue.count + if (self.spill) |spill| spill.count else 0;
     }
 
     pub fn needsNegotiationBuffer(self: *Peer) bool {
@@ -500,6 +513,7 @@ pub const Peer = struct {
         return .{
             .dropped_unreliable_packets = self.dropped_unreliable_packets,
             .receive_pauses = self.receive_pauses,
+            .spilled_messages = self.spilled_messages,
             .queue_high_water_bytes = self.queue.high_water_bytes,
             .queue_high_water_entries = self.queue.high_water_entries,
         };
@@ -813,7 +827,7 @@ pub const Peer = struct {
         if (!self.options.disable_trickle or !self.gathered or self.description_sent) {
             defer self.mutex.unlock(self.io);
             const event = try self.dequeueLocked(output, signals_only);
-            if (event == null and self.queue.count == 0) self.idle_sequence = sequence;
+            if (event == null and self.pendingLocked() == 0) self.idle_sequence = sequence;
             return event;
         }
         self.mutex.unlock(self.io);
@@ -857,7 +871,7 @@ pub const Peer = struct {
         defer zone.end();
 
         const entry = (if (!signals_only)
-            try self.queue.pop(output)
+            try self.popLocked(output)
         else if (self.queued_signals != 0)
             try self.queue.popFirstTagBelow(3, output)
         else
@@ -881,7 +895,13 @@ pub const Peer = struct {
             self.state == .failed;
         if (!closed) return true;
         return !self.stopping and !signals_only and
-            self.drain_queued_on_close and self.queue.count != 0;
+            self.drain_queued_on_close and self.pendingLocked() != 0;
+    }
+
+    fn popLocked(self: *Peer, output: []u8) !?Queue.Popped {
+        if (try self.queue.pop(output)) |entry| return entry;
+        if (self.spill) |*spill| return spill.pop(output);
+        return null;
     }
 
     pub fn send(
@@ -1058,7 +1078,7 @@ pub const Peer = struct {
             ) catch {
                 self.dropped_unreliable_packets +|= 1;
             };
-        } else if (self.queue.push(tag, data)) {
+        } else if (self.pushLocked(tag, data)) {
             if (tag < 3) self.queued_signals += 1;
         } else |_| {
             self.state = .failed;
@@ -1066,6 +1086,32 @@ pub const Peer = struct {
         }
         if (tag >= 3) self.pauseReceiveLocked();
         self.notify();
+    }
+
+    // A close delivers what SCTP held during the pause, more than the ring can take. Nothing else
+    // overflows it, since the pause leaves room for one more message.
+    fn pushLocked(self: *Peer, tag: u8, data: []const u8) !void {
+        if (tag >= 3) if (self.spill) |*spill| if (spill.count != 0) return self.spillLocked(tag, data);
+        self.queue.push(tag, data) catch |err| {
+            if (tag < 3 or err != error.QueueFull) return err;
+            if (self.spill == null) try self.allocateSpill();
+            return self.spillLocked(tag, data);
+        };
+    }
+
+    fn spillLocked(self: *Peer, tag: u8, data: []const u8) !void {
+        try self.spill.?.push(tag, data);
+        self.spilled_messages +|= 1;
+    }
+
+    fn allocateSpill(self: *Peer) !void {
+        const options = self.options;
+        if (options.spill_bytes < maximum_sctp_message or options.spill_entries == 0) return error.QueueFull;
+        const bytes = try allocLazy(self.allocator, options.spill_bytes);
+        errdefer freeLazy(self.allocator, bytes);
+        const entries = try self.allocator.alloc(Queue.Entry, options.spill_entries);
+        errdefer self.allocator.free(entries);
+        self.spill = try Queue.init(bytes, entries);
     }
 
     // Pausing SCTP reads lets the receive window throttle the sender instead of overflowing the queue.
@@ -1626,6 +1672,7 @@ test "local close stops draining queued fragments" {
 test "channel close does not permit draining after queue failure" {
     const peer = try Peer.create(std.testing.allocator, std.testing.io, .{
         .queue_entries = 2,
+        .spill_entries = 0,
     });
     defer peer.destroy();
     const channel = try testAttachedChannel(peer);
@@ -1906,6 +1953,7 @@ test "native callback queue exhaustion fails closed with bounded storage" {
         .{
             .queue_entries = 2,
             .queue_bytes = framing.maximum_segment_payload + 1,
+            .spill_entries = 0,
         },
     );
     defer peer.destroy();
@@ -1957,6 +2005,7 @@ test "unreliable drops preserve capacity for reliable traffic" {
         .queue_entries = 3,
         .unreliable_reserve_bytes = 8,
         .unreliable_reserve_entries = 1,
+        .spill_entries = 0,
     });
     defer peer.destroy();
 
@@ -2171,4 +2220,56 @@ test "bounded ICE mutations and callback sequences preserve terminal states" {
         }
         try std.testing.expectEqual(State.closed, peer.getState());
     }
+}
+
+test "a close hands the ring more than it holds, kept in order and bounded" {
+    const peer = try Peer.create(std.testing.allocator, std.testing.io, .{
+        .queue_bytes = 2 * maximum_sctp_message,
+        .queue_entries = 4,
+        .spill_bytes = 2 * maximum_sctp_message,
+        .spill_entries = 4,
+    });
+    defer peer.destroy();
+
+    var output: [16]u8 = undefined;
+    var next: u8 = 0;
+    for (0..6) |_| {
+        peer.enqueue(3, &.{ 0, next });
+        next += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 4), peer.queue.count);
+    try std.testing.expectEqual(@as(usize, 2), peer.spill.?.count);
+    try std.testing.expect(peer.hasPending(false));
+    try std.testing.expectEqual(@as(u8, 0), (try peer.poll(&output)).?.reliable_fragment[1]);
+    peer.enqueue(3, &.{ 0, next });
+    next += 1;
+    try std.testing.expectEqual(@as(usize, 3), peer.spill.?.count);
+    for (1..7) |expected| try std.testing.expectEqual(@as(u8, @intCast(expected)), (try peer.poll(&output)).?.reliable_fragment[1]);
+    try std.testing.expect((try peer.poll(&output)) == null);
+    try std.testing.expect(!peer.hasPending(false));
+    peer.enqueue(3, &.{ 0, next });
+    try std.testing.expectEqual(@as(usize, 1), peer.queue.count);
+    try std.testing.expectEqual(@as(usize, 0), peer.spill.?.count);
+    try std.testing.expectEqual(@as(u8, 7), (try peer.poll(&output)).?.reliable_fragment[1]);
+    try std.testing.expectEqual(@as(u64, 3), peer.callbackStats().spilled_messages);
+
+    for (0..8) |_| peer.enqueue(3, &.{ 0, 9 });
+    try std.testing.expectEqual(State.new, peer.getState());
+    peer.enqueue(3, &.{ 0, 9 });
+    try std.testing.expectEqual(State.failed, peer.getState());
+    try std.testing.expect(!peer.drain_queued_on_close);
+}
+
+test "signals never spill and a disabled spill fails the peer as before" {
+    const peer = try Peer.create(std.testing.allocator, std.testing.io, .{
+        .queue_bytes = 2 * maximum_sctp_message,
+        .queue_entries = 2,
+        .spill_entries = 0,
+    });
+    defer peer.destroy();
+    peer.enqueue(2, "candidate");
+    peer.enqueue(3, &.{ 0, 1 });
+    peer.enqueue(2, "candidate");
+    try std.testing.expectEqual(State.failed, peer.getState());
+    try std.testing.expect(peer.spill == null);
 }

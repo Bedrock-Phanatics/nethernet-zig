@@ -70,7 +70,10 @@ still holds, while `shutdown` (non-blocking) and `closeGracefully` let it go out
 When a connection's receive queue (`queue_bytes`, `queue_entries`) fills up, it stops reading SCTP
 until half of it is drained, so a slow reader throttles its sender instead of losing the connection.
 `callbackStats().receive_pauses` counts these pauses. If the peer closes the whole connection while
-reading is paused, data still waiting in the SCTP buffer is dropped with it.
+reading is paused, what SCTP had already accepted is handed over on the close into a spill queue
+(`spill_bytes`, `spill_entries`) and read before the connection reports closed;
+`callbackStats().spilled_messages` counts what went through it. Tearing a connection down sends a DTLS
+close_notify, so the peer sees the close at once instead of when ICE consent expires.
 
 ## Networking
 

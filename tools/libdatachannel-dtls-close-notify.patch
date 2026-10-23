@@ -1,0 +1,14 @@
+--- a/src/impl/dtlstransport.cpp
++++ b/src/impl/dtlstransport.cpp
+@@ -469,6 +469,11 @@
+ 
+ void DtlsTransport::stop() {
+ 	PLOG_DEBUG << "Stopping DTLS transport";
++	if (state() == State::Connected) {
++		// Tell the peer, as the OpenSSL backend does, so it needn't wait for ICE consent to expire
++		std::lock_guard lock(mSslMutex);
++		mbedtls_ssl_close_notify(&mSsl);
++	}
+ 	unregisterIncoming();
+ 	mIncomingQueue.stop();
+ 	enqueueRecv();
