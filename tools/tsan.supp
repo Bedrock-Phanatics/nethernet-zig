@@ -19,6 +19,7 @@ race:sctp_toss_old_cookies
 race:sctp_timeout_handler
 race:sctp_add_chk_to_control
 race:sctp_handle_stream_reset
+race:sctp_handle_stream_reset_response
 # Mbed TLS caches the CPU feature probe without synchronization
 race:mbedtls_aesni_has_support
 race:sctp_setopt

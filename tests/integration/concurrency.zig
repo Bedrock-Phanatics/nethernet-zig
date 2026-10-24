@@ -155,8 +155,11 @@ test "multiple native connection pairs exchange traffic concurrently" {
     gate.set(io);
     try group.await(io);
 
-    for (tasks) |task| {
-        if (task.failure) |failure| return failure;
+    for (tasks, 0..) |task, index| {
+        if (task.failure) |failure| {
+            std.debug.print("pair {d} failed with {t} after {d} ms\n", .{ index, failure, task.setup_ms });
+            return failure;
+        }
     }
     var latencies: [tasks.len]i64 = undefined;
     for (tasks, &latencies) |task, *latency| latency.* = task.setup_ms;
