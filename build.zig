@@ -272,14 +272,16 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(executable);
     }
 
-    if (target.result.os.tag == .windows) {
-        b.installDirectory(.{
+    const native_dlls: ?*std.Build.Step = if (target.result.os.tag == .windows) blk: {
+        const install = b.addInstallDirectory(.{
             .source_dir = b.graph.cwdRelativePath(b.pathJoin(&.{ native_prefix, "bin" })),
             .install_dir = .bin,
             .install_subdir = "",
             .include_extensions = &.{".dll"},
         });
-    }
+        b.getInstallStep().dependOn(&install.step);
+        break :blk &install.step;
+    } else null;
 
     const benchmark_module = createModule(
         b,
@@ -326,6 +328,7 @@ pub fn build(b: *std.Build) void {
         "Install the transport stress executable",
     );
     stress_install_step.dependOn(&install_stress.step);
+    if (native_dlls) |dlls| stress_install_step.dependOn(dlls);
 
     const run_stress = b.addRunArtifact(stress);
     addNativeRuntime(b, run_stress, target, native_prefix, sanitizer_runtime);
@@ -339,7 +342,9 @@ pub fn build(b: *std.Build) void {
     const echo_module = createModule(b, "tests/bench/echo.zig", target, optimize);
     echo_module.addImport("nethernet", nethernet);
     const echo = b.addExecutable(.{ .name = "nethernet-echo", .root_module = echo_module });
-    b.step("echo-install", "Install the out-of-process echo server").dependOn(&b.addInstallArtifact(echo, .{}).step);
+    const echo_install_step = b.step("echo-install", "Install the out-of-process echo server");
+    echo_install_step.dependOn(&b.addInstallArtifact(echo, .{}).step);
+    if (native_dlls) |dlls| echo_install_step.dependOn(dlls);
 
     const run_stress_smoke = b.addRunArtifact(stress);
     addNativeRuntime(b, run_stress_smoke, target, native_prefix, sanitizer_runtime);
