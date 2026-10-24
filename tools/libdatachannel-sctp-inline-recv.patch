@@ -1,0 +1,42 @@
+diff --git a/src/impl/sctptransport.cpp b/src/impl/sctptransport.cpp
+index 0a1fb0d..e43b3a6 100644
+--- a/src/impl/sctptransport.cpp
++++ b/src/impl/sctptransport.cpp
+@@ -465,6 +465,8 @@ unsigned int SctpTransport::maxStream() const {
+ 	return streamsCount > 0 ? streamsCount - 1 : 0;
+ }
+ 
++static thread_local SctpTransport *feeding = nullptr;
++
+ void SctpTransport::incoming(message_ptr message) {
+ 	// There could be a race condition here where we receive the remote INIT before the local one is
+ 	// sent, which would result in the connection being aborted. Therefore, we need to wait for data
+@@ -489,7 +491,19 @@ void SctpTransport::incoming(message_ptr message) {
+ 
+ 	PLOG_VERBOSE << "Incoming size=" << message->size();
+ 
++	if (feeding) {
++		usrsctp_conninput(this, message->data(), message->size(), 0);
++		return;
++	}
++
++	// Reading on the thread that fed the input saves a thread pool hop per packet
++	feeding = this;
+ 	usrsctp_conninput(this, message->data(), message->size(), 0);
++	feeding = nullptr;
++	if (!mRecvPaused) {
++		std::lock_guard lock(mRecvMutex);
++		recvLoop();
++	}
+ }
+ 
+ bool SctpTransport::outgoing(message_ptr message) {
+@@ -785,7 +799,7 @@ void SctpTransport::handleUpcall() noexcept {
+ 
+ 		int events = usrsctp_get_events(mSock);
+ 
+-		if (events & SCTP_EVENT_READ)
++		if ((events & SCTP_EVENT_READ) && feeding != this)
+ 			enqueueRecv();
+ 
+ 		if (events & SCTP_EVENT_WRITE)
