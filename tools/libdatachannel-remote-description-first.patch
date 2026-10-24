@@ -1,0 +1,32 @@
+diff --git a/src/peerconnection.cpp b/src/peerconnection.cpp
+index 1d54933..e3ee3a7 100644
+--- a/src/peerconnection.cpp
++++ b/src/peerconnection.cpp
+@@ -254,9 +254,10 @@ void PeerConnection::setRemoteDescription(Description description) {
+ 	if (!iceTransport)
+ 		return; // closed
+ 
+-	iceTransport->setRemoteDescription(description); // ICE transport might reject the description
+-
+-	impl()->processRemoteDescription(std::move(description));
++	// ICE can connect on the peer's checks as soon as it has the credentials, and the DTLS
++	// transport that follows reads the stored remote description, so store it first
++	impl()->processRemoteDescription(description);
++	iceTransport->setRemoteDescription(std::move(description)); // ICE transport might reject the description
+ 	impl()->changeSignalingState(newSignalingState);
+ 	signalingLock.unlock();
+ 
+diff --git a/src/impl/dtlstransport.cpp b/src/impl/dtlstransport.cpp
+index ae3095e..e9671d3 100644
+--- a/src/impl/dtlstransport.cpp
++++ b/src/impl/dtlstransport.cpp
+@@ -625,7 +625,8 @@ int DtlsTransport::CertificateCallback(void *ctx, mbedtls_x509_crt *crt, int /*d
+ 	string fingerprint = make_fingerprint(crt, this_->mFingerprintAlgorithm);
+ 	std::transform(fingerprint.begin(), fingerprint.end(), fingerprint.begin(),
+ 	               [](char c) { return char(std::toupper(c)); });
+-	return this_->mVerifierCallback(fingerprint) ? 0 : 1;
++	// A positive value would come back out of mbedtls_ssl_handshake and pass for success
++	return this_->mVerifierCallback(fingerprint) ? 0 : MBEDTLS_ERR_X509_FATAL_ERROR;
+ }
+ 
+ void DtlsTransport::ExportKeysCallback(void *ctx, mbedtls_ssl_key_export_type /*type*/,
