@@ -83,12 +83,14 @@ close_notify, so the peer sees the close at once instead of when ICE consent exp
 | Negotiated | UDP | WebRTC, fixed with `port_range_begin`/`port_range_end` |
 | 7551 | UDP | LAN discovery |
 
-Every connection gets its own UDP socket by default. `.native = .{ .enable_ice_udp_mux = true }`
-shares one socket. On Linux it cut server CPU by 10-25% with 100 to 1000 clients, while on Windows
-it measured slower than separate sockets, so profile your own setup. A client address is only bound to a session after an
-authenticated ICE check, so reconnects and reused NAT ports reach the right session. The mux is not
-yet verified against vanilla clients, so it stays opt-in. The shared socket asks for an 8 MiB
-buffer, so on Linux raise `net.core.rmem_max` and `net.core.wmem_max` to 8388608 before serving
+Every connection gets its own UDP socket by default. On Linux those sockets are served through
+epoll, so the receive thread's work no longer grows with the connection count: with 100 to 1000
+go-nethernet clients a socket per connection measured the same server CPU as the mux and better tail
+latency. `.native = .{ .enable_ice_udp_mux = true }` shares one socket instead. On Windows the mux
+measured slower than separate sockets, so profile your own setup. A client address is only bound to a
+session after an authenticated ICE check, so reconnects and reused NAT ports reach the right session.
+The mux is not yet verified against vanilla clients, so it stays opt-in. The shared socket asks for an
+8 MiB buffer, so on Linux raise `net.core.rmem_max` and `net.core.wmem_max` to 8388608 before serving
 many players with it, otherwise bursts overflow the default buffer.
 
 ## Examples
