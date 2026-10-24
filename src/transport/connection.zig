@@ -786,7 +786,7 @@ pub const Connection = struct {
 
     pub fn wait(self: *Connection, token: WaitToken, negotiation: bool) !void {
         try self.io.checkCancel();
-        if (self.peer.hasPending(negotiation)) return;
+        if (self.idle_sequence != token and self.peer.hasPending(negotiation)) return;
         if (negotiation and self.ready()) return;
         const zone = trace.zone(@src(), "connection.wait");
         defer zone.end();
