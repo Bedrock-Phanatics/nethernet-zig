@@ -28,8 +28,11 @@ pub const StatusProvider = struct {
 pub const Options = struct {
     connection: conn.Options = .{},
     maximum_negotiations: usize = 8,
-    /// Unlimited when null. Counts by IP, so clients behind one NAT share it.
+    /// Unlimited when null. Counts by IP, or by /64 for IPv6, so clients behind one NAT share it. Loopback is exempt.
     maximum_negotiations_per_address: ?usize = null,
+    /// HTTP connections one address may hold at once, so a few idle sockets can't take every worker.
+    /// Unlimited when null, counted like `maximum_negotiations_per_address`.
+    maximum_connections_per_address: ?usize = null,
     maximum_http_workers: usize = 32,
     maximum_pending_accepts: usize = 64,
     request_timeout_ms: u32 = 15000,
@@ -96,9 +99,11 @@ pub const Listener = struct {
     accepted: std.Io.Queue(*conn.Connection),
     slots: []*conn.Connection,
     negotiators: []std.Io.net.IpAddress,
+    peers: []std.Io.net.IpAddress,
     accept_mutex: std.Io.Mutex = .init,
     reserved_accepts: usize = 0,
     active_negotiations: usize = 0,
+    active_peers: usize = 0,
     closed: bool = false,
     token_mutex: std.Io.Mutex = .init,
     token_second: i64 = 0,
@@ -114,6 +119,7 @@ pub const Listener = struct {
         if (options.maximum_negotiations == 0 or
             options.maximum_negotiations > 1024 or
             options.maximum_negotiations_per_address == @as(?usize, 0) or
+            options.maximum_connections_per_address == @as(?usize, 0) or
             options.maximum_http_workers == 0 or
             options.maximum_http_workers > 4096 or
             options.maximum_pending_accepts == 0 or
@@ -134,6 +140,10 @@ pub const Listener = struct {
         const negotiators = try allocator.alloc(std.Io.net.IpAddress, options.maximum_negotiations);
         errdefer allocator.free(negotiators);
 
+        const worker_count = @max(options.maximum_http_workers, options.maximum_negotiations);
+        const peers = try allocator.alloc(std.Io.net.IpAddress, worker_count);
+        errdefer allocator.free(peers);
+
         var server = try listenExclusive(io, address);
         errdefer server.deinit(io);
 
@@ -152,6 +162,7 @@ pub const Listener = struct {
             .options = actual_options,
             .slots = slots,
             .negotiators = negotiators,
+            .peers = peers,
             .accepted = .init(slots),
         };
 
@@ -164,10 +175,6 @@ pub const Listener = struct {
             } else |_| {}
         }
 
-        const worker_count = @max(
-            actual_options.maximum_http_workers,
-            actual_options.maximum_negotiations,
-        );
         for (0..worker_count) |_| {
             try self.group.concurrent(io, worker, .{self});
         }
@@ -213,26 +220,49 @@ pub const Listener = struct {
     fn reserveNegotiation(self: *Listener, address: std.Io.net.IpAddress) bool {
         self.accept_mutex.lockUncancelable(self.io);
         defer self.accept_mutex.unlock(self.io);
-        if (self.active_negotiations >= self.options.maximum_negotiations)
-            return false;
-        var same: usize = 0;
-        for (self.negotiators[0..self.active_negotiations]) |active| same += @intFromBool(sameHost(active, address));
-        if (same >= self.options.maximum_negotiations_per_address orelse same + 1) return false;
-        self.negotiators[self.active_negotiations] = address;
-        self.active_negotiations += 1;
-        return true;
+        return hold(self.negotiators, &self.active_negotiations, self.options.maximum_negotiations_per_address, address);
     }
 
     fn releaseNegotiation(self: *Listener, address: std.Io.net.IpAddress) void {
         self.accept_mutex.lockUncancelable(self.io);
         defer self.accept_mutex.unlock(self.io);
-        std.debug.assert(self.active_negotiations != 0);
-        const active = self.negotiators[0..self.active_negotiations];
+        drop(self.negotiators, &self.active_negotiations, address);
+    }
+
+    fn reservePeer(self: *Listener, address: std.Io.net.IpAddress) bool {
+        if (self.options.maximum_connections_per_address == null) return true;
+        self.accept_mutex.lockUncancelable(self.io);
+        defer self.accept_mutex.unlock(self.io);
+        return hold(self.peers, &self.active_peers, self.options.maximum_connections_per_address, address);
+    }
+
+    fn releasePeer(self: *Listener, address: std.Io.net.IpAddress) void {
+        if (self.options.maximum_connections_per_address == null) return;
+        self.accept_mutex.lockUncancelable(self.io);
+        defer self.accept_mutex.unlock(self.io);
+        drop(self.peers, &self.active_peers, address);
+    }
+
+    fn hold(table: []std.Io.net.IpAddress, len: *usize, per_address: ?usize, address: std.Io.net.IpAddress) bool {
+        if (len.* == table.len) return false;
+        if (per_address) |limit| if (!isLoopback(address)) {
+            var same: usize = 0;
+            for (table[0..len.*]) |held| same += @intFromBool(sameHost(held, address));
+            if (same >= limit) return false;
+        };
+        table[len.*] = address;
+        len.* += 1;
+        return true;
+    }
+
+    fn drop(table: []std.Io.net.IpAddress, len: *usize, address: std.Io.net.IpAddress) void {
+        std.debug.assert(len.* != 0);
+        const active = table[0..len.*];
         for (active, 0..) |entry, i| if (entry.eql(&address)) {
             active[i] = active[active.len - 1];
             break;
         };
-        self.active_negotiations -= 1;
+        len.* -= 1;
     }
 
     pub fn close(self: *Listener) void {
@@ -253,6 +283,7 @@ pub const Listener = struct {
         if (self.token) |token| self.allocator.free(token);
         self.allocator.free(self.slots);
         self.allocator.free(self.negotiators);
+        self.allocator.free(self.peers);
         self.allocator.destroy(self);
     }
 
@@ -348,6 +379,12 @@ pub const Listener = struct {
                 },
             };
             defer stream.close(self.io);
+            const address = stream.socket.address;
+            if (!self.reservePeer(address)) {
+                self.trace("connection refused (per-address limit)", .{});
+                continue;
+            }
+            defer self.releasePeer(address);
 
             self.handleTimed(stream) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
@@ -731,10 +768,24 @@ test "identity verification failures produce HTTP 403" {
     try std.testing.expectEqual(std.http.Status.internal_server_error, Listener.errorStatus(error.OutOfMemory));
 }
 
+const mapped_prefix = [_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff };
+
+// IPv6 hosts usually get a whole /64, so it counts as one, except IPv4-mapped addresses
 fn sameHost(a: std.Io.net.IpAddress, b: std.Io.net.IpAddress) bool {
     return switch (a) {
         .ip4 => |v4| b == .ip4 and std.mem.eql(u8, &v4.bytes, &b.ip4.bytes),
-        .ip6 => |v6| b == .ip6 and std.mem.eql(u8, &v6.bytes, &b.ip6.bytes),
+        .ip6 => |v6| b == .ip6 and if (std.mem.startsWith(u8, &v6.bytes, &mapped_prefix))
+            std.mem.eql(u8, &v6.bytes, &b.ip6.bytes)
+        else
+            std.mem.eql(u8, v6.bytes[0..8], b.ip6.bytes[0..8]),
+    };
+}
+
+fn isLoopback(address: std.Io.net.IpAddress) bool {
+    return switch (address) {
+        .ip4 => |v4| v4.bytes[0] == 127,
+        .ip6 => |v6| (std.mem.allEqual(u8, v6.bytes[0..15], 0) and v6.bytes[15] == 1) or
+            (std.mem.startsWith(u8, &v6.bytes, &mapped_prefix) and v6.bytes[12] == 127),
     };
 }
 
@@ -952,4 +1003,27 @@ test "one address cannot hold every negotiation slot" {
     listener.releaseNegotiation(first);
     try std.testing.expect(listener.reserveNegotiation(third));
     try std.testing.expectEqual(@as(usize, 3), listener.active_negotiations);
+}
+
+test "per-address limits group IPv6 by /64 and leave loopback alone" {
+    const a = try std.Io.net.IpAddress.parseLiteral("[2001:db8:1:2::1]:1");
+    const b = try std.Io.net.IpAddress.parseLiteral("[2001:db8:1:2:ffff::9]:2");
+    const c = try std.Io.net.IpAddress.parseLiteral("[2001:db8:1:3::1]:1");
+    const mapped_a = try std.Io.net.IpAddress.parseLiteral("[::ffff:10.0.0.1]:1");
+    const mapped_b = try std.Io.net.IpAddress.parseLiteral("[::ffff:10.0.0.2]:1");
+    try std.testing.expect(sameHost(a, b));
+    try std.testing.expect(!sameHost(a, c));
+    try std.testing.expect(!sameHost(mapped_a, mapped_b));
+
+    var table: [4]std.Io.net.IpAddress = undefined;
+    var len: usize = 0;
+    try std.testing.expect(Listener.hold(&table, &len, 1, a));
+    try std.testing.expect(!Listener.hold(&table, &len, 1, b));
+    try std.testing.expect(Listener.hold(&table, &len, 1, c));
+    const loopback: std.Io.net.IpAddress = .{ .ip4 = .loopback(1) };
+    try std.testing.expect(Listener.hold(&table, &len, 1, loopback));
+    try std.testing.expect(Listener.hold(&table, &len, 1, loopback));
+    try std.testing.expect(!Listener.hold(&table, &len, null, mapped_a));
+    Listener.drop(&table, &len, a);
+    try std.testing.expect(Listener.hold(&table, &len, 1, b));
 }
