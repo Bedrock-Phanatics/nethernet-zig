@@ -205,6 +205,7 @@ pub fn verify(
     }
 
     const assertion_text = encoded orelse return null;
+    if (assertion_text.len > jwt.maximum_identity_size) return error.IdentityTooLarge;
 
     const json = try jwt.decode64(allocator, assertion_text);
     defer allocator.free(json);
@@ -500,4 +501,11 @@ test "a verified identity is stripped before the description is used" {
     const cleaned = removeIdentity(signed);
     try std.testing.expect(std.mem.indexOf(u8, cleaned, "a=identity:") == null);
     try std.testing.expectEqualStrings(source, cleaned);
+}
+
+test "oversized identity assertions are refused before they are parsed" {
+    const prefix = "v=0\r\na=identity:";
+    var offer: [prefix.len + jwt.maximum_identity_size + 1]u8 = @splat('a');
+    @memcpy(offer[0..prefix.len], prefix);
+    try std.testing.expectError(error.IdentityTooLarge, verify(std.testing.allocator, &offer, 0, .client, null));
 }

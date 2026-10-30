@@ -9,6 +9,8 @@ const public_key_prefix = [_]u8{
 };
 
 pub const maximum_size = 1024 * 1024;
+/// Real assertions are a few KiB, and JSON parsing costs many times its input, so larger ones are refused unread.
+pub const maximum_identity_size = 32 * 1024;
 pub const maximum_json_nesting = 64;
 pub const clock_skew_seconds: i64 = 60;
 

@@ -3,7 +3,7 @@ const std = @import("std");
 const Signal = @import("../protocol/signal.zig").Signal;
 const connection = @import("../transport/connection.zig");
 
-pub const maximum_sdp_size = 1024 * 1024;
+pub const maximum_sdp_size = 64 * 1024;
 
 const maximum_numeric_network_id = 20;
 
