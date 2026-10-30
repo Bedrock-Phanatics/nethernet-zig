@@ -65,7 +65,8 @@ a native thread with the connection locked, so it should only hand the work off;
 still holds, while `shutdown` (non-blocking) and `closeGracefully` let it go out first.
 `EndpointListener` can cap concurrent negotiations and open HTTP connections per client IP with
 `maximum_negotiations_per_address` and `maximum_connections_per_address`. IPv6 clients count per /64
-and loopback is exempt. `Authority.verifier()` downloads Minecraft's keys when it meets an unknown one,
+and loopback is exempt. `request_read_timeout_ms` bounds how long a request may take to arrive. `LanListener` accepts at most
+`maximum_offers_per_second` new offers, and a `Discovery` that only answers can set `keep_responses = false`. `Authority.verifier()` downloads Minecraft's keys when it meets an unknown one,
 while `cachedVerifier()` never waits and refreshes in the background, for threads that serve other
 connections. Set `allow_anonymous = true` to accept clients without an identity, for testing.
 

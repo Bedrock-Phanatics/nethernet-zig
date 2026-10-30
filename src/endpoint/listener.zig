@@ -36,6 +36,8 @@ pub const Options = struct {
     maximum_http_workers: usize = 32,
     maximum_pending_accepts: usize = 64,
     request_timeout_ms: u32 = 15000,
+    /// How long a client gets to deliver its request, out of `request_timeout_ms`. The rest is for negotiation.
+    request_read_timeout_ms: u32 = 5000,
     status_provider: ?StatusProvider = null,
     trace: bool = false,
     /// Signaled whenever a connection becomes ready to accept and when accepting stops.
@@ -123,7 +125,8 @@ pub const Listener = struct {
             options.maximum_http_workers == 0 or
             options.maximum_http_workers > 4096 or
             options.maximum_pending_accepts == 0 or
-            options.request_timeout_ms == 0)
+            options.request_timeout_ms == 0 or
+            options.request_read_timeout_ms == 0)
         {
             return error.InvalidConfiguration;
         }
@@ -336,9 +339,8 @@ pub const Listener = struct {
     }
 
     const ResponseState = enum(u8) { pending, committed, timed_out };
-    const read_timeout_ms = 5000;
 
-    fn requestTimer(io: std.Io, request_read: *const std.atomic.Value(bool), total_ms: u32) std.Io.Cancelable!void {
+    fn requestTimer(io: std.Io, request_read: *const std.atomic.Value(bool), read_timeout_ms: u32, total_ms: u32) std.Io.Cancelable!void {
         const read_ms = @min(read_timeout_ms, total_ms);
         try std.Io.sleep(io, .fromMilliseconds(read_ms), .awake);
         if (request_read.load(.acquire)) try std.Io.sleep(io, .fromMilliseconds(total_ms - read_ms), .awake);
@@ -409,7 +411,7 @@ pub const Listener = struct {
         defer select.cancelDiscard();
 
         // Slow senders only get a short window to deliver the request, the rest is for negotiation.
-        try select.concurrent(.timeout, requestTimer, .{ self.io, &request_read, self.options.request_timeout_ms });
+        try select.concurrent(.timeout, requestTimer, .{ self.io, &request_read, self.options.request_read_timeout_ms, self.options.request_timeout_ms });
         try select.concurrent(.done, handle, .{ self, stream, &response_state, &request_read });
 
         switch (try select.await()) {
