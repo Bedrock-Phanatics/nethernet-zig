@@ -107,18 +107,48 @@ pub const Authority = struct {
     fetching: bool = false,
     keys: ?Keys = null,
     refreshed: ?std.Io.Timestamp = null,
+    background: std.Io.Group = .init,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io) Authority {
         return .{ .allocator = allocator, .io = io };
     }
 
     pub fn deinit(self: *Authority) void {
+        self.background.cancel(self.io);
         if (self.keys) |keys| keys.deinit();
         self.keys = null;
     }
 
     pub fn verifier(self: *Authority) sdp.Verifier {
         return .{ .context = self, .verify = verifyToken };
+    }
+
+    /// Never waits on a download, for threads that serve other connections too. An unknown key fails and
+    /// starts a refresh in the background instead.
+    pub fn cachedVerifier(self: *Authority) sdp.Verifier {
+        return .{ .context = self, .verify = verifyCached };
+    }
+
+    /// Fetches the keys on another task, at most once per refresh interval.
+    pub fn refreshInBackground(self: *Authority) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        self.startRefreshLocked();
+    }
+
+    fn startRefreshLocked(self: *Authority) void {
+        if (self.fetching or !self.due()) return;
+        self.refreshed = std.Io.Clock.awake.now(self.io);
+        self.background.concurrent(self.io, backgroundRefresh, .{self}) catch {};
+    }
+
+    fn backgroundRefresh(self: *Authority) std.Io.Cancelable!void {
+        self.refresh() catch |err| if (err == error.Canceled) return error.Canceled;
+    }
+
+    fn due(self: *const Authority) bool {
+        const last = self.refreshed orelse return true;
+        return last.durationTo(std.Io.Clock.awake.now(self.io)).toSeconds() >= refresh_interval_seconds;
     }
 
     pub fn refresh(self: *Authority) !void {
@@ -156,13 +186,24 @@ pub const Authority = struct {
                 if (err != error.UnknownSigningKey) return err;
             }
         }
-        if (self.refreshed) |last| {
-            if (last.durationTo(std.Io.Clock.awake.now(self.io)).toSeconds() < refresh_interval_seconds)
-                return error.UnknownSigningKey;
-        }
+        if (!self.due()) return error.UnknownSigningKey;
         try self.refreshLocked();
         const keys = &(self.keys orelse return error.UnknownSigningKey);
         return try keys.verify(self.allocator, token, now);
+    }
+
+    fn verifyCached(context: ?*anyopaque, token: []const u8) anyerror!?sdp.Key {
+        const self: *Authority = @ptrCast(@alignCast(context.?));
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+
+        if (self.keys) |*keys| {
+            if (keys.verify(self.allocator, token, std.Io.Clock.real.now(self.io).toSeconds())) |key| return key else |err| {
+                if (err != error.UnknownSigningKey) return err;
+            }
+        }
+        self.startRefreshLocked();
+        return error.UnknownSigningKey;
     }
 };
 
@@ -226,4 +267,15 @@ test "authority refreshes unknown signing keys at most once per interval" {
     authority.refreshed = std.Io.Clock.awake.now(std.testing.io);
     const token = "eyJhbGciOiJSUzI1NiIsImtpZCI6ImIifQ.e30.AA";
     try std.testing.expectError(error.UnknownSigningKey, authority.verifier().verify(&authority, token));
+}
+
+test "the cached verifier never fetches inline and refreshes once per interval" {
+    var authority = Authority.init(std.testing.allocator, std.testing.io);
+    defer authority.deinit();
+    authority.keys = try Keys.init(std.testing.allocator, "{\"keys\":[{\"kid\":\"a\",\"kty\":\"RSA\",\"n\":\"\",\"e\":\"\"}]}", minecraft_issuer, minecraft_audience);
+    const before = std.Io.Clock.awake.now(std.testing.io);
+    authority.refreshed = before;
+    const token = "eyJhbGciOiJSUzI1NiIsImtpZCI6ImIifQ.e30.AA";
+    try std.testing.expectError(error.UnknownSigningKey, authority.cachedVerifier().verify(&authority, token));
+    try std.testing.expectEqual(before.nanoseconds, authority.refreshed.?.nanoseconds);
 }

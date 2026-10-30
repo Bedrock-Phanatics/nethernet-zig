@@ -63,9 +63,11 @@ one thread, while `send`, `close` and `closeGracefully` are safe from any thread
 a native thread with the connection locked, so it should only hand the work off; once
 `setCallback(null)` returns, none is running. `close` and `destroy` abort SCTP and drop anything it
 still holds, while `shutdown` (non-blocking) and `closeGracefully` let it go out first.
-`EndpointListener` can cap concurrent negotiations per client IP with
-`maximum_negotiations_per_address`. Set
-`allow_anonymous = true` to accept clients without an identity, for testing.
+`EndpointListener` can cap concurrent negotiations and open HTTP connections per client IP with
+`maximum_negotiations_per_address` and `maximum_connections_per_address`. IPv6 clients count per /64
+and loopback is exempt. `Authority.verifier()` downloads Minecraft's keys when it meets an unknown one,
+while `cachedVerifier()` never waits and refreshes in the background, for threads that serve other
+connections. Set `allow_anonymous = true` to accept clients without an identity, for testing.
 
 When a connection's receive queue (`queue_bytes`, `queue_entries`) fills up, it stops reading SCTP
 until half of it is drained, so a slow reader throttles its sender instead of losing the connection.
