@@ -663,85 +663,88 @@ pub const Connection = struct {
             self.negotiation_scratch = null;
             break :blk self.packet_scratch;
         } else self.packet_scratch;
-        const event = try self.peer.pollRestricted(scratch, signals_only) orelse {
-            for (&self.assemblies) |*assembly| {
-                if (assembly.decoder.used == 0 and
-                    assembly.buffer.capacity > framing.maximum_segment_payload)
-                    assembly.clear(self.allocator);
-            }
-            if (self.established and self.negotiation_scratch == null and
-                self.assemblies[0].started == null and self.assemblies[1].started == null)
-                self.idle_sequence = self.peer.idle_sequence;
-            return null;
-        };
+        // A fragment that doesn't finish its message is no reason to stop, the rest may already be queued
+        while (true) {
+            const event = try self.peer.pollRestricted(scratch, signals_only) orelse {
+                for (&self.assemblies) |*assembly| {
+                    if (assembly.decoder.used == 0 and
+                        assembly.buffer.capacity > framing.maximum_segment_payload)
+                        assembly.clear(self.allocator);
+                }
+                if (self.established and self.negotiation_scratch == null and
+                    self.assemblies[0].started == null and self.assemblies[1].started == null)
+                    self.idle_sequence = self.peer.idle_sequence;
+                return null;
+            };
 
-        switch (event) {
-            .offer, .answer, .candidate => |data| {
-                var body = data;
+            switch (event) {
+                .offer, .answer, .candidate => |data| {
+                    var body = data;
 
-                if (self.options.trace and event != .candidate)
-                    native.traceSdp("local before identity", data);
+                    if (self.options.trace and event != .candidate)
+                        native.traceSdp("local before identity", data);
 
-                if (event != .candidate) {
-                    if (self.options.identity) |identity| {
-                        self.signal_buffer = auth.add(self.allocator, data, identity) catch |err| {
-                            if (self.options.trace) std.debug.print("nethernet local identity: signing failed ({s})\n", .{@errorName(err)});
-                            return err;
-                        };
-                        body = self.signal_buffer.?;
-                        if (self.options.trace) std.debug.print("nethernet local identity: signed\n", .{});
+                    if (event != .candidate) {
+                        if (self.options.identity) |identity| {
+                            self.signal_buffer = auth.add(self.allocator, data, identity) catch |err| {
+                                if (self.options.trace) std.debug.print("nethernet local identity: signing failed ({s})\n", .{@errorName(err)});
+                                return err;
+                            };
+                            body = self.signal_buffer.?;
+                            if (self.options.trace) std.debug.print("nethernet local identity: signed\n", .{});
+                        }
                     }
-                }
 
-                if (self.options.trace and event != .candidate)
-                    native.traceSdp("local signaled", body);
+                    if (self.options.trace and event != .candidate)
+                        native.traceSdp("local signaled", body);
 
-                const kind = if (event == .offer)
-                    Signal.offer
-                else if (event == .answer)
-                    Signal.answer
-                else
-                    Signal.candidate;
+                    const kind = if (event == .offer)
+                        Signal.offer
+                    else if (event == .answer)
+                        Signal.answer
+                    else
+                        Signal.candidate;
 
-                return .{
-                    .signal = .{
-                        .kind = kind,
-                        .connection_id = self.id,
-                        .network_id = self.remote_id,
-                        .data = body,
-                    },
-                };
-            },
+                    return .{
+                        .signal = .{
+                            .kind = kind,
+                            .connection_id = self.id,
+                            .network_id = self.remote_id,
+                            .data = body,
+                        },
+                    };
+                },
 
-            .reliable_fragment, .unreliable_fragment => |fragment| {
-                const reliable = event == .reliable_fragment;
-                const index: usize = if (reliable) 0 else 1;
+                .reliable_fragment, .unreliable_fragment => |fragment| {
+                    const reliable = event == .reliable_fragment;
+                    const index: usize = if (reliable) 0 else 1;
 
-                const reassembly_zone = trace.zone(@src(), "connection.reassemble");
-                defer reassembly_zone.end();
-                const message = try self.assemblies[index].push(
-                    self.allocator,
-                    self.io,
-                    fragment,
-                    self.options.maximum_message_size,
-                ) orelse return null;
+                    const reassembly_zone = trace.zone(@src(), "connection.reassemble");
+                    defer reassembly_zone.end();
+                    const message = try self.assemblies[index].push(
+                        self.allocator,
+                        self.io,
+                        fragment,
+                        self.options.maximum_message_size,
+                    ) orelse continue;
 
-                self.received_messages +|= 1;
-                self.received_bytes +|= message.len;
-                if (self.options.trace and !self.first_payload_traced) {
-                    self.first_payload_traced = true;
-                    std.debug.print("nethernet WebRTC: first Bedrock payload channel={s}, bytes={d}\n", .{
-                        if (reliable) "reliable" else "unreliable", message.len,
-                    });
-                }
+                    self.received_messages +|= 1;
+                    self.received_bytes +|= message.len;
+                    if (self.options.trace and !self.first_payload_traced) {
+                        self.first_payload_traced = true;
+                        std.debug.print("nethernet WebRTC: first Bedrock payload channel={s}, bytes={d}\n", .{
+                            if (reliable) "reliable" else "unreliable", message.len,
+                        });
+                    }
 
-                return .{
-                    .message = .{
-                        .reliability = if (reliable) .reliable else .unreliable,
-                        .data = message,
-                    },
-                };
-            },
+                    return .{
+                        .message = .{
+                            .reliability = if (reliable) .reliable else .unreliable,
+                            .data = message,
+                        },
+                    };
+                },
+            }
         }
     }
 
@@ -1035,6 +1038,17 @@ test "receive drains partial messages without waiting" {
     try std.testing.expectEqualStrings("ab", message.data);
 }
 
+test "one poll assembles every fragment already queued" {
+    const connection = try Connection.create(std.testing.allocator, std.testing.io, .client, 1, "remote", .{});
+    defer connection.destroy();
+    connection.established = true;
+    try connection.peer.queue.push(3, &.{ 2, 'a' });
+    try connection.peer.queue.push(3, &.{ 1, 'b' });
+    try connection.peer.queue.push(3, &.{ 0, 'c' });
+    const event = (try connection.poll()).?;
+    try std.testing.expectEqualStrings("abc", event.message.data);
+}
+
 test "buffers follow message limit and negotiation scratch is released" {
     const connection = try Connection.create(
         std.testing.allocator,
@@ -1102,6 +1116,7 @@ test "invalid reassembly releases partial storage before destroy" {
     try std.testing.expect((try connection.poll()) == null);
     try std.testing.expectEqual(@as(usize, 1024), connection.assemblies[0].buffer.capacity);
     try connection.peer.queue.push(3, &.{ 253, 43 });
+    connection.peer.wakeup.signal(std.testing.io);
     try std.testing.expectError(error.FragmentOutOfSequence, connection.poll());
     try std.testing.expectEqual(@as(usize, 0), connection.assemblies[0].buffer.capacity);
     try std.testing.expectEqual(@as(usize, 0), connection.assemblies[0].decoder.storage.len);
