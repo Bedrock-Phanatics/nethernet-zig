@@ -260,9 +260,8 @@ pub const Discovery = struct {
 
         switch (decoded.packet) {
             .request => {
-                if (self.advertisement) |data| {
-                    try self.write(.{ .response = data }, message.from);
-                }
+                // Requests can come from spoofed sources, so a reply that fails to send is dropped
+                if (self.advertisement) |data| self.write(.{ .response = data }, message.from) catch {};
             },
 
             .response => |data| {

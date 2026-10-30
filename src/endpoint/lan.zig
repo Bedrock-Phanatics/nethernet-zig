@@ -151,18 +151,15 @@ pub const Listener = struct {
 
             if (event) |value| {
                 switch (value) {
-                    .signal => |signal| {
-                        self.discovery.send(signal) catch |err| {
-                            connection.destroy();
-                            slot.* = null;
-                            return err;
-                        };
+                    // One peer failing must not hold up the others
+                    .signal => |signal| self.discovery.send(signal) catch {
+                        connection.destroy();
+                        slot.* = null;
                     },
 
                     .message => {
                         connection.destroy();
                         slot.* = null;
-                        return error.UnexpectedMessage;
                     },
                 }
             }
