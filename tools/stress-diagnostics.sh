@@ -22,10 +22,12 @@ case "$mode" in
       -Dnative-sanitizer="$sanitizer" -- "$@"
     ;;
   zig-tsan)
+    [ -f .deps/native/include/rtc/rtc.h ] || sh tools/setup-native.sh
     TSAN_OPTIONS="suppressions=$(pwd)/tools/zig-tsan.supp ${TSAN_OPTIONS:-}" \
       $norandom zig build "$step" -Doptimize=ReleaseSafe -Dsanitize-thread=true -- "$@"
     ;;
   valgrind)
+    [ -f .deps/native/include/rtc/rtc.h ] || sh tools/setup-native.sh
     zig build stress-install -Doptimize=ReleaseSafe
     LD_LIBRARY_PATH="$(pwd)/.deps/native/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
       valgrind --error-exitcode=1 --leak-check=full \
