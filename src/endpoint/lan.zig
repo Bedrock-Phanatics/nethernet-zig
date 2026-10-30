@@ -10,6 +10,9 @@ pub const Options = struct {
     connection: conn.Options = .{},
     maximum_negotiations: usize = 64,
     maximum_negotiations_per_peer: usize = 4,
+    /// New offers accepted per second across all peers, 0 is unlimited. Sender IDs are chosen by the sender, so
+    /// this is what bounds the native peers and signature checks a LAN flood costs the polling thread.
+    maximum_offers_per_second: u32 = 16,
     /// Signaled on discovery traffic and negotiation progress instead of the listener's own wakeup.
     wakeup: ?*wake.Wakeup = null,
 };
@@ -22,6 +25,8 @@ pub const Listener = struct {
     closed: bool = false,
     wakeup: wake.Wakeup = .{},
     rejected_negotiations: u64 = 0,
+    offer_tokens: u32 = 0,
+    offers_refilled: ?std.Io.Timestamp = null,
 
     pub fn listen(
         allocator: std.mem.Allocator,
@@ -211,6 +216,11 @@ pub const Listener = struct {
             return;
         };
 
+        if (!self.takeOffer()) {
+            self.rejected_negotiations +|= 1;
+            return;
+        }
+
         var connection_options = self.options.connection;
 
         var local_buf: [20]u8 = undefined;
@@ -238,6 +248,21 @@ pub const Listener = struct {
 
         connection.peer.subscribe(self.notifier());
         slot.* = connection;
+    }
+
+    fn takeOffer(self: *Listener) bool {
+        const rate = self.options.maximum_offers_per_second;
+        if (rate == 0) return true;
+        if (self.offer_tokens == 0) {
+            const now = std.Io.Clock.awake.now(self.discovery.io);
+            const elapsed: u64 = if (self.offers_refilled) |last| @intCast(@max(last.durationTo(now).toMilliseconds(), 0)) else 1000;
+            const refill = @min(@as(u64, rate), elapsed * rate / 1000);
+            if (refill == 0) return false;
+            self.offer_tokens = @intCast(refill);
+            self.offers_refilled = now;
+        }
+        self.offer_tokens -= 1;
+        return true;
     }
 
     fn report(
@@ -338,4 +363,19 @@ pub fn dial(
     }
 
     return connection;
+}
+
+test "LAN offers are rate limited across every sender" {
+    var discovery: Discovery = undefined;
+    discovery.io = std.testing.io;
+    var listener: Listener = undefined;
+    listener.discovery = &discovery;
+    listener.options = .{ .maximum_offers_per_second = 2 };
+    listener.offer_tokens = 0;
+    listener.offers_refilled = null;
+    try std.testing.expect(listener.takeOffer());
+    try std.testing.expect(listener.takeOffer());
+    try std.testing.expect(!listener.takeOffer());
+    listener.options.maximum_offers_per_second = 0;
+    try std.testing.expect(listener.takeOffer());
 }
