@@ -11,6 +11,8 @@ pub const Options = struct {
     network_id: u64 = 0,
     maximum_servers: u32 = 1024,
     broadcast_endpoint: ?std.Io.net.IpAddress = null,
+    /// A server that only answers never reads other servers' responses, so it can skip storing them.
+    keep_responses: bool = true,
 };
 
 pub const Known = struct {
@@ -264,7 +266,7 @@ pub const Discovery = struct {
                 if (self.advertisement) |data| self.write(.{ .response = data }, message.from) catch {};
             },
 
-            .response => |data| {
+            .response => |data| if (self.options.keep_responses) {
                 try replaceResponse(self.allocator, entry.value_ptr, data);
             },
 
