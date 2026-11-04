@@ -50,9 +50,10 @@ pub fn exchange(
 
     return switch (try select.await()) {
         .answer => |result| result,
+        // Like vanilla, a missing answer isn't signaled back, the dial just fails.
         .timeout => |result| {
             try result;
-            return error.Timeout;
+            return error.NoAnswer;
         },
     };
 }
@@ -132,8 +133,14 @@ fn exchangeWork(
         else => |e| return e,
     };
 
-    const status = @backingInt(response.head.status);
-    if (status < 200 or status >= 300) return error.HttpFailure;
+    switch (@backingInt(response.head.status)) {
+        200...299 => {},
+        401 => return error.Unauthorized,
+        403 => return error.Forbidden,
+        503 => return error.ServiceUnavailable,
+        else => return error.HttpFailure,
+    }
+
 
     const body = writer.buffered();
     if (body.len == 0) return error.MissingAnswer;
@@ -312,7 +319,44 @@ test "IPv6 endpoint exchange preserves the Host header" {
     try pending.await(io);
 }
 
+test "rejected joins report the HTTP status class" {
+    const io = std.testing.io;
+    var server = try (try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0)).listen(io, .{});
+    defer server.deinit(io);
+    var origin_buffer: [64]u8 = undefined;
+    const origin = try std.fmt.bufPrint(&origin_buffer, "http://127.0.0.1:{d}", .{server.socket.address.getPort()});
+
+    const Serve = struct {
+        fn run(server_ptr: *std.Io.net.Server, status: std.http.Status) !void {
+            const stream = try server_ptr.accept(std.testing.io);
+            defer stream.close(std.testing.io);
+            var input: [4096]u8 = undefined;
+            var output: [4096]u8 = undefined;
+            var reader = stream.reader(std.testing.io, &input);
+            var writer = stream.writer(std.testing.io, &output);
+            var http = std.http.Server.init(&reader.interface, &writer.interface);
+            var request = try http.receiveHead();
+            var body_buffer: [64]u8 = undefined;
+            _ = try request.readerExpectNone(&body_buffer).discardRemaining();
+            try request.respond("", .{ .status = status, .keep_alive = false });
+        }
+    };
+    const cases = [_]struct { std.http.Status, anyerror }{
+        .{ .forbidden, error.Forbidden },
+        .{ .service_unavailable, error.ServiceUnavailable },
+        .{ .bad_request, error.HttpFailure },
+    };
+    for (cases) |case| {
+        var pending = try io.concurrent(Serve.run, .{ &server, case[0] });
+        defer _ = pending.cancel(io) catch {};
+        var output: [64]u8 = undefined;
+        try std.testing.expectError(case[1], exchange(std.testing.allocator, io, origin, "1", "v=0\r\n", &output, 3000));
+        try pending.await(io);
+    }
+}
+
 test "opaque and numeric network IDs share one representation" {
+
     var numeric: [maximum_numeric_network_id]u8 = undefined;
 
     try std.testing.expectEqualStrings(
