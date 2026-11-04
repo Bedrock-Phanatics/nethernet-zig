@@ -390,9 +390,16 @@ pub const Peer = struct {
             _ = c.rtcSetLocalCandidateCallback(id, null);
             _ = c.rtcSetDataChannelCallback(id, null);
         }
-        // Channels go first so the async peer close cannot race their deletion.
+        // Channels go first so the async peer close cannot race their deletion. A channel the native side
+        // already closed skips the callback reset on delete, so clear them here to wait out a running one.
         for (channels) |channel| {
-            if (channel >= 0) _ = c.rtcDeleteDataChannel(channel);
+            if (channel < 0) continue;
+            _ = c.rtcSetOpenCallback(channel, null);
+            _ = c.rtcSetMessageCallback(channel, null);
+            _ = c.rtcSetClosedCallback(channel, null);
+            _ = c.rtcSetErrorCallback(channel, null);
+            _ = c.rtcSetBufferedAmountLowCallback(channel, null);
+            _ = c.rtcDeleteDataChannel(channel);
         }
         if (id >= 0) _ = c.rtcDeletePeerConnection(id);
         delete_zone.end();
