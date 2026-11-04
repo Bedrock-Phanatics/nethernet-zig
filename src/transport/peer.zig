@@ -733,7 +733,7 @@ pub const Peer = struct {
         self.description_kind = .offer;
 
         self.mutex.lockUncancelable(self.io);
-        self.state = .connecting;
+        if (!self.stopping and self.state == .new) self.state = .connecting;
         self.notify();
         self.mutex.unlock(self.io);
 
@@ -783,7 +783,7 @@ pub const Peer = struct {
             self.description_kind = .answer;
 
             self.mutex.lockUncancelable(self.io);
-            self.state = .connecting;
+            if (!self.stopping and self.state == .new) self.state = .connecting;
             self.notify();
             self.mutex.unlock(self.io);
 
@@ -1078,9 +1078,7 @@ pub const Peer = struct {
 
         if (self.stopping or self.state == .failed or self.state == .closed) return;
 
-        if (tag == 4 and self.options.drop_unreliable_on_pressure and
-            data.len >= 2 and data[0] == 0)
-        {
+        if (tag == 4 and self.options.drop_unreliable_on_pressure and data.len >= 2) {
             self.queue.pushWithReserve(
                 tag,
                 data,
@@ -1091,7 +1089,9 @@ pub const Peer = struct {
             };
         } else if (self.pushLocked(tag, data)) {
             if (tag < 3) self.queued_signals += 1;
-        } else |_| {
+        } else |_| if (tag == 2 and self.channels_open) {
+            // A candidate gathered after the channels opened is of no use, so a full ring just drops it.
+        } else {
             self.state = .failed;
             self.drain_queued_on_close = false;
         }
