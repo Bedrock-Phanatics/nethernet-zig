@@ -69,7 +69,9 @@ test "identity verifies an independently signed multi-fingerprint assertion" {
         try std.fmt.hexToBytes(&expected, fixture.value.public_key),
         &key.toUncompressedSec1(),
     );
-    try std.testing.expectError(error.ExpiredIdentity, auth.verify(allocator, fixture.value.sdp, 2061, .server, null));
+    // Server identities skip the time checks, like vanilla.
+    _ = try auth.verify(allocator, fixture.value.sdp, 2061, .server, null);
+
 }
 
 test "discovery packets match encrypted wire fixtures" {
