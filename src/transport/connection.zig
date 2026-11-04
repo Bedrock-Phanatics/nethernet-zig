@@ -131,7 +131,8 @@ pub const Options = struct {
     local_network_id: []const u8 = "",
     native: native.Options = .{},
     maximum_message_size: usize = framing.default_maximum_message_size,
-    negotiation_timeout_ms: u32 = 15000,
+    /// How long a dial waits for the answer after sending its offer, vanilla gives up after 10 seconds.
+    negotiation_timeout_ms: u32 = 10000,
     connection_timeout_ms: u32 = 10000,
     reassembly_timeout_ms: u32 = 30000,
     graceful_shutdown_timeout_ms: u32 = 2000,
@@ -637,7 +638,7 @@ pub const Connection = struct {
                 self.options.negotiation_timeout_ms;
 
             if (started.durationTo(now).toMilliseconds() >= timeout_ms) {
-                return error.Timeout;
+                return if (self.answered == null) error.NoAnswer else error.Timeout;
             }
         }
 
@@ -665,7 +666,12 @@ pub const Connection = struct {
         } else self.packet_scratch;
         // A fragment that doesn't finish its message is no reason to stop, the rest may already be queued
         while (true) {
-            const event = try self.peer.pollRestricted(scratch, signals_only) orelse {
+            const polled = self.peer.pollRestricted(scratch, signals_only) catch |err| {
+                if (err == error.ConnectionClosed and !self.established and self.peer.iceUnreachable())
+                    return error.IceConnectFailed;
+                return err;
+            };
+            const event = polled orelse {
                 for (&self.assemblies) |*assembly| {
                     if (assembly.decoder.used == 0 and
                         assembly.buffer.capacity > framing.maximum_segment_payload)
@@ -697,6 +703,9 @@ pub const Connection = struct {
 
                     if (self.options.trace and event != .candidate)
                         native.traceSdp("local signaled", body);
+
+                    // Like vanilla, the answer timeout starts once the offer goes out.
+                    if (event == .offer) self.started = std.Io.Clock.awake.now(self.io);
 
                     const kind = if (event == .offer)
                         Signal.offer
@@ -929,7 +938,7 @@ test "negotiation timeout and repeated close fail pending sends" {
     );
     defer connection.destroy();
 
-    try std.testing.expectError(error.Timeout, connection.receive());
+    try std.testing.expectError(error.NoAnswer, connection.receive());
 
     connection.close();
     connection.close();

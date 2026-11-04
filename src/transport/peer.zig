@@ -271,6 +271,8 @@ pub const Peer = struct {
     gathered: bool = false,
     channels_open: bool = false,
     ice_state: IceState = .new,
+    ice_connected: bool = false,
+    ice_unreachable: bool = false,
     gathering_state: GatheringState = .new,
     description_sent: bool = false,
     description_kind: enum { offer, answer } = .offer,
@@ -1222,7 +1224,16 @@ pub const Peer = struct {
 
         if (self.stopping) return;
         self.ice_state = mapped;
+        if (mapped == .connected or mapped == .completed) self.ice_connected = true;
+        if (mapped == .failed and !self.ice_connected) self.ice_unreachable = true;
         self.notify();
+    }
+
+    /// ICE gave up without ever finding a path, so the remote was unreachable over WebRTC.
+    pub fn iceUnreachable(self: *Peer) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.ice_unreachable;
     }
 
     fn onGathered(
@@ -2160,7 +2171,19 @@ test "ICE port ranges and bind addresses are validated" {
     ));
 }
 
+test "ICE that fails before ever connecting marks the remote unreachable" {
+    for ([_]bool{ false, true }) |connected_first| {
+        const peer = try Peer.create(std.testing.allocator, std.testing.io, .{});
+        defer peer.destroy();
+        Peer.onIceState(-1, c.RTC_ICE_CHECKING, peer);
+        if (connected_first) Peer.onIceState(-1, c.RTC_ICE_CONNECTED, peer);
+        Peer.onIceState(-1, c.RTC_ICE_FAILED, peer);
+        try std.testing.expectEqual(!connected_first, peer.iceUnreachable());
+    }
+}
+
 test "late ICE and channel callbacks leave a closed peer terminal" {
+
     const peer = try Peer.create(std.testing.allocator, std.testing.io, .{});
     defer peer.destroy();
     peer.close();
