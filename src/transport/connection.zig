@@ -67,8 +67,8 @@ fn signalingPeerCandidate(
 
     const candidate = std.fmt.bufPrint(
         output[0 .. output.len - 1],
-        "candidate:signaling 1 udp 1694498815 {s} {d} typ srflx raddr 0.0.0.0 rport 0",
-        .{ host, host_port orelse return null },
+        "candidate:signaling 1 udp 1694498815 {s} {d} typ srflx raddr {s} rport 0",
+        .{ host, host_port orelse return null, if (peer_address == .ip4) "0.0.0.0" else "::" },
     ) catch return null;
     output[candidate.len] = 0;
     return output[0..candidate.len :0];
@@ -96,8 +96,51 @@ test "signaling peer candidate uses the offered UDP host port" {
     ) == null);
     const ipv6 = try std.Io.net.IpAddress.parseLiteral("[2001:db8::8]:19132");
     try std.testing.expectEqualStrings(
-        "candidate:signaling 1 udp 1694498815 2001:db8::8 45678 typ srflx raddr 0.0.0.0 rport 0",
+        "candidate:signaling 1 udp 1694498815 2001:db8::8 45678 typ srflx raddr :: rport 0",
         signalingPeerCandidate(offer, ipv6, &output).?,
+    );
+}
+
+/// libdatachannel resolves a candidate that names a host on a detached thread of its own, so a peer could
+/// make us spawn lookups for any name it likes. Only IP literals are used, they're all vanilla sends anyway.
+fn namesIpAddress(candidate: []const u8) bool {
+    var body = std.mem.trim(u8, candidate, " \t\r\n");
+    if (std.mem.startsWith(u8, body, "a=")) body = body[2..];
+    if (std.mem.startsWith(u8, body, "candidate:")) body = body["candidate:".len..];
+    var fields = std.mem.tokenizeAny(u8, body, " \t");
+    for (0..4) |_| _ = fields.next() orelse return false;
+    _ = std.Io.net.IpAddress.parse(fields.next() orelse return false, 0) catch return false;
+    return true;
+}
+
+fn dropHostnameCandidates(sdp: [:0]u8) [:0]u8 {
+    var read: usize = 0;
+    var write: usize = 0;
+    while (read < sdp.len) {
+        const end = std.mem.indexOfScalarPos(u8, sdp, read, '\n') orelse sdp.len;
+        const next = @min(end + 1, sdp.len);
+        if (!std.mem.startsWith(u8, sdp[read..end], "a=candidate:") or namesIpAddress(sdp[read..end])) {
+            std.mem.copyForwards(u8, sdp[write..], sdp[read..next]);
+            write += next - read;
+        }
+        read = next;
+    }
+    sdp[write] = 0;
+    return sdp[0..write :0];
+}
+
+test "remote candidates must name an IP address" {
+    try std.testing.expect(namesIpAddress("candidate:1 1 udp 2130706431 192.168.1.4 45678 typ host"));
+    try std.testing.expect(namesIpAddress("a=candidate:1 1 udp 1 2001:db8::1 9 typ srflx raddr :: rport 0\r"));
+    try std.testing.expect(namesIpAddress("1 1 udp 1 10.0.0.1 9 typ host"));
+    try std.testing.expect(!namesIpAddress("candidate:1 1 udp 1 attacker.example 9 typ host"));
+    try std.testing.expect(!namesIpAddress("candidate:1 1 udp 1 3f6b8c2e-1a.local 9 typ host"));
+    try std.testing.expect(!namesIpAddress("candidate:1 1 udp"));
+
+    var sdp = "v=0\r\na=candidate:1 1 udp 1 host.example 9 typ host\r\na=candidate:2 1 udp 1 10.0.0.1 9 typ host\r\na=candidate:3 1 udp 1 x.local 9 typ host".*;
+    try std.testing.expectEqualStrings(
+        "v=0\r\na=candidate:2 1 udp 1 10.0.0.1 9 typ host\r\n",
+        dropHostnameCandidates(&sdp),
     );
 }
 
@@ -540,6 +583,7 @@ pub const Connection = struct {
         }
 
         if (signal.data.len > maximum_signal_size) return error.MessageTooLarge;
+        if (is_candidate and !namesIpAddress(signal.data)) return;
 
         if (is_candidate) {
             try self.remote_candidates.addTrickled(self.options.maximum_remote_candidates);
@@ -587,7 +631,8 @@ pub const Connection = struct {
         self.identity_issuer_verified = key != null and verifier != null;
         if (self.options.trace) std.debug.print("nethernet identity: {s}\n", .{if (key == null) "anonymous allowed" else if (verifier != null) "proof and issuer verified" else "proof verified"});
 
-        const native_sdp = auth.removeIdentity(terminated);
+        const native_sdp = dropHostnameCandidates(auth.removeIdentity(terminated));
+
         if (self.options.trace) native.traceSdp("remote stripped", native_sdp);
         self.peer.remoteDescription(
             native_sdp,
@@ -1222,8 +1267,11 @@ test "candidates before an answer are bounded and released" {
     );
     defer limited.destroy();
 
-    const large: [16384]u8 = @splat('x');
+    var large: [16384]u8 = @splat('x');
+    const prefix = "candidate:1 1 udp 1 127.0.0.1 9 typ host ";
+    @memcpy(large[0..prefix.len], prefix);
     for (0..maximum_pending_candidate_bytes / large.len) |_| {
+
         try limited.applySignal(.{
             .kind = Signal.candidate,
             .connection_id = 8,
