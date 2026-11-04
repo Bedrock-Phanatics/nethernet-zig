@@ -29,10 +29,11 @@ pub const Options = struct {
     connection: conn.Options = .{},
     maximum_negotiations: usize = 8,
     /// Unlimited when null. Counts by IP, or by /64 for IPv6, so clients behind one NAT share it. Loopback is exempt.
-    maximum_negotiations_per_address: ?usize = null,
+    maximum_negotiations_per_address: ?usize = 4,
     /// HTTP connections one address may hold at once, so a few idle sockets can't take every worker.
     /// Unlimited when null, counted like `maximum_negotiations_per_address`.
-    maximum_connections_per_address: ?usize = null,
+    maximum_connections_per_address: ?usize = 8,
+
     maximum_http_workers: usize = 32,
     maximum_pending_accepts: usize = 64,
     request_timeout_ms: u32 = 15000,
