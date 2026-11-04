@@ -7,6 +7,35 @@ const ServerData = @import("server_data.zig").ServerData;
 
 pub const default_port = 7551;
 
+/// Vanilla forgets a peer's address a minute after its last response or message, and a listed
+/// world five seconds after its last response.
+const address_lifetime_ms = 60_000;
+const response_lifetime_ms = 5_000;
+/// Request sources can be spoofed, so replies are capped to keep the port from amplifying floods.
+/// Vanilla asks every two seconds, so this still serves over a hundred clients at once.
+const maximum_replies_per_second = 64;
+
+pub const RateLimit = struct {
+    rate: u32,
+    tokens: u32 = 0,
+    refilled: ?std.Io.Timestamp = null,
+
+    /// Always true when `rate` is 0.
+    pub fn take(self: *RateLimit, io: std.Io) bool {
+        if (self.rate == 0) return true;
+        if (self.tokens == 0) {
+            const now = std.Io.Clock.awake.now(io);
+            const elapsed: u64 = if (self.refilled) |last| @intCast(@max(last.durationTo(now).toMilliseconds(), 0)) else 1000;
+            const refill = @min(@as(u64, self.rate), elapsed * self.rate / 1000);
+            if (refill == 0) return false;
+            self.tokens = @intCast(refill);
+            self.refilled = now;
+        }
+        self.tokens -= 1;
+        return true;
+    }
+};
+
 pub const Options = struct {
     network_id: u64 = 0,
     maximum_servers: u32 = 1024,
@@ -18,7 +47,9 @@ pub const Options = struct {
 pub const Known = struct {
     endpoint: std.Io.net.IpAddress,
     last_seen: std.Io.Timestamp,
+    /// The world this peer advertised in the last five seconds, if any.
     response: ?[]u8 = null,
+    responded: std.Io.Timestamp = .zero,
 };
 
 pub const Discovery = struct {
@@ -46,8 +77,10 @@ pub const Discovery = struct {
     network_name: [20]u8 = undefined,
     closed: bool = false,
 
+    replies: RateLimit = .{ .rate = maximum_replies_per_second },
     malformed_datagrams: u64 = 0,
     dropped_servers: u64 = 0,
+    dropped_replies: u64 = 0,
 
     pub fn listen(
         allocator: std.mem.Allocator,
@@ -197,15 +230,14 @@ pub const Discovery = struct {
         var iterator = self.servers.iterator();
 
         while (iterator.next()) |entry| {
-            if (entry.value_ptr.last_seen.durationTo(now).toMilliseconds() <= 15000) {
-                continue;
+            const known = entry.value_ptr;
+            const expired = known.last_seen.durationTo(now).toMilliseconds() >= address_lifetime_ms;
+            const stale = known.responded.durationTo(now).toMilliseconds() > response_lifetime_ms;
+            if (known.response != null and (expired or stale)) {
+                self.allocator.free(known.response.?);
+                known.response = null;
             }
-
-            if (entry.value_ptr.response) |data| {
-                self.allocator.free(data);
-            }
-
-            _ = self.servers.remove(entry.key_ptr.*);
+            if (expired) _ = self.servers.remove(entry.key_ptr.*);
         }
 
         if (self.options.broadcast_endpoint) |address| {
@@ -238,6 +270,19 @@ pub const Discovery = struct {
 
         if (decoded.sender_id == self.id) return null;
 
+        if (decoded.packet == .request) {
+            // Requests can come from spoofed sources, so a reply that fails to send is dropped
+            const data = self.advertisement orelse return null;
+            if (self.replies.take(self.io))
+                self.write(.{ .response = data }, message.from) catch {}
+            else
+                self.dropped_replies +|= 1;
+            return null;
+        }
+
+        // Like vanilla, only responses and messages from a nonzero sender locate a peer.
+        if (decoded.sender_id == 0) return null;
+
         if (!self.servers.contains(decoded.sender_id) and
             self.servers.count() >= self.options.maximum_servers)
         {
@@ -247,27 +292,16 @@ pub const Discovery = struct {
 
         const entry = self.servers.getOrPutAssumeCapacity(decoded.sender_id);
         const now = std.Io.Clock.awake.now(self.io);
-
-        if (!entry.found_existing) {
-            entry.value_ptr.* = .{
-                .endpoint = message.from,
-                .last_seen = now,
-            };
-        } else if (!std.meta.eql(entry.value_ptr.endpoint, message.from)) {
-            self.malformed_datagrams +|= 1;
-            return null;
-        }
-
+        if (!entry.found_existing) entry.value_ptr.* = .{ .endpoint = message.from, .last_seen = now };
+        entry.value_ptr.endpoint = message.from;
         entry.value_ptr.last_seen = now;
 
         switch (decoded.packet) {
-            .request => {
-                // Requests can come from spoofed sources, so a reply that fails to send is dropped
-                if (self.advertisement) |data| self.write(.{ .response = data }, message.from) catch {};
-            },
+            .request => unreachable,
 
             .response => |data| if (self.options.keep_responses) {
                 try replaceResponse(self.allocator, entry.value_ptr, data);
+                entry.value_ptr.responded = now;
             },
 
             .message => |packet| {
@@ -465,6 +499,7 @@ test "UDP discovery and addressed signaling over loopback" {
     try client.request(server.socket.address);
 
     _ = try server.poll(1000);
+    try std.testing.expectEqual(@as(u32, 0), server.servers.count());
     _ = try client.poll(1000);
 
     const data = try ServerData.decode(
@@ -483,6 +518,19 @@ test "UDP discovery and addressed signaling over loopback" {
 
     try std.testing.expectEqualStrings("1", signal.network_id);
     try std.testing.expectEqualStrings("v=0\r\n", signal.data);
+    try std.testing.expect(server.servers.contains(1));
+
+    // A listed world drops out five seconds after its last response, its address only after a minute.
+    client.options.broadcast_endpoint = null;
+    const known = client.servers.getPtr(2).?;
+    known.responded = known.responded.subDuration(.fromMilliseconds(5001));
+    client.last_tick = client.last_tick.subDuration(.fromMilliseconds(2000));
+    try client.tick();
+    try std.testing.expect(known.response == null);
+    known.last_seen = known.last_seen.subDuration(.fromMilliseconds(60_000));
+    client.last_tick = client.last_tick.subDuration(.fromMilliseconds(2000));
+    try client.tick();
+    try std.testing.expect(!client.servers.contains(2));
 
     server.close();
     server.close();
