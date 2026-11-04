@@ -632,7 +632,6 @@ pub const Connection = struct {
         if (self.options.trace) std.debug.print("nethernet identity: {s}\n", .{if (key == null) "anonymous allowed" else if (verifier != null) "proof and issuer verified" else "proof verified"});
 
         const native_sdp = dropHostnameCandidates(auth.removeIdentity(terminated));
-
         if (self.options.trace) native.traceSdp("remote stripped", native_sdp);
         self.peer.remoteDescription(
             native_sdp,

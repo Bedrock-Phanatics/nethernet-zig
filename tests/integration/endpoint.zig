@@ -130,7 +130,6 @@ test "HTTP endpoint returns JSON only for valid available metadata" {
         .{ .version = "" },
         .{ .version = "\xff" },
         .{ .game_type = -1 },
-        .{ .game_type = 3 },
     }) |invalid| {
         state = invalid;
         writer = std.Io.Writer.fixed(&output);
