@@ -47,6 +47,12 @@ try connection.send(message.data, message.reliability);
 
 Keep the identity file across restarts so players only confirm the server once.
 
+A dial fails with `error.NoAnswer` when no answer arrives within `negotiation_timeout_ms` of sending the
+offer (10 seconds, like vanilla), and with `error.IceConnectFailed` when ICE never finds a path, so a
+caller can fall back to another transport. HTTP joins the server refuses fail with `error.Forbidden`,
+`error.ServiceUnavailable` or `error.HttpFailure`.
+
+
 | API | Purpose |
 | --- | --- |
 | `EndpointListener` | HTTP signaling server, `accept` returns established connections |
