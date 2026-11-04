@@ -15,12 +15,10 @@ pub fn validateFragmentSize(size: usize) !void {
     if (size - 1 > maximum_segment_payload) return error.MessageTooLarge;
 }
 
+/// Vanilla ignores the segment header of unreliable messages and takes each one whole.
 pub fn singleFragmentPayload(fragment: []const u8, reliability: Reliability) !?[]const u8 {
     try validateFragmentSize(fragment.len);
-    if (fragment[0] != 0) {
-        if (reliability == .unreliable) return error.MalformedFragment;
-        return null;
-    }
+    if (fragment[0] != 0 and reliability == .reliable) return null;
     return fragment[1..];
 }
 
@@ -105,11 +103,8 @@ pub const Reassembler = struct {
 
         try validateFragmentSize(fragment.len);
 
+        if (self.reliability == .unreliable) return fragment[1..];
         const remaining = fragment[0];
-
-        if (self.reliability == .unreliable and remaining != 0) {
-            return error.MalformedFragment;
-        }
 
         if (self.remaining > 0 and self.remaining - 1 != remaining) {
             return error.FragmentOutOfSequence;
@@ -218,7 +213,7 @@ test "fragment boundaries and reassembly" {
     );
 }
 
-test "malformed, reordered, duplicate, oversized and unreliable fragments fail closed" {
+test "malformed, reordered, duplicate and oversized fragments fail closed" {
     var storage: [8]u8 = undefined;
     var reassembler = Reassembler.init(&storage, .reliable);
 
@@ -257,12 +252,15 @@ test "malformed, reordered, duplicate, oversized and unreliable fragments fail c
         reassembler.push(&.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }),
     );
 
-    reassembler = Reassembler.init(&storage, .unreliable);
+}
 
-    try std.testing.expectError(
-        error.MalformedFragment,
-        reassembler.push(&.{ 1, 2 }),
-    );
+test "unreliable messages ignore their segment header" {
+    var storage: [8]u8 = undefined;
+    var reassembler = Reassembler.init(&storage, .unreliable);
+    try std.testing.expectEqualSlices(u8, &.{ 2, 3 }, (try reassembler.push(&.{ 1, 2, 3 })).?);
+    try std.testing.expectEqualSlices(u8, &.{4}, (try singleFragmentPayload(&.{ 9, 4 }, .unreliable)).?);
+    try std.testing.expectEqual(@as(?[]const u8, null), try singleFragmentPayload(&.{ 9, 4 }, .reliable));
+    try std.testing.expectError(error.MalformedFragment, singleFragmentPayload(&.{9}, .unreliable));
 }
 
 test "reliable countdown supports 1 through 256 fragments" {
