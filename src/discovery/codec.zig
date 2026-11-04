@@ -194,30 +194,22 @@ pub fn decodePayload(payload: []u8) !Decoded {
         return error.MalformedPacket;
     }
 
+    // Vanilla caps the declared size of long messages but sends the rest, so only a short payload is malformed.
     const declared_size = std.mem.readInt(u16, payload[0..2], .little);
-    if (declared_size != payload.len and declared_size != payload.len - 2) {
-        return error.MalformedPacket;
-    }
+    if (declared_size > payload.len) return error.MalformedPacket;
 
     const packet_id = std.mem.readInt(u16, payload[2..4], .little);
     const sender_id = std.mem.readInt(u64, payload[4..12], .little);
 
     const packet: Packet = switch (packet_id) {
-        0 => blk: {
-            if (payload.len != 20) return error.MalformedPacket;
-            break :blk .request;
-        },
+        0 => .request,
 
+        // Like messages, vanilla reads response data to the end and ignores its nested length.
         1 => blk: {
-            if (payload.len < 24) return error.MalformedPacket;
-
-            const length = std.mem.readInt(u32, payload[20..24], .little);
-            if (length != payload.len - 24 or length % 2 != 0) {
-                return error.MalformedPacket;
-            }
+            if (payload.len < 24 or (payload.len - 24) % 2 != 0) return error.MalformedPacket;
 
             const data = std.fmt.hexToBytes(
-                payload[24..][0 .. length / 2],
+                payload[24..][0 .. (payload.len - 24) / 2],
                 payload[24..],
             ) catch return error.MalformedPacket;
 
@@ -226,12 +218,6 @@ pub fn decodePayload(payload: []u8) !Decoded {
 
         2 => blk: {
             if (payload.len < 32) return error.MalformedPacket;
-
-            const length = std.mem.readInt(u32, payload[28..32], .little);
-            if (length > payload.len - 32) {
-                return error.MalformedPacket;
-            }
-
             break :blk .{
                 .message = .{
                     .recipient_id = std.mem.readInt(
@@ -357,8 +343,25 @@ test "a truncated declared length still yields the whole vanilla signal" {
     try std.testing.expectEqualStrings(signal, decoded.packet.message.data);
     try std.testing.expectEqual(@as(u64, 9), decoded.packet.message.recipient_id);
 
-    std.mem.writeInt(u32, payload[28..32], signal.len + 1, .little);
+    // Vanilla declares at most 1140 bytes of message data in the outer size too.
+    std.mem.writeInt(u16, payload[0..2], 32 + 38, .little);
+    try std.testing.expectEqualStrings(signal, (try decodePayload(&payload)).packet.message.data);
+
+    std.mem.writeInt(u16, payload[0..2], payload.len + 1, .little);
     try std.testing.expectError(error.MalformedPacket, decodePayload(&payload));
+}
+
+test "responses read their data to the end of the payload" {
+    var payload: [24 + 6]u8 = @splat(0);
+    std.mem.writeInt(u16, payload[0..2], payload.len, .little);
+    std.mem.writeInt(u16, payload[2..4], 1, .little);
+    std.mem.writeInt(u32, payload[20..24], 2, .little);
+    @memcpy(payload[24..], "0aff10");
+    try std.testing.expectEqualSlices(u8, &.{ 0x0a, 0xff, 0x10 }, (try decodePayload(&payload)).packet.response);
+
+    var odd = payload[0 .. payload.len - 1].*;
+    std.mem.writeInt(u16, odd[0..2], odd.len, .little);
+    try std.testing.expectError(error.MalformedPacket, decodePayload(&odd));
 }
 
 test "arbitrary datagrams and plaintext fail safely without allocations" {
