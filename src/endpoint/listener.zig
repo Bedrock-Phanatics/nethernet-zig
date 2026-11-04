@@ -858,9 +858,7 @@ fn encodeStatus(status: ServerStatus, output: []u8) ![]const u8 {
     if (!std.unicode.utf8ValidateSlice(status.name) or
         !std.unicode.utf8ValidateSlice(status.version) or
         !std.unicode.utf8ValidateSlice(status.level) or
-        status.protocol == 0 or status.version.len == 0 or
-        status.game_type < 0 or status.game_type > 2 or
-        status.players > status.max_players)
+        status.protocol == 0 or status.version.len == 0 or status.game_type < 0)
     {
         return error.InvalidServerStatus;
     }
@@ -915,15 +913,26 @@ test "server status JSON is bounded and escaped" {
         "\"players\":3,\"maxPlayers\":20}";
     try std.testing.expectEqualStrings(expected, json);
 
-    try std.testing.expectError(error.InvalidServerStatus, encodeStatus(.{
+    // A full server letting staff in past its limit, or a spectator world, still answers the probe.
+    _ = try encodeStatus(.{
         .name = "server",
         .protocol = 800,
         .version = "1.21.0",
         .level = "level",
         .players = 21,
         .max_players = 20,
+        .game_type = 6,
+    }, &output);
+    try std.testing.expectError(error.InvalidServerStatus, encodeStatus(.{
+        .name = "server",
+        .protocol = 0,
+        .version = "1.21.0",
+        .level = "level",
+        .players = 0,
+        .max_players = 20,
         .game_type = 0,
     }, &output));
+
 
     var tiny: [1]u8 = undefined;
     try std.testing.expectError(error.WriteFailed, encodeStatus(.{
