@@ -57,7 +57,8 @@ caller can fall back to another transport. HTTP joins the server refuses fail wi
 | --- | --- |
 | `EndpointListener` | HTTP signaling server, `accept` returns established connections |
 | `dialEndpoint` | Connects to an HTTP signaling server |
-| `LanListener`, `dialLan` | LAN discovery and signaling |
+| `probeEndpoint` | Optional vanilla `GET /v1/join` probe, returns the server status |
+| `LanListener`, `dialLan` | LAN discovery and signaling, including 26.70 reliable messages |
 | `Connection` | `send`, `receive`, `poll`, `wait`, `shutdown`, `closeGracefully`, `bufferedAmount`, `diagnostics` |
 | `Wakeup` | One wait across many connections via `connection.peer.subscribe` |
 | `Callback` | `connection.setCallback` runs a function instead, for hosts with their own scheduler |
@@ -68,7 +69,9 @@ Messages returned by `receive` and `poll` are borrowed until the next call. Poll
 one thread, while `send`, `close` and `closeGracefully` are safe from any thread. A callback runs on
 a native thread with the connection locked, so it should only hand the work off; once
 `setCallback(null)` returns, none is running. `close` and `destroy` abort SCTP and drop anything it
-still holds, while `shutdown` (non-blocking) and `closeGracefully` let it go out first.
+still holds, while `shutdown` (non-blocking) and `closeGracefully` let it go out first;
+`closeGracefully` also keeps the transport up 100 ms past the final send or acknowledgement, so a
+vanilla client reads a last message such as a disconnect before it sees the close.
 `EndpointListener` caps concurrent negotiations and open HTTP connections per client IP with
 `maximum_negotiations_per_address` (4) and `maximum_connections_per_address` (8), null lifts them.
 IPv6 clients count per /64 and loopback is exempt. Forwarding headers aren't trusted, so behind a remote
