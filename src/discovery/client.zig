@@ -3,6 +3,7 @@ const std = @import("std");
 const wake = @import("../internal/wakeup.zig");
 const Signal = @import("../protocol/signal.zig").Signal;
 const codec = @import("codec.zig");
+const reliable = @import("reliable.zig");
 const ServerData = @import("server_data.zig").ServerData;
 
 pub const default_port = 7551;
@@ -78,6 +79,7 @@ pub const Discovery = struct {
     closed: bool = false,
 
     replies: RateLimit = .{ .rate = maximum_replies_per_second },
+    reliable_windows: reliable.Windows = .{},
     malformed_datagrams: u64 = 0,
     dropped_servers: u64 = 0,
     dropped_replies: u64 = 0,
@@ -239,6 +241,7 @@ pub const Discovery = struct {
             }
             if (expired) _ = self.servers.remove(entry.key_ptr.*);
         }
+        self.reliable_windows.expire(now);
 
         if (self.options.broadcast_endpoint) |address| {
             try self.request(address);
@@ -280,6 +283,14 @@ pub const Discovery = struct {
             return null;
         }
 
+        switch (decoded.packet) {
+            // We send no reliable packets, so there is nothing to acknowledge.
+            .acknowledgement => return null,
+            // One addressed elsewhere must not take a receive window.
+            .reliable => |packet| if (packet.recipient_id != self.id) return null,
+            else => {},
+        }
+
         // Like vanilla, only responses and messages from a nonzero sender locate a peer.
         if (decoded.sender_id == 0) return null;
 
@@ -297,37 +308,50 @@ pub const Discovery = struct {
         entry.value_ptr.last_seen = now;
 
         switch (decoded.packet) {
-            .request => unreachable,
+            .request, .acknowledgement => unreachable,
 
             .response => |data| if (self.options.keep_responses) {
                 try replaceResponse(self.allocator, entry.value_ptr, data);
                 entry.value_ptr.responded = now;
             },
 
-            .message => |packet| {
-                if (packet.recipient_id != self.id or
-                    packet.data.len == 0 or
-                    std.mem.eql(u8, packet.data, "Ping"))
-                {
-                    return null;
-                }
+            .message => |packet| if (packet.recipient_id == self.id)
+                return self.parseSignal(decoded.sender_id, packet.data),
 
-                var signal = Signal.parse(packet.data) catch {
-                    self.malformed_datagrams +|= 1;
-                    return null;
-                };
-
-                signal.network_id = try std.fmt.bufPrint(
-                    &self.network_name,
-                    "{d}",
-                    .{decoded.sender_id},
-                );
-
-                return signal;
+            .reliable => |packet| {
+                const outcome = self.reliable_windows.receive(decoded.sender_id, packet.nonce, packet.sequence, now);
+                if (outcome == .stale) return null;
+                // Retransmissions are acknowledged again, since the first acknowledgement may have been lost.
+                self.acknowledge(message.from, decoded.sender_id, packet);
+                if (outcome == .deliver) return self.parseSignal(decoded.sender_id, packet.data);
             },
         }
 
         return null;
+    }
+
+    fn parseSignal(self: *Discovery, sender_id: u64, data: []const u8) !?Signal {
+        if (data.len == 0 or std.mem.eql(u8, data, "Ping")) return null;
+
+        var signal = Signal.parse(data) catch {
+            self.malformed_datagrams +|= 1;
+            return null;
+        };
+        signal.network_id = try std.fmt.bufPrint(&self.network_name, "{d}", .{sender_id});
+        return signal;
+    }
+
+    /// Uses its own buffers, as the shared ones still hold the message being delivered.
+    fn acknowledge(self: *Discovery, address: std.Io.net.IpAddress, sender_id: u64, packet: codec.Reliable) void {
+        var scratch: [48]u8 = undefined;
+        var wire: [80]u8 = undefined;
+        const encoded = self.codec.encode(.{ .acknowledgement = .{
+            .recipient_id = sender_id,
+            .nonce = packet.nonce,
+            .sequence = packet.sequence,
+        } }, self.id, &scratch, &wire) catch unreachable;
+        // Like replies to requests, the source may be spoofed, so a failed send is dropped.
+        self.socket.send(self.io, &address, encoded) catch {};
     }
 
     pub fn beginOperation(self: *Discovery) !void {
@@ -536,6 +560,69 @@ test "UDP discovery and addressed signaling over loopback" {
     server.close();
 }
 
+fn expectAcknowledgement(discovery: *Discovery, nonce: u64, sequence: u64) !void {
+    const message = try discovery.receive(1000);
+    defer discovery.consumed.set(discovery.io);
+    const decoded = try discovery.codec.decode(message.data, discovery.plain());
+    try std.testing.expectEqual(@as(u64, 2), decoded.sender_id);
+    try std.testing.expectEqual(codec.Acknowledgement{
+        .recipient_id = 1,
+        .nonce = nonce,
+        .sequence = sequence,
+    }, decoded.packet.acknowledgement);
+}
+
+test "reliable LAN signals are acknowledged every time and delivered once" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const address = try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0");
+
+    const server = try Discovery.listen(allocator, io, address, .{ .network_id = 2 });
+    defer server.destroy();
+    const client = try Discovery.listen(allocator, io, address, .{ .network_id = 1 });
+    defer client.destroy();
+
+    const offer: codec.Packet = .{ .reliable = .{
+        .recipient_id = 2,
+        .nonce = 5,
+        .sequence = 1,
+        .data = "CONNECTREQUEST 9 v=0\r\n",
+    } };
+    try client.write(offer, server.socket.address);
+    const signal = (try server.poll(1000)).?;
+    try std.testing.expectEqualStrings(Signal.offer, signal.kind);
+    try std.testing.expectEqual(@as(u64, 9), signal.connection_id);
+    try std.testing.expectEqualStrings("1", signal.network_id);
+    try std.testing.expectEqualStrings("v=0\r\n", signal.data);
+    try std.testing.expect(server.servers.contains(1));
+    try expectAcknowledgement(client, 5, 1);
+
+    // A retransmission is acknowledged again but not delivered twice.
+    try client.write(offer, server.socket.address);
+    try std.testing.expectEqual(null, try server.poll(1000));
+    try expectAcknowledgement(client, 5, 1);
+
+    // Filler is acknowledged too, and later sequences still arrive.
+    try client.write(.{ .reliable = .{ .recipient_id = 2, .nonce = 5, .sequence = 3, .data = "Ping" } }, server.socket.address);
+    try std.testing.expectEqual(null, try server.poll(1000));
+    try expectAcknowledgement(client, 5, 3);
+    try client.write(.{ .reliable = .{
+        .recipient_id = 2,
+        .nonce = 5,
+        .sequence = 2,
+        .data = "CANDIDATEADD 9 candidate:1 1 udp 1 127.0.0.1 5 typ host",
+    } }, server.socket.address);
+    try std.testing.expectEqualStrings(Signal.candidate, (try server.poll(1000)).?.kind);
+    try expectAcknowledgement(client, 5, 2);
+
+    // Packets for another network and stray acknowledgements are dropped silently.
+    try client.write(.{ .reliable = .{ .recipient_id = 3, .nonce = 5, .sequence = 4, .data = "Ping" } }, server.socket.address);
+    try std.testing.expectEqual(null, try server.poll(1000));
+    try client.write(.{ .acknowledgement = .{ .recipient_id = 2, .nonce = 5, .sequence = 4 } }, server.socket.address);
+    try std.testing.expectEqual(null, try server.poll(1000));
+    try std.testing.expectError(error.Timeout, client.receive(100));
+}
+
 test "identical discovery responses do not allocate again" {
     var known: Known = .{
         .endpoint = try std.Io.net.IpAddress.parseLiteral("127.0.0.1:7551"),
@@ -568,4 +655,8 @@ test "discovery creation and advertisement allocation failures clean up" {
         creationFailureScenario,
         .{},
     );
+}
+
+test {
+    _ = reliable;
 }
