@@ -118,3 +118,31 @@ test "discovery packets match encrypted wire fixtures" {
         }
     }
 }
+
+test "reliable LAN packets match Axolotl's encrypted wire" {
+    const codec = discovery.Codec.init();
+    var scratch: [256]u8 = undefined;
+    var output: [256]u8 = undefined;
+    var expected: [256]u8 = undefined;
+
+    const reliable: discovery.Packet = .{ .reliable = .{ .recipient_id = 2, .nonce = 3, .sequence = 4, .data = "CONNECTREQUEST 1 offer" } };
+    const ack: discovery.Packet = .{ .acknowledgement = .{ .recipient_id = 2, .nonce = 3, .sequence = 4 } };
+    const vectors = [_]struct { discovery.Packet, []const u8 }{
+        .{ reliable, "bcedcc6781bdeed7b8ebb9f013716629ccc954af937a6659281668f1c2ed1e00d245c864a0c7db9ff371e42937f4a17fa3b7005c625b970542e005cb853659a2076c1a59104bdae246047c0702c9fb38689270cff56084df27d4f91cd688d08f7e101c2770a9140dcceacf94a0ec0923f45ba872336fc2f926bcb3484ffadbbcb0d1e11a416f0ec3b88616c05db0164c" },
+        .{ ack, "edc1d4c378e651e8dbcb452ea9f8d6848ce87ef82e0f0f9db9f23d7e0ffa6bee7fea78c3d9fd9e3d13b95a310491c5e9a3b7005c625b970542e005cb853659a2716dbef34537ffae1151c5df9d751645" },
+    };
+    for (vectors) |vector| {
+        const wire = try std.fmt.hexToBytes(&expected, vector[1]);
+        try std.testing.expectEqualSlices(u8, wire, try codec.encode(vector[0], 0x1020304050607080, &scratch, &output));
+        const decoded = try codec.decode(wire, &scratch);
+        try std.testing.expectEqual(@as(u64, 0x1020304050607080), decoded.sender_id);
+        switch (vector[0]) {
+            .reliable => |packet| {
+                try std.testing.expectEqualStrings(packet.data, decoded.packet.reliable.data);
+                try std.testing.expectEqual(packet.sequence, decoded.packet.reliable.sequence);
+            },
+            .acknowledgement => |packet| try std.testing.expectEqual(packet, decoded.packet.acknowledgement),
+            else => unreachable,
+        }
+    }
+}
