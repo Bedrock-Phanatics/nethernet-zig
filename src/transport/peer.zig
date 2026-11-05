@@ -286,6 +286,8 @@ pub const Peer = struct {
     receive_pauses: u64 = 0,
     spilled_messages: u64 = 0,
     segment_payload: std.atomic.Value(usize) = .init(0),
+    /// Awake-clock nanoseconds when the last send finished, zero before any.
+    last_send: std.atomic.Value(i64) = .init(0),
 
     pub fn create(allocator: std.mem.Allocator, io: std.Io, options: Options) !*Peer {
         if (options.queue_bytes < framing.maximum_segment_payload + 1 or
@@ -420,6 +422,11 @@ pub const Peer = struct {
         self.send_stopped = true;
         self.notify();
         self.mutex.unlock(self.io);
+    }
+
+    fn lastSend(self: *Peer) ?std.Io.Timestamp {
+        const nanoseconds = self.last_send.load(.acquire);
+        return if (nanoseconds == 0) null else .{ .nanoseconds = nanoseconds };
     }
 
     fn drainStatus(self: *Peer) enum { open, closed, failed } {
@@ -981,6 +988,7 @@ pub const Peer = struct {
                 return err;
             };
         }
+        self.last_send.store(@intCast(std.Io.Clock.awake.now(self.io).nanoseconds), .release);
     }
 
     fn attach(self: *Peer, channel: c_int) !void {
@@ -1410,6 +1418,9 @@ test "non-trickle SDP requires a usable local ICE candidate" {
 }
 
 const unacked_poll_ms = 5;
+/// The acknowledgement can come milliseconds after delivery, and a vanilla client that sees the close in the
+/// same frame as a final message such as a disconnect may never read it, so the transport stays up this long.
+const close_linger_ms = 100;
 
 fn gracefulDrain(
     comptime T: type,
@@ -1423,6 +1434,8 @@ fn gracefulDrain(
     const started = std.Io.Clock.awake.now(io);
     const timeout = wake.deadline(started, timeout_ms);
     var shut = false;
+    var awaited_ack = false;
+    var linger_end: ?std.Io.Timestamp = null;
     while (true) {
         const token = target.wakeup.prepare();
         const status = target.drainStatus();
@@ -1438,14 +1451,28 @@ fn gracefulDrain(
         }
         var wait = timeout;
         if (!shut and try target.bufferedAmount() == 0) {
-            if (target.unackedAmount() == 0) {
-                target.shutdown();
-                shut = true;
-                continue;
+            const now = std.Io.Clock.awake.now(io);
+            if (target.unackedAmount() != 0) {
+                awaited_ack = true;
+                // Acknowledgements raise no event, so look again shortly
+                wait = wake.earliest(timeout, wake.deadline(now, unacked_poll_ms));
+            } else {
+                // Linger from the acknowledgement just seen, or what remains since the last send.
+                const end = linger_end orelse if (awaited_ack)
+                    now.addDuration(.fromMilliseconds(close_linger_ms))
+                else if (target.lastSend()) |sent|
+                    sent.addDuration(.fromMilliseconds(close_linger_ms))
+                else
+                    now;
+                linger_end = end;
+                if (now.nanoseconds >= @min(end.nanoseconds, timeout.deadline.raw.nanoseconds)) {
+                    target.shutdown();
+                    shut = true;
+                    continue;
+                }
+                wait = wake.earliest(timeout, .{ .deadline = .{ .raw = end, .clock = .awake } });
             }
-            // Acknowledgements raise no event, so look again shortly
-            wait = wake.earliest(timeout, wake.deadline(std.Io.Clock.awake.now(io), unacked_poll_ms));
-        }
+        } else if (!shut) awaited_ack = true;
         if (std.Io.Clock.awake.now(io).nanoseconds >= timeout.deadline.raw.nanoseconds)
             return error.Timeout;
         try target.wakeup.wait(io, token, wait);
@@ -1466,6 +1493,11 @@ const DrainHarness = struct {
     closed: std.atomic.Value(bool) = .init(false),
     shut: std.atomic.Value(bool) = .init(false),
     sends_stopped: std.atomic.Value(bool) = .init(false),
+    last_send: ?std.Io.Timestamp = null,
+
+    fn lastSend(self: *DrainHarness) ?std.Io.Timestamp {
+        return self.last_send;
+    }
 
     fn stopSends(self: *DrainHarness) void {
         self.sends_stopped.store(true, .release);
@@ -1574,6 +1606,51 @@ test "graceful drain force closes on native failure" {
     try std.testing.expectError(error.ConnectionClosed, harness.drain(1000));
     try failure.await(io);
     try std.testing.expect(harness.closed.load(.acquire));
+}
+
+fn elapsedMs(io: std.Io, since: std.Io.Timestamp) i64 {
+    return since.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
+}
+
+test "graceful drain lingers after the final acknowledgement" {
+    const io = std.testing.io;
+    var harness: DrainHarness = .{ .io = io };
+    harness.unacked.store(1, .release);
+    var draining = try io.concurrent(DrainHarness.drain, .{ &harness, @as(u32, 2000) });
+    defer draining.cancel(io) catch {};
+    try harness.observed.wait(io);
+    const acknowledged = std.Io.Clock.awake.now(io);
+    harness.unacked.store(0, .release);
+    try draining.await(io);
+    try std.testing.expect(elapsedMs(io, acknowledged) >= close_linger_ms);
+    try std.testing.expect(harness.shut.load(.acquire));
+}
+
+test "graceful drain lingers what remains since an already acknowledged send" {
+    const io = std.testing.io;
+    var harness: DrainHarness = .{ .io = io, .last_send = std.Io.Clock.awake.now(io) };
+    try harness.drain(2000);
+    try std.testing.expect(elapsedMs(io, harness.last_send.?) >= close_linger_ms);
+    try std.testing.expect(harness.shut.load(.acquire));
+
+    // A send long before the close needs no linger, and the linger never outlasts the timeout.
+    harness = .{ .io = io, .last_send = std.Io.Clock.awake.now(io).subDuration(.fromSeconds(1)) };
+    try harness.drain(2000);
+    try std.testing.expect(harness.shut.load(.acquire));
+    harness = .{ .io = io, .last_send = std.Io.Clock.awake.now(io) };
+    try harness.drain(5);
+    try std.testing.expect(harness.shut.load(.acquire));
+}
+
+test "a remote close ends the linger without shutting down" {
+    const io = std.testing.io;
+    var harness: DrainHarness = .{ .io = io, .last_send = std.Io.Clock.awake.now(io).addDuration(.fromSeconds(60)) };
+    var draining = try io.concurrent(DrainHarness.drain, .{ &harness, @as(u32, 120_000) });
+    defer draining.cancel(io) catch {};
+    try harness.observed.wait(io);
+    harness.forceClose();
+    try draining.await(io);
+    try std.testing.expect(!harness.shut.load(.acquire));
 }
 
 test "graceful close handles an empty native buffer and repeated close" {
