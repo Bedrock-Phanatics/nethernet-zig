@@ -2190,7 +2190,6 @@ test "ICE that fails before ever connecting marks the remote unreachable" {
 }
 
 test "late ICE and channel callbacks leave a closed peer terminal" {
-
     const peer = try Peer.create(std.testing.allocator, std.testing.io, .{});
     defer peer.destroy();
     peer.close();

@@ -33,7 +33,6 @@ pub const Options = struct {
     /// HTTP connections one address may hold at once, so a few idle sockets can't take every worker.
     /// Unlimited when null, counted like `maximum_negotiations_per_address`.
     maximum_connections_per_address: ?usize = 8,
-
     maximum_http_workers: usize = 32,
     maximum_pending_accepts: usize = 64,
     request_timeout_ms: u32 = 15000,
@@ -932,7 +931,6 @@ test "server status JSON is bounded and escaped" {
         .max_players = 20,
         .game_type = 0,
     }, &output));
-
 
     var tiny: [1]u8 = undefined;
     try std.testing.expectError(error.WriteFailed, encodeStatus(.{

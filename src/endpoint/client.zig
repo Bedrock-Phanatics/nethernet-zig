@@ -141,7 +141,6 @@ fn exchangeWork(
         else => return error.HttpFailure,
     }
 
-
     const body = writer.buffered();
     if (body.len == 0) return error.MissingAnswer;
 
@@ -356,7 +355,6 @@ test "rejected joins report the HTTP status class" {
 }
 
 test "opaque and numeric network IDs share one representation" {
-
     var numeric: [maximum_numeric_network_id]u8 = undefined;
 
     try std.testing.expectEqualStrings(

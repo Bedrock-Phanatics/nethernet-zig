@@ -1270,7 +1270,6 @@ test "candidates before an answer are bounded and released" {
     const prefix = "candidate:1 1 udp 1 127.0.0.1 9 typ host ";
     @memcpy(large[0..prefix.len], prefix);
     for (0..maximum_pending_candidate_bytes / large.len) |_| {
-
         try limited.applySignal(.{
             .kind = Signal.candidate,
             .connection_id = 8,

@@ -306,7 +306,6 @@ pub fn claimPublicKey(
         }
     }
 
-
     const claim = try field(claims.value, "cpk");
 
     const key = if (claim == .string) blk: {

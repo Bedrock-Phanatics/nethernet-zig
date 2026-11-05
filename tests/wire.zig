@@ -71,7 +71,6 @@ test "identity verifies an independently signed multi-fingerprint assertion" {
     );
     // Server identities skip the time checks, like vanilla.
     _ = try auth.verify(allocator, fixture.value.sdp, 2061, .server, null);
-
 }
 
 test "discovery packets match encrypted wire fixtures" {
