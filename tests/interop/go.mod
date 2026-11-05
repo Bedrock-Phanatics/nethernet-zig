@@ -2,7 +2,7 @@ module nethernet-interop
 
 go 1.24.0
 
-require github.com/df-mc/go-nethernet v1.0.27-0.20261102075145-0e1727705185
+require github.com/df-mc/go-nethernet v1.0.27
 
 require (
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect

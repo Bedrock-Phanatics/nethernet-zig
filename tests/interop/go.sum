@@ -1,5 +1,5 @@
-github.com/df-mc/go-nethernet v1.0.27-0.20261102075145-0e1727705185 h1:x7H47FX+4yAhpMiGW7rJPGFHX9U7Yg+VkblQgoqLutc=
-github.com/df-mc/go-nethernet v1.0.27-0.20261102075145-0e1727705185/go.mod h1:mAr8SKYJE76IwMZjqgtAQuMJbkzR0W+DS8MIV6CekZg=
+github.com/df-mc/go-nethernet v1.0.27 h1:ZMljSMYgN7zmzCFe/V++A0AhhYcA26hk4Gr+OrEyM0I=
+github.com/df-mc/go-nethernet v1.0.27/go.mod h1:mAr8SKYJE76IwMZjqgtAQuMJbkzR0W+DS8MIV6CekZg=
 github.com/go-jose/go-jose/v4 v4.1.4 h1:moDMcTHmvE6Groj34emNPLs/qtYXRVcd6S7NHbHz3kA=
 github.com/go-jose/go-jose/v4 v4.1.4/go.mod h1:x4oUasVrzR7071A4TnHLGSPpNOm2a21K9Kf04k1rs08=
 github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
