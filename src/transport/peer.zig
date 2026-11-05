@@ -1465,7 +1465,8 @@ fn gracefulDrain(
                 else
                     now;
                 linger_end = end;
-                if (now.nanoseconds >= @min(end.nanoseconds, timeout.deadline.raw.nanoseconds)) {
+                // A linger that would outlast the timeout is skipped, leaving the shutdown its time.
+                if (now.nanoseconds >= end.nanoseconds or end.nanoseconds >= timeout.deadline.raw.nanoseconds) {
                     target.shutdown();
                     shut = true;
                     continue;
@@ -1633,7 +1634,7 @@ test "graceful drain lingers what remains since an already acknowledged send" {
     try std.testing.expect(elapsedMs(io, harness.last_send.?) >= close_linger_ms);
     try std.testing.expect(harness.shut.load(.acquire));
 
-    // A send long before the close needs no linger, and the linger never outlasts the timeout.
+    // A send long before the close needs no linger, and one that cannot fit the timeout is skipped.
     harness = .{ .io = io, .last_send = std.Io.Clock.awake.now(io).subDuration(.fromSeconds(1)) };
     try harness.drain(2000);
     try std.testing.expect(harness.shut.load(.acquire));
