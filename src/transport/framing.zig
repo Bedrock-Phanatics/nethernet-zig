@@ -1,7 +1,8 @@
 const std = @import("std");
 
 pub const maximum_segment_payload: usize = 262143;
-pub const maximum_segments: usize = 256;
+/// Vanilla sends at most 255 segments; the reassembler still accepts the full 256 a u8 countdown allows.
+pub const maximum_segments: usize = 255;
 pub const maximum_reliable_message_size: usize = maximum_segment_payload * maximum_segments;
 pub const default_maximum_message_size = 16 * 1024 * 1024;
 
@@ -263,13 +264,22 @@ test "unreliable messages ignore their segment header" {
     try std.testing.expectError(error.MalformedFragment, singleFragmentPayload(&.{9}, .unreliable));
 }
 
-test "reliable countdown supports 1 through 256 fragments" {
+test "reliable countdown sends up to 255 fragments and accepts 256" {
     const data: [maximum_segments + 1]u8 = @splat(42);
-    var storage: [maximum_segments]u8 = undefined;
+    var storage: [maximum_segments + 1]u8 = undefined;
     var reassembler = Reassembler.init(&storage, .reliable);
     var fragment: [2]u8 = undefined;
 
-    for ([_]usize{ 1, 2, 254, 255, 256 }) |count| {
+    for (0..256) |index| {
+        const result = try reassembler.push(&.{ @intCast(255 - index), 42 });
+        if (index == 255) {
+            try std.testing.expectEqualSlices(u8, &data, result.?);
+        } else {
+            try std.testing.expect(result == null);
+        }
+    }
+
+    for ([_]usize{ 1, 2, 254, 255 }) |count| {
         var encoder = try Encoder.init(data[0..count], .reliable, count, 1);
         for (0..count) |index| {
             const frame = (try encoder.next(&fragment)).?;
@@ -293,7 +303,7 @@ test "reliable countdown supports 1 through 256 fragments" {
     ));
 }
 
-test "reliable message-size boundaries match 256 segment representation" {
+test "reliable message-size boundaries match the segment limit" {
     try validateMessageSize(
         maximum_reliable_message_size,
         .reliable,
