@@ -1410,6 +1410,7 @@ test "non-trickle SDP requires a usable local ICE candidate" {
 }
 
 const unacked_poll_ms = 5;
+const close_linger_ms = 100;
 
 fn gracefulDrain(
     comptime T: type,
@@ -1423,6 +1424,8 @@ fn gracefulDrain(
     const started = std.Io.Clock.awake.now(io);
     const timeout = wake.deadline(started, timeout_ms);
     var shut = false;
+    var pending = false;
+    var linger = wake.deadline(started, 0);
     while (true) {
         const token = target.wakeup.prepare();
         const status = target.drainStatus();
@@ -1437,14 +1440,27 @@ fn gracefulDrain(
             .failed => return error.ConnectionClosed,
         }
         var wait = timeout;
-        if (!shut and try target.bufferedAmount() == 0) {
-            if (target.unackedAmount() == 0) {
-                target.shutdown();
-                shut = true;
-                continue;
+        if (!shut) {
+            const now = std.Io.Clock.awake.now(io);
+            if (try target.bufferedAmount() != 0) {
+                pending = true;
+            } else if (target.unackedAmount() != 0) {
+                pending = true;
+                // Acknowledgements raise no event, so look again shortly
+                wait = wake.earliest(timeout, wake.deadline(now, unacked_poll_ms));
+            } else {
+                // A client that sees the close in the same frame as the final message may never read it
+                if (pending) {
+                    pending = false;
+                    linger = wake.earliest(timeout, wake.deadline(now, close_linger_ms));
+                }
+                if (now.nanoseconds >= linger.deadline.raw.nanoseconds) {
+                    target.shutdown();
+                    shut = true;
+                    continue;
+                }
+                wait = linger;
             }
-            // Acknowledgements raise no event, so look again shortly
-            wait = wake.earliest(timeout, wake.deadline(std.Io.Clock.awake.now(io), unacked_poll_ms));
         }
         if (std.Io.Clock.awake.now(io).nanoseconds >= timeout.deadline.raw.nanoseconds)
             return error.Timeout;
@@ -1546,6 +1562,26 @@ test "graceful drain waits for SCTP to have everything acknowledged" {
     try draining.await(io);
     try std.testing.expect(harness.shut.load(.acquire));
     try std.testing.expect(harness.closed.load(.acquire));
+}
+
+test "graceful drain lingers after the final acknowledgement" {
+    const io = std.testing.io;
+    var harness: DrainHarness = .{ .io = io };
+    harness.unacked.store(1, .release);
+    var draining = try io.concurrent(DrainHarness.drain, .{ &harness, @as(u32, 1000) });
+    defer draining.cancel(io) catch {};
+    try io.sleep(.fromMilliseconds(4 * unacked_poll_ms), .awake);
+    const acked = std.Io.Clock.awake.now(io);
+    harness.unacked.store(0, .release);
+    try draining.await(io);
+    const elapsed = std.Io.Clock.awake.now(io).nanoseconds - acked.nanoseconds;
+    try std.testing.expect(elapsed >= close_linger_ms * std.time.ns_per_ms);
+
+    // Nothing left to deliver means nothing to linger for
+    var idle: DrainHarness = .{ .io = io };
+    const started = std.Io.Clock.awake.now(io);
+    try idle.drain(1000);
+    try std.testing.expect(std.Io.Clock.awake.now(io).nanoseconds - started.nanoseconds < close_linger_ms * std.time.ns_per_ms);
 }
 
 test "graceful drain force closes on timeout" {
