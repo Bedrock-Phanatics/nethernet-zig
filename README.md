@@ -102,6 +102,9 @@ close_notify, so the peer sees the close at once instead of when ICE consent exp
 | Negotiated | UDP | WebRTC, fixed with `port_range_begin`/`port_range_end` |
 | 7551 | UDP | LAN discovery |
 
+Like vanilla, a LAN host holds 7551 alone, since a shared port hands each unicast signal to just one of its
+sockets. A second host on the machine gets `error.AddressInUse`, and a client can bind port 0 instead.
+
 Every connection gets its own UDP socket by default. On Linux those sockets are served through
 epoll, so the receive thread's work no longer grows with the connection count: with 100 to 1000
 go-nethernet clients a socket per connection measured the same server CPU as the mux and better tail
