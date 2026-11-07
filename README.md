@@ -50,7 +50,9 @@ Keep the identity file across restarts so players only confirm the server once.
 A dial fails with `error.NoAnswer` when no answer arrives within `negotiation_timeout_ms` of sending the
 offer (10 seconds, like vanilla), and with `error.IceConnectFailed` when ICE never finds a path, so a
 caller can fall back to another transport. HTTP joins the server refuses fail with `error.Forbidden`,
-`error.ServiceUnavailable` or `error.HttpFailure`.
+`error.ServiceUnavailable` or `error.HttpFailure`. Once the remote description is set, ICE, DTLS and SCTP
+get `connection_timeout_ms` (15 seconds, a vanilla client's ICE window), and `request_timeout_ms` (20
+seconds) bounds a whole HTTP join. LAN hosts send their candidates in the answer, as vanilla hosts do.
 
 
 | API | Purpose |
@@ -87,7 +89,9 @@ until half of it is drained, so a slow reader throttles its sender instead of lo
 `callbackStats().receive_pauses` counts these pauses. If the peer closes the whole connection while
 reading is paused, what SCTP had already accepted is handed over on the close into a spill queue
 (`spill_bytes`, `spill_entries`) and read before the connection reports closed;
-`callbackStats().spilled_messages` counts what went through it. Tearing a connection down sends a DTLS
+`callbackStats().spilled_messages` counts what went through it. Should the spill fill as well, the
+connection fails behind what it already took, which is still read in order, and
+`callbackStats().spill_overflows` counts it. Tearing a connection down sends a DTLS
 close_notify, so the peer sees the close at once instead of when ICE consent expires.
 
 ## Networking
