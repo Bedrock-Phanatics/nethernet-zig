@@ -15,7 +15,7 @@ test "LAN hosts share UDP 7551 and rebind after close" {
     if (before) |count| try std.testing.expect((try processHandleCount()).? <= count);
 }
 
-fn processHandleCount() !?u32 {
+pub fn processHandleCount() !?u32 {
     if (@import("builtin").os.tag != .windows) return null;
     const windows = std.os.windows;
     const kernel32 = struct {

@@ -584,3 +584,28 @@ test "ICE UDP mux serves concurrent connections from one server port" {
         try std.testing.expectEqualSlices(u8, &payload, message.data);
     }
 }
+
+test "repeated peers that gather and close leak no handles" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    const buffer = try allocator.alloc(u8, 64 * 1024);
+    defer allocator.free(buffer);
+
+    try peerCycle(io, allocator, buffer);
+    const before = try @import("lan.zig").processHandleCount() orelse return error.SkipZigTest;
+    for (0..64) |_| try peerCycle(io, allocator, buffer);
+    // Native threads come and go, so allow some slack, but not a handle per cycle.
+    try std.testing.expect((try @import("lan.zig").processHandleCount()).? < before + 32);
+}
+
+fn peerCycle(io: std.Io, allocator: std.mem.Allocator, buffer: []u8) !void {
+    const peer = try Peer.create(allocator, io, .{ .disable_trickle = true, .bind_address = "127.0.0.1" });
+    defer peer.destroy();
+    try peer.offer();
+    const started = std.Io.Clock.awake.now(io);
+    while (true) {
+        if (started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds() > 15_000) return error.Timeout;
+        if (try peer.poll(buffer)) |event| if (event == .offer) return;
+        try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    }
+}

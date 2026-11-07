@@ -90,7 +90,8 @@ if ($Backend -eq 'MbedTLS') {
 
 $patchNames = @('bounds', 'threadpool', 'dtls-timer', 'sctp-timer-wheel', 'juice-timers',
     'sctp-receive-pause', 'dtls-incoming', 'juice-mux-routing', 'sctp-unacked', 'closed-callbacks',
-    'sctp-close-drain', 'dtls-close-notify', 'sctp-inline-recv', 'juice-epoll', 'remote-description-first')
+    'sctp-close-drain', 'dtls-close-notify', 'sctp-inline-recv', 'juice-epoll', 'remote-description-first',
+    'juice-registry-mutex')
 if ($Backend -eq 'MbedTLS') {
     $patchNames += 'mbedtls-link-order'
 }

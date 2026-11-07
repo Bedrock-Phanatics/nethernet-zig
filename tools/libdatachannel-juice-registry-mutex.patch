@@ -1,0 +1,20 @@
+diff --git a/deps/libjuice/src/conn.c b/deps/libjuice/src/conn.c
+index 307d5b2..792f000 100644
+--- a/deps/libjuice/src/conn.c
++++ b/deps/libjuice/src/conn.c
+@@ -87,6 +87,7 @@ static int acquire_registry(conn_mode_entry_t *entry, udp_socket_config_t *confi
+ 		if (entry->registry_init_func(registry, config)) {
+ 			JLOG_FATAL("Registry initialization failed");
+ 			mutex_unlock(&registry->mutex);
++			mutex_destroy(&registry->mutex);
+ 			free(registry->agents);
+ 			free(registry);
+ 			return -1;
+@@ -119,6 +120,7 @@ static void release_registry(conn_mode_entry_t *entry, conn_registry_t *registry
+ 			entry->registry_cleanup_func(registry);
+ 
+ 		entry->registry = NULL;
++		mutex_destroy(&registry->mutex);
+ 		free(registry->agents);
+ 		free(registry);
+ 		return;
