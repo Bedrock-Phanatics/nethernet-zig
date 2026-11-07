@@ -243,8 +243,9 @@ pub const Discovery = struct {
         }
         self.reliable_windows.expire(now);
 
+        // Like vanilla, a destination that can't be reached right now is tried again next tick.
         if (self.options.broadcast_endpoint) |address| {
-            try self.request(address);
+            self.request(address) catch |err| self.keepCancel(err);
         }
     }
 
@@ -277,7 +278,7 @@ pub const Discovery = struct {
             // Requests can come from spoofed sources, so a reply that fails to send is dropped
             const data = self.advertisement orelse return null;
             if (self.replies.take(self.io))
-                self.write(.{ .response = data }, message.from) catch {}
+                self.write(.{ .response = data }, message.from) catch |err| self.keepCancel(err)
             else
                 self.dropped_replies +|= 1;
             return null;
@@ -341,6 +342,11 @@ pub const Discovery = struct {
         return signal;
     }
 
+    /// A best-effort send drops its error, but a cancel that landed in it still has to reach the caller.
+    fn keepCancel(self: *Discovery, err: anyerror) void {
+        if (err == error.Canceled) self.io.recancel();
+    }
+
     /// Uses its own buffers, as the shared ones still hold the message being delivered.
     fn acknowledge(self: *Discovery, address: std.Io.net.IpAddress, sender_id: u64, packet: codec.Reliable) void {
         var scratch: [48]u8 = undefined;
@@ -351,7 +357,7 @@ pub const Discovery = struct {
             .sequence = packet.sequence,
         } }, self.id, &scratch, &wire) catch unreachable;
         // Like replies to requests, the source may be spoofed, so a failed send is dropped.
-        self.socket.send(self.io, &address, encoded) catch {};
+        self.socket.send(self.io, &address, encoded) catch |err| self.keepCancel(err);
     }
 
     pub fn beginOperation(self: *Discovery) !void {
@@ -414,7 +420,16 @@ pub const Discovery = struct {
         while (true) {
             self.consumed.reset();
             const message = self.socket.receive(self.io, self.buffers[codec.maximum_datagram * 3 ..]) catch |err| {
-                if (err == error.Canceled) return error.Canceled;
+                switch (err) {
+                    error.Canceled => return error.Canceled,
+                    // ICMP errors for an earlier send, such as a reply to a client that already quit, leave the socket usable.
+                    error.PortUnreachable, error.ConnectionResetByPeer, error.ConnectionTimedOut, error.MessageOversize => continue,
+                    error.NetworkDown, error.SystemResources => {
+                        try std.Io.sleep(self.io, .fromMilliseconds(100), .awake);
+                        continue;
+                    },
+                    else => {},
+                }
                 self.receive_mutex.lockUncancelable(self.io);
                 self.receive_error = err;
                 self.notify();
@@ -621,6 +636,34 @@ test "reliable LAN signals are acknowledged every time and delivered once" {
     try client.write(.{ .acknowledgement = .{ .recipient_id = 2, .nonce = 5, .sequence = 4 } }, server.socket.address);
     try std.testing.expectEqual(null, try server.poll(1000));
     try std.testing.expectError(error.Timeout, client.receive(100));
+}
+
+test "unreachable request destinations don't stop discovery" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const address = try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0");
+
+    const server = try Discovery.listen(allocator, io, address, .{ .network_id = 2 });
+    defer server.destroy();
+    const client = try Discovery.listen(allocator, io, address, .{ .network_id = 1 });
+    defer client.destroy();
+    const gone = try Discovery.listen(allocator, io, address, .{});
+    const closed_port = gone.socket.address;
+    gone.destroy();
+
+    // A destination the socket can't reach fails the send, a closed port answers with ICMP.
+    for ([_]std.Io.net.IpAddress{ try .parseLiteral("[::1]:7551"), closed_port }) |destination| {
+        client.options.broadcast_endpoint = destination;
+        client.last_tick = client.last_tick.subDuration(.fromMilliseconds(2000));
+        _ = try client.poll(100);
+        _ = try client.poll(100);
+    }
+
+    try server.setServerData(.{ .server_name = "Zig" });
+    try client.request(server.socket.address);
+    _ = try server.poll(1000);
+    _ = try client.poll(1000);
+    try std.testing.expect(client.servers.contains(2));
 }
 
 test "identical discovery responses do not allocate again" {
