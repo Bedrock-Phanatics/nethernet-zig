@@ -289,6 +289,7 @@ pub const Peer = struct {
     receive_pauses: u64 = 0,
     spilled_messages: u64 = 0,
     spill_overflows: u64 = 0,
+    active_sends: usize = 0,
     segment_payload: std.atomic.Value(usize) = .init(0),
     /// Awake-clock nanoseconds when the last send finished, zero before any.
     last_send: std.atomic.Value(i64) = .init(0),
@@ -421,11 +422,13 @@ pub const Peer = struct {
         return gracefulDrain(Peer, self, self.io, timeout_ms);
     }
 
+    /// Also waits out a send already under way, so a drain sees what it sent.
     fn stopSends(self: *Peer) void {
         self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         self.send_stopped = true;
         self.notify();
-        self.mutex.unlock(self.io);
+        while (self.active_sends != 0) self.native_condition.waitUncancelable(self.io, &self.mutex);
     }
 
     fn lastSend(self: *Peer) ?std.Io.Timestamp {
@@ -581,7 +584,26 @@ pub const Peer = struct {
     fn acquireReadyChannels(self: *Peer) ?NativeHandles {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+        return self.acquireReadyChannelsLocked();
+    }
 
+    fn acquireSend(self: *Peer) ?NativeHandles {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        const handles = self.acquireReadyChannelsLocked() orelse return null;
+        self.active_sends += 1;
+        return handles;
+    }
+
+    fn releaseSend(self: *Peer) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        self.active_sends -= 1;
+        self.active_native_queries -= 1;
+        if (self.active_sends == 0 or self.active_native_queries == 0) self.native_condition.broadcast(self.io);
+    }
+
+    fn acquireReadyChannelsLocked(self: *Peer) ?NativeHandles {
         if (self.stopping or self.send_stopped or
             self.state != .connected or self.id < 0)
         {
@@ -935,10 +957,10 @@ pub const Peer = struct {
     ) !void {
         const zone = trace.zone(@src(), "peer.send");
         defer zone.end();
-        const handles = self.acquireReadyChannels() orelse
+        const handles = self.acquireSend() orelse
             return error.InvalidState;
         var handles_acquired = true;
-        defer if (handles_acquired) self.releaseNativeHandles();
+        defer if (handles_acquired) self.releaseSend();
 
         const channels = handles.channels;
         if (!self.channelsOpen(handles)) return error.InvalidState;
@@ -987,7 +1009,7 @@ pub const Peer = struct {
                 @intCast(fragment.len),
             )) catch |err| {
                 // A partly sent message would corrupt the stream, but what already arrived can still be read
-                self.releaseNativeHandles();
+                self.releaseSend();
                 handles_acquired = false;
                 self.stopSends();
                 return err;
@@ -2436,6 +2458,32 @@ test "an overflowing spill keeps what it already took, in order" {
     try std.testing.expectEqual(@as(u64, 1), peer.callbackStats().spill_overflows);
     for (0..4) |i| try std.testing.expectEqual(@as(u8, @intCast(i)), (try peer.poll(&output)).?.reliable_fragment[1]);
     try std.testing.expectError(error.ConnectionClosed, peer.poll(&output));
+}
+
+test "stopping sends waits for one already under way" {
+    const io = std.testing.io;
+    const peer = try Peer.create(std.testing.allocator, io, .{});
+    defer peer.destroy();
+    peer.state = .connected;
+    _ = peer.acquireSend().?;
+    var released = false;
+    defer if (!released) peer.releaseSend();
+
+    const Stop = struct {
+        fn run(target: *Peer, done: *std.atomic.Value(bool)) void {
+            target.stopSends();
+            done.store(true, .release);
+        }
+    };
+    var done: std.atomic.Value(bool) = .init(false);
+    var stopping = try io.concurrent(Stop.run, .{ peer, &done });
+    try std.Io.sleep(io, .fromMilliseconds(50), .awake);
+    try std.testing.expect(!done.load(.acquire));
+    peer.releaseSend();
+    released = true;
+    stopping.await(io);
+    try std.testing.expect(done.load(.acquire));
+    try std.testing.expect(peer.acquireSend() == null);
 }
 
 test "signals never spill and a disabled spill fails the peer as before" {
