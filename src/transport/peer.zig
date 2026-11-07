@@ -131,6 +131,8 @@ pub const CallbackStats = struct {
     dropped_unreliable_packets: u64,
     receive_pauses: u64,
     spilled_messages: u64,
+    /// Reliable messages a full spill turned away, after which the connection fails behind what it kept.
+    spill_overflows: u64,
     queue_high_water_bytes: usize,
     queue_high_water_entries: usize,
 };
@@ -215,7 +217,8 @@ pub const Options = struct {
     unreliable_reserve_bytes: usize = framing.maximum_segment_payload + 1,
     unreliable_reserve_entries: usize = 1,
     spill_bytes: usize = 1024 * 1024,
-    spill_entries: usize = 1024,
+    /// SCTP accounts for small messages with overhead, so a paused 1 MiB receive window holds a few thousand.
+    spill_entries: usize = 4096,
 };
 
 /// Runs on native threads with the peer locked, so keep it short and never call into the peer from it.
@@ -285,6 +288,7 @@ pub const Peer = struct {
     receive_paused: bool = false,
     receive_pauses: u64 = 0,
     spilled_messages: u64 = 0,
+    spill_overflows: u64 = 0,
     segment_payload: std.atomic.Value(usize) = .init(0),
     /// Awake-clock nanoseconds when the last send finished, zero before any.
     last_send: std.atomic.Value(i64) = .init(0),
@@ -532,6 +536,7 @@ pub const Peer = struct {
             .dropped_unreliable_packets = self.dropped_unreliable_packets,
             .receive_pauses = self.receive_pauses,
             .spilled_messages = self.spilled_messages,
+            .spill_overflows = self.spill_overflows,
             .queue_high_water_bytes = self.queue.high_water_bytes,
             .queue_high_water_entries = self.queue.high_water_entries,
         };
@@ -1099,11 +1104,16 @@ pub const Peer = struct {
             if (tag < 3) self.queued_signals += 1;
         } else |_| if (tag == 2 and self.channels_open) {
             // A candidate gathered after the channels opened is of no use, so a full ring just drops it.
+        } else if (tag >= 3 and self.spill != null) {
+            // Nothing after this is taken, so what's queued is still an unbroken prefix worth reading.
+            self.spill_overflows +|= 1;
+            self.state = .failed;
+            self.drain_queued_on_close = true;
         } else {
             self.state = .failed;
             self.drain_queued_on_close = false;
         }
-        if (tag >= 3) self.pauseReceiveLocked();
+        self.pauseReceiveLocked();
         self.notify();
     }
 
@@ -1137,15 +1147,21 @@ pub const Peer = struct {
     // The native calls stay under the lock so a pause and resume cannot reorder.
     fn pauseReceiveLocked(self: *Peer) void {
         if (self.receive_paused or self.id < 0 or
-            (self.queue.bytes.len - self.queue.used_bytes >= maximum_sctp_message and
+            (!self.spilling() and
+                self.queue.bytes.len - self.queue.used_bytes >= maximum_sctp_message and
                 self.queue.entries.len - self.queue.count >= 2)) return;
         self.receive_paused = true;
         self.receive_pauses +|= 1;
         _ = c.rtcSetSctpReceivePaused(self.id, true);
     }
 
+    // New fragments queue behind the spill, so reading resumes only once it's empty.
+    fn spilling(self: *const Peer) bool {
+        return if (self.spill) |spill| spill.count != 0 else false;
+    }
+
     fn resumeReceiveLocked(self: *Peer) void {
-        if (!self.receive_paused or self.stopping or self.id < 0 or
+        if (!self.receive_paused or self.stopping or self.id < 0 or self.spilling() or
             self.queue.bytes.len - self.queue.used_bytes < @max(self.queue.bytes.len / 2, maximum_sctp_message) or
             self.queue.entries.len - self.queue.count < @max(self.queue.entries.len / 2, 2)) return;
         self.receive_paused = false;
@@ -2366,7 +2382,60 @@ test "a close hands the ring more than it holds, kept in order and bounded" {
     try std.testing.expectEqual(State.new, peer.getState());
     peer.enqueue(3, &.{ 0, 9 });
     try std.testing.expectEqual(State.failed, peer.getState());
-    try std.testing.expect(!peer.drain_queued_on_close);
+    try std.testing.expect(peer.drain_queued_on_close);
+    try std.testing.expectEqual(@as(u64, 1), peer.callbackStats().spill_overflows);
+}
+
+test "receive stays paused while the spill holds data and signals can pause it" {
+    const peer = try Peer.create(std.testing.allocator, std.testing.io, .{
+        .queue_bytes = 2 * maximum_sctp_message,
+        .queue_entries = 4,
+        .spill_bytes = 2 * maximum_sctp_message,
+        .spill_entries = 4,
+    });
+    defer peer.destroy();
+    var output: [16]u8 = undefined;
+
+    peer.channels_open = true;
+    peer.enqueue(3, &.{ 0, 0 });
+    peer.enqueue(3, &.{ 0, 1 });
+    try std.testing.expect(!peer.receive_paused);
+    // A late local candidate takes ring space too, so it has to pause as well.
+    peer.enqueue(2, "candidate");
+    try std.testing.expect(peer.receive_paused);
+    _ = try peer.poll(&output);
+    _ = try peer.poll(&output);
+    _ = try peer.poll(&output);
+    try std.testing.expect(!peer.receive_paused);
+
+    for (2..8) |i| peer.enqueue(3, &.{ 0, @intCast(i) });
+    try std.testing.expectEqual(@as(usize, 2), peer.spill.?.count);
+    // Draining the ring alone must not resume, or every new fragment lands in the unpaused spill.
+    for (2..6) |i| {
+        try std.testing.expectEqual(@as(u8, @intCast(i)), (try peer.poll(&output)).?.reliable_fragment[1]);
+        try std.testing.expect(peer.receive_paused);
+    }
+    try std.testing.expectEqual(@as(u8, 6), (try peer.poll(&output)).?.reliable_fragment[1]);
+    try std.testing.expect(peer.receive_paused);
+    try std.testing.expectEqual(@as(u8, 7), (try peer.poll(&output)).?.reliable_fragment[1]);
+    try std.testing.expect(!peer.receive_paused);
+}
+
+test "an overflowing spill keeps what it already took, in order" {
+    const peer = try Peer.create(std.testing.allocator, std.testing.io, .{
+        .queue_bytes = 2 * maximum_sctp_message,
+        .queue_entries = 2,
+        .spill_bytes = 2 * maximum_sctp_message,
+        .spill_entries = 2,
+    });
+    defer peer.destroy();
+    var output: [16]u8 = undefined;
+
+    for (0..6) |i| peer.enqueue(3, &.{ 0, @intCast(i) });
+    try std.testing.expectEqual(State.failed, peer.getState());
+    try std.testing.expectEqual(@as(u64, 1), peer.callbackStats().spill_overflows);
+    for (0..4) |i| try std.testing.expectEqual(@as(u8, @intCast(i)), (try peer.poll(&output)).?.reliable_fragment[1]);
+    try std.testing.expectError(error.ConnectionClosed, peer.poll(&output));
 }
 
 test "signals never spill and a disabled spill fails the peer as before" {
