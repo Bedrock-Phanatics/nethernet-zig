@@ -14,15 +14,20 @@ import (
 	"time"
 
 	"github.com/df-mc/go-nethernet"
+	"github.com/df-mc/go-nethernet/discovery"
 	"github.com/df-mc/go-nethernet/endpoint"
 )
 
 // Follows the vanilla join flow: https probe, http probe, signed offer, then echoes on both channels.
 func main() {
 	if len(os.Args) != 4 {
-		fail(fmt.Errorf("usage: interop host:port reliable-sizes unreliable-sizes"))
+		fail(fmt.Errorf("usage: interop host:port|lan:network-id reliable-sizes unreliable-sizes"))
 	}
 	host := os.Args[1]
+	if id, ok := strings.CutPrefix(host, "lan:"); ok {
+		run(dialLan(id))
+		return
+	}
 
 	probe := &http.Client{Timeout: 3 * time.Second}
 	start := time.Now()
@@ -58,9 +63,47 @@ func main() {
 	if err != nil {
 		fail(err)
 	}
-	defer conn.Close()
 	fmt.Printf("connected in %dms\n", time.Since(start).Milliseconds())
+	run(conn)
+}
 
+// Finds the world through LAN discovery like vanilla, then dials it over the same socket.
+func dialLan(id string) *nethernet.Conn {
+	networkID, err := strconv.ParseUint(id, 10, 64)
+	if err != nil {
+		fail(err)
+	}
+	// The host holds 7551 on this machine, and a second socket there would take its unicasts.
+	d, err := discovery.ListenConfig{}.Listen(":0")
+	if err != nil {
+		fail(err)
+	}
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		if data, ok := d.Responses()[networkID]; ok {
+			server := &discovery.ServerData{}
+			if err := server.UnmarshalBinary(data); err != nil {
+				fail(err)
+			}
+			fmt.Printf("discovered %q\n", server.ServerName)
+			break
+		}
+		if time.Now().After(deadline) {
+			fail(fmt.Errorf("network %d not discovered", networkID))
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	start := time.Now()
+	conn, err := (nethernet.Dialer{}).DialContext(ctx, id, d)
+	if err != nil {
+		fail(err)
+	}
+	fmt.Printf("connected in %dms\n", time.Since(start).Milliseconds())
+	return conn
+}
+
+func run(conn *nethernet.Conn) {
+	defer conn.Close()
 	echo(conn, os.Args[2], nethernet.MessageReliabilityReliable)
 	echo(conn, os.Args[3], nethernet.MessageReliabilityUnreliable)
 	if _, err := conn.Write([]byte("ack")); err != nil {

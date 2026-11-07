@@ -5,6 +5,7 @@ go 1.24.0
 require github.com/df-mc/go-nethernet v1.0.27-0.20261102075145-0e1727705185
 
 require (
+	github.com/andreburgaud/crypt2go v1.8.0 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/pion/datachannel v1.6.3 // indirect

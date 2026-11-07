@@ -17,3 +17,8 @@ done
 
 zig-out/bin/interop 127.0.0.1:18750 1,1200,262143,262144,1048576 1,1200,8192
 wait $server
+
+zig-out/bin/server --lan &
+server=$!
+zig-out/bin/interop lan:7 1,1200,262143,262144,1048576 1,1200,8192
+wait $server
