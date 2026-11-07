@@ -223,6 +223,8 @@ pub const Listener = struct {
         }
 
         var connection_options = self.options.connection;
+        // Vanilla hosts send their candidates in the answer, a lost LAN candidate packet can't stall the join.
+        connection_options.native.disable_trickle = true;
 
         var local_buf: [20]u8 = undefined;
         connection_options.local_network_id = try std.fmt.bufPrint(

@@ -201,6 +201,40 @@ test "LAN host bounds malformed traffic and server count" {
     try std.testing.expectEqual(@as(u64, 1), server.dropped_servers);
 }
 
+test "LAN hosts send their candidates in the answer" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const loopback: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    const server_discovery = try Discovery.listen(allocator, io, loopback, .{ .network_id = 22 });
+    defer server_discovery.destroy();
+    const client_discovery = try Discovery.listen(allocator, io, loopback, .{ .network_id = 11 });
+    defer client_discovery.destroy();
+
+    try server_discovery.setServerData(.{ .server_name = "LAN" });
+    try client_discovery.request(server_discovery.socket.address);
+    _ = try server_discovery.poll(1000);
+    _ = try client_discovery.poll(1000);
+    try std.testing.expect(client_discovery.servers.contains(22));
+
+    const listener = try Listener.listen(allocator, server_discovery, .{ .connection = .{ .allow_anonymous = true } });
+    defer listener.destroy();
+    const client = try nethernet.Connection.create(allocator, io, .client, 9, "22", .{ .local_network_id = "11" });
+    defer client.destroy();
+    try client.start();
+
+    const started = std.Io.Clock.awake.now(io);
+    while (true) {
+        if (started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds() > 10_000) return error.Timeout;
+        if (try client.pollNegotiation()) |event| try client_discovery.send(event.signal);
+        _ = try listener.pollAccept();
+        const signal = try client_discovery.poll(10) orelse continue;
+        try std.testing.expect(!std.mem.eql(u8, signal.kind, nethernet.Signal.candidate));
+        if (!std.mem.eql(u8, signal.kind, nethernet.Signal.answer)) continue;
+        try std.testing.expect(std.mem.indexOf(u8, signal.data, "a=candidate:") != null);
+        break;
+    }
+}
+
 test "LAN listener shares an external wakeup with pollAccept" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
