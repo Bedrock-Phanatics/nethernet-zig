@@ -258,6 +258,8 @@ pub const Listener = struct {
         connection: *conn.Connection,
         err: anyerror,
     ) !void {
+        // The peer already gave up, answering its error with another is pointless.
+        if (err == error.RemoteFailure) return;
         const code: []const u8 = switch (err) {
             error.InvalidIdentity,
             error.IdentityNotAllowed,
@@ -270,6 +272,8 @@ pub const Listener = struct {
             error.MalformedSignal,
             error.WebRtcFailure,
             => "13",
+
+            error.NoLocalIceCandidate => "5",
 
             else => "35",
         };
