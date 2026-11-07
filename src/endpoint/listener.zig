@@ -35,7 +35,8 @@ pub const Options = struct {
     maximum_connections_per_address: ?usize = 8,
     maximum_http_workers: usize = 32,
     maximum_pending_accepts: usize = 64,
-    request_timeout_ms: u32 = 15000,
+    /// Bounds the whole join, from the request to an established connection.
+    request_timeout_ms: u32 = 20000,
     /// How long a client gets to deliver its request, out of `request_timeout_ms`. The rest is for negotiation.
     request_read_timeout_ms: u32 = 5000,
     status_provider: ?StatusProvider = null,

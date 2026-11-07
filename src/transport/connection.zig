@@ -176,7 +176,8 @@ pub const Options = struct {
     maximum_message_size: usize = framing.default_maximum_message_size,
     /// How long a dial waits for the answer after sending its offer, vanilla gives up after 10 seconds.
     negotiation_timeout_ms: u32 = 10000,
-    connection_timeout_ms: u32 = 10000,
+    /// How long ICE, DTLS and SCTP get once the remote description is set, vanilla clients give ICE 15 seconds.
+    connection_timeout_ms: u32 = 15000,
     reassembly_timeout_ms: u32 = 30000,
     graceful_shutdown_timeout_ms: u32 = 2000,
     maximum_remote_candidates: usize = 32,
