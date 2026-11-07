@@ -128,7 +128,8 @@ pub const Discovery = struct {
             .options = actual_options,
             .codec = codec.Codec.init(),
             .buffers = buffers,
-            .last_tick = std.Io.Clock.awake.now(io),
+            // Like vanilla, the first request goes out at once rather than a tick later.
+            .last_tick = std.Io.Clock.awake.now(io).subDuration(.fromMilliseconds(2000)),
         };
 
         try self.servers.ensureTotalCapacity(

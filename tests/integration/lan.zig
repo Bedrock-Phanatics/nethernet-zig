@@ -179,6 +179,7 @@ test "LAN host bounds malformed traffic and server count" {
     defer server.destroy();
     const client = try Discovery.listen(std.testing.allocator, io, .{ .ip4 = .loopback(0) }, .{ .network_id = 11 });
     defer client.destroy();
+    client.options.broadcast_endpoint = null;
 
     const malformed: [65507]u8 = @splat(0);
     for ([_]usize{ 0, 1, 31, malformed.len }) |length| {
