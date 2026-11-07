@@ -5,12 +5,12 @@ const ConnectionOptions = nethernet.ConnectionOptions;
 const Discovery = nethernet.Discovery;
 const Listener = nethernet.LanListener;
 
-test "LAN hosts share UDP 7551 and rebind after close" {
+test "LAN hosts own UDP 7551 alone and rebind after close" {
     const before = try processHandleCount();
     {
         var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
         defer threaded.deinit();
-        try sharedBindCycles(threaded.io());
+        try exclusiveBindCycles(threaded.io());
     }
     if (before) |count| try std.testing.expect((try processHandleCount()).? <= count);
 }
@@ -27,34 +27,35 @@ pub fn processHandleCount() !?u32 {
     return count;
 }
 
-fn sharedBindCycles(io: std.Io) !void {
+fn exclusiveBindCycles(io: std.Io) !void {
     const address = try std.Io.net.IpAddress.parseLiteral("0.0.0.0:7551");
     const destination = try std.Io.net.IpAddress.parseLiteral("127.0.0.1:7551");
     const client = try Discovery.listen(std.testing.allocator, io, .{ .ip4 = .loopback(0) }, .{ .network_id = 1 });
     defer client.destroy();
+    client.options.broadcast_endpoint = null;
     for (0..16) |_| {
-        const first = try Discovery.listen(std.testing.allocator, io, address, .{ .network_id = 2 });
-        defer first.destroy();
-        const second = try Discovery.listen(std.testing.allocator, io, address, .{ .network_id = 3 });
-        defer second.destroy();
-        try std.testing.expectEqual(@as(u16, 7551), first.socket.address.getPort());
-        try std.testing.expectEqual(@as(u16, 7551), second.socket.address.getPort());
+        const host = try Discovery.listen(std.testing.allocator, io, address, .{ .network_id = 2 });
+        defer host.destroy();
+        try std.testing.expectEqual(@as(u16, 7551), host.socket.address.getPort());
+        // A shared port would hand unicast signals to just one of its sockets.
+        try std.testing.expectError(error.AddressInUse, Discovery.listen(std.testing.allocator, io, address, .{ .network_id = 3 }));
+        try host.setServerData(.{ .server_name = "host" });
         try client.request(destination);
-        _ = try first.poll(100);
-        _ = try second.poll(100);
+        _ = try host.poll(100);
+        _ = try client.poll(100);
         // Requests alone don't locate a peer, like vanilla.
-        try std.testing.expect(!first.servers.contains(1) and !second.servers.contains(1));
-        first.close();
-        first.close();
-        second.close();
+        try std.testing.expect(!host.servers.contains(1));
+        try std.testing.expect(client.servers.contains(2));
+        host.close();
+        host.close();
     }
 }
 
-test "LAN shared bind cleans up allocation failures" {
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, sharedBindAllocationFailure, .{});
+test "LAN bind cleans up allocation failures" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, bindAllocationFailure, .{});
 }
 
-fn sharedBindAllocationFailure(allocator: std.mem.Allocator) !void {
+fn bindAllocationFailure(allocator: std.mem.Allocator) !void {
     const discovery = try Discovery.listen(allocator, std.testing.io, .{ .ip4 = .loopback(7551) }, .{});
     defer discovery.destroy();
     try discovery.setServerData(.{ .server_name = "allocation failure" });
