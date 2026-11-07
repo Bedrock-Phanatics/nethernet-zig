@@ -227,12 +227,11 @@ fn readHeader(payload: []const u8) !Header {
     if (payload.len < header_size) return error.MalformedPacket;
     // Vanilla caps the declared size of long messages but sends the rest, so only a short payload is malformed.
     if (std.mem.readInt(u16, payload[0..2], .little) > payload.len) return error.MalformedPacket;
-    const version = std.mem.readInt(u64, payload[12..20], .little);
-    if (version > reliable_version) return error.UnsupportedVersion;
+    // Like the reference, requests, responses and messages ignore the version, only reliable packets need it.
     return .{
         .id = std.mem.readInt(u16, payload[2..4], .little),
         .sender_id = std.mem.readInt(u64, payload[4..12], .little),
-        .version = version,
+        .version = std.mem.readInt(u64, payload[12..20], .little),
     };
 }
 
@@ -460,15 +459,16 @@ test "invalid reliable packets and acknowledgements are rejected" {
     try std.testing.expectError(error.MalformedPacket, decodePayload(payload[0..43]));
 }
 
-test "protocol versions above one are unsupported and version one keeps legacy packets" {
+test "legacy packets decode whatever version they carry" {
     var payload: [32 + 4]u8 = @splat(0);
-    _ = writeMessage(&payload, 1, 7, .{ .recipient_id = 9, .data = "Ping" });
-    try std.testing.expectEqualStrings("Ping", (try decodePayload(&payload)).packet.message.data);
+    for ([_]u64{ 0, 1, 2, std.math.maxInt(u64) }) |version| {
+        _ = writeMessage(&payload, version, 7, .{ .recipient_id = 9, .data = "Ping" });
+        try std.testing.expectEqualStrings("Ping", (try decodePayload(&payload)).packet.message.data);
+    }
 
-    std.mem.writeInt(u64, payload[12..20], 2, .little);
-    try std.testing.expectError(error.UnsupportedVersion, decodePayload(&payload));
-    std.mem.writeInt(u64, payload[12..20], std.math.maxInt(u64), .little);
-    try std.testing.expectError(error.UnsupportedVersion, decodePayload(&payload));
+    var request: [header_size]u8 = undefined;
+    writeHeader(&request, header_size, 0, 7, 2);
+    try std.testing.expectEqual(Packet.request, (try decodePayload(&request)).packet);
 }
 
 test "declared message length keeps vanilla trailing signal bytes" {
