@@ -19,6 +19,7 @@ pub const ErrorCode = @import("protocol/error_code.zig").ErrorCode;
 pub const signal = @import("protocol/signal.zig");
 pub const Signal = signal.Signal;
 pub const framing = @import("transport/framing.zig");
+pub const advertise = @import("transport/advertise.zig");
 pub const Reliability = framing.Reliability;
 
 test {

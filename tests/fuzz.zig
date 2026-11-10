@@ -45,6 +45,9 @@ pub fn exercise(input: []u8) void {
 
     _ = identity_file.decode(input) catch {};
 
+    _ = core.advertise.Addresses.parse(&.{input}) catch {};
+    addCandidates(input);
+
     for ([_]identity.IdentityKind{ .server, .client }) |kind| {
         _ = identity.claimPublicKey(allocator, input, 1000, kind) catch {};
         if (sdp_identity.verify(allocator, input, 1000, kind, null)) |_| {} else |_| {}
@@ -60,6 +63,56 @@ pub fn exercise(input: []u8) void {
             std.debug.assert(std.mem.eql(u8, signal.network_id, reparsed.network_id));
         } else |_| {}
     } else |_| {}
+}
+
+const advertised_addresses = [_][]const u8{ "203.0.113.7", "2001:db8::7" };
+
+fn addCandidates(input: []const u8) void {
+    const allocator = std.testing.allocator;
+    const advertised = core.advertise.Addresses.parse(&advertised_addresses) catch unreachable;
+    const result = core.advertise.addCandidates(allocator, input, advertised.slice()) catch return;
+    defer allocator.free(result.sdp);
+
+    // Taking the added lines out gives back the input byte for byte, and each names a configured address.
+    var added: usize = 0;
+    var original: usize = 0;
+    var lines = std.mem.splitScalar(u8, result.sdp, '\n');
+    while (lines.next()) |raw| {
+        if (std.mem.startsWith(u8, raw, "a=candidate:adv")) {
+            added += 1;
+            var fields = std.mem.tokenizeScalar(u8, raw, ' ');
+            for (0..4) |_| _ = fields.next().?;
+            const address = std.Io.net.IpAddress.parse(fields.next().?, 0) catch unreachable;
+            var listed = false;
+            for (advertised.slice()) |allowed| listed = listed or allowed.eql(&address);
+            std.debug.assert(listed);
+            continue;
+        }
+        const line = if (lines.index != null) result.sdp[lines.index.? - raw.len - 1 .. lines.index.?] else raw;
+        std.debug.assert(std.mem.eql(u8, input[original..][0..line.len], line));
+        original += line.len;
+    }
+    std.debug.assert(original == input.len and added == result.added);
+}
+
+test "advertised candidates survive mutations of a gathered answer" {
+    const answer =
+        "v=0\r\no=rtc 1 0 IN IP4 127.0.0.1\r\na=fingerprint:sha-256 AB:CD\r\n" ++
+        "m=application 19134 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 172.19.0.2\r\n" ++
+        "a=candidate:1 1 UDP 2122317823 172.19.0.2 19134 typ host\r\n" ++
+        "a=candidate:2 1 UDP 2122317567 fdba:17c8:6c95::1 19134 typ host\r\n" ++
+        "a=candidate:3 1 UDP 1686052607 203.0.113.7 61000 typ srflx raddr 172.19.0.2 rport 19134\r\n" ++
+        "a=candidate:4 1 UDP 16777215 192.0.2.9 3478 typ relay raddr 0.0.0.0 rport 0\r\n" ++
+        "a=end-of-candidates\r\n";
+    const hostile = [_]u8{ 0, ' ', '\r', '\n', '\t', '0', '1', '9', ':', '.', '%', 'a', 'f', 0xff };
+    for (0..answer.len) |offset| {
+        for (hostile) |value| {
+            var damaged = answer.*;
+            damaged[offset] = value;
+            addCandidates(&damaged);
+        }
+        addCandidates(answer[0..offset]);
+    }
 }
 
 fn fuzzOne(_: void, smith: *std.testing.Smith) !void {

@@ -5,6 +5,7 @@ test {
     _ = @import("endpoint.zig");
     _ = @import("lan.zig");
     _ = @import("mux.zig");
+    _ = @import("nat.zig");
     _ = @import("network.zig");
     _ = @import("transport.zig");
 }

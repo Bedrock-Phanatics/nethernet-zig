@@ -115,9 +115,22 @@ The mux is not yet verified against vanilla clients, so it stays opt-in. The sha
 8 MiB buffer, so on Linux raise `net.core.rmem_max` and `net.core.wmem_max` to 8388608 before serving
 many players with it, otherwise bursts overflow the default buffer.
 
-A server behind NAT only gathers its private addresses, and a STUN server in `ice_servers` finds the public
-mapping. Answers stop waiting on gathering after `gathering_timeout_ms`, 3 seconds by default, so an
-unanswered one can't run past the 10 seconds a vanilla client waits.
+A server behind NAT only gathers its private addresses. A STUN server in `ice_servers` finds the public
+mapping, and answers stop waiting on gathering after `gathering_timeout_ms`, 3 seconds by default, so an
+unanswered one can't run past the 10 seconds a vanilla client waits. Where the NAT is a fixed 1:1 or port
+forward and STUN isn't wanted, `advertise_addresses` on the endpoint listener names the public IP literals:
+
+```zig
+.{
+    .connection = .{ .native = .{ .port_range_begin = 19200, .port_range_end = 19263 } },
+    .advertise_addresses = &.{ "203.0.113.7", "2001:db8::7" },
+}
+```
+
+Each becomes a server-reflexive candidate beside the gathered ones, unless one already offers it, on the ICE
+socket's own port. External ports must be forwarded unchanged, `-p 19200-19263:19200-19263/udp` above. Each
+connection holds one port of the range, the mux shares a single one. A family with no gathered socket is
+skipped. Hostnames and ports are refused, and nothing is taken from request headers.
 
 ## Examples
 

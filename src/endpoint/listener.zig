@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const advertise = @import("../transport/advertise.zig");
 const auth = @import("../auth/sdp.zig");
 const jwt = @import("../auth/token.zig");
 const Signal = @import("../protocol/signal.zig").Signal;
@@ -40,6 +41,10 @@ pub const Options = struct {
     /// How long a client gets to deliver its request, out of `request_timeout_ms`. The rest is for negotiation.
     request_read_timeout_ms: u32 = 5000,
     status_provider: ?StatusProvider = null,
+    /// Public IP literals a 1:1 NAT or port forward exposes this server on, offered as server-reflexive
+    /// candidates beside the gathered ones. They use the ICE socket's own port, so forward that same external
+    /// port, fixed with `port_range_begin`/`port_range_end` or UDP mux.
+    advertise_addresses: []const []const u8 = &.{},
     trace: bool = false,
     /// Signaled whenever a connection becomes ready to accept and when accepting stops.
     wakeup: ?*Wakeup = null,
@@ -97,6 +102,7 @@ pub const Listener = struct {
     io: std.Io,
     server: std.Io.net.Server,
     options: Options,
+    advertised: advertise.Addresses,
 
     group: std.Io.Group = .init,
     accepted: std.Io.Queue(*conn.Connection),
@@ -131,6 +137,7 @@ pub const Listener = struct {
         {
             return error.InvalidConfiguration;
         }
+        const advertised = try advertise.Addresses.parse(options.advertise_addresses);
 
         const self = try allocator.create(Listener);
         errdefer allocator.destroy(self);
@@ -152,6 +159,7 @@ pub const Listener = struct {
         errdefer server.deinit(io);
 
         var actual_options = options;
+        actual_options.advertise_addresses = &.{};
         if (actual_options.connection.identity == null and
             actual_options.connection.server_identity_key == null)
         {
@@ -164,6 +172,7 @@ pub const Listener = struct {
             .io = io,
             .server = server,
             .options = actual_options,
+            .advertised = advertised,
             .slots = slots,
             .negotiators = negotiators,
             .peers = peers,
@@ -721,10 +730,25 @@ pub const Listener = struct {
                             return error.UnexpectedSignal;
                         }
 
+                        // The identity signs only the fingerprints, so candidates can be added after signing.
+                        const extended: ?advertise.Added = if (self.advertised.len == 0) null else advertise.addCandidates(
+                            self.allocator,
+                            signal.data,
+                            self.advertised.slice(),
+                        ) catch |err| {
+                            self.trace("advertised candidates failed ({s})", .{@errorName(err)});
+                            return err;
+                        };
+                        defer if (extended) |result| self.allocator.free(result.sdp);
+                        const answer = if (extended) |result| result.sdp else signal.data;
+                        if (extended) |result| self.trace("advertised candidates added={d}, without a gathered socket of their family={d}", .{
+                            result.added, result.unmatched,
+                        });
+
                         if (self.options.trace) {
-                            const answer_summary = summarizeSdp(signal.data);
+                            const answer_summary = summarizeSdp(answer);
                             self.trace("answer bytes={d}, identity={s}, candidates={d} (host={d}, srflx={d}, relay={d}, other={d})", .{
-                                signal.data.len,
+                                answer.len,
                                 if (answer_summary.identity) "present" else "missing",
                                 answer_summary.candidates,
                                 answer_summary.host,
@@ -733,7 +757,7 @@ pub const Listener = struct {
                                 answer_summary.other,
                             });
                         }
-                        try respond(&request, response_state, signal.data, .{
+                        try respond(&request, response_state, answer, .{
                             .keep_alive = false,
                             .extra_headers = &.{
                                 .{
