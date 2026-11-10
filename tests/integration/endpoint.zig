@@ -567,3 +567,34 @@ test "HTTP signaling uses application/sdp and an opaque network ID" {
     defer server.destroy();
     try std.testing.expectEqual(std.mem.count(u8, rewritten, "a=candidate:") + 1, server.remoteIceCandidateCount());
 }
+
+test "an unanswered STUN server cannot hold the HTTP answer past the client's window" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    // Nothing reads this socket, so every STUN request is lost and gathering would run for over 20 seconds.
+    const sink = try (try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0")).bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer sink.close(io);
+    var stun_buffer: [64]u8 = undefined;
+    const stun = try std.fmt.bufPrintSentinel(&stun_buffer, "stun:127.0.0.1:{d}", .{sink.address.getPort()}, 0);
+
+    const listener = try Listener.listen(allocator, io, try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0"), .{
+        .connection = .{
+            .allow_anonymous = true,
+            .native = .{ .bind_address = "127.0.0.1", .ice_servers = &.{stun.ptr}, .gathering_timeout_ms = 500 },
+        },
+    });
+    defer listener.destroy();
+    var origin: [64]u8 = undefined;
+
+    const started = std.Io.Clock.awake.now(io);
+    const client = try nethernet.dialEndpoint(allocator, io, try std.fmt.bufPrint(&origin, "http://127.0.0.1:{d}", .{
+        listener.server.socket.address.getPort(),
+    }), 9, .{ .native = .{ .bind_address = "127.0.0.1" } });
+    defer client.destroy();
+    const server = try listener.accept();
+    defer server.destroy();
+    try std.testing.expect(started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds() < 10_000);
+    try std.testing.expect(server.diagnostics().ice_gathering_state != .complete);
+    try client.send("joined", .reliable);
+    try std.testing.expectEqualStrings("joined", (try server.receive()).data);
+}

@@ -115,6 +115,10 @@ The mux is not yet verified against vanilla clients, so it stays opt-in. The sha
 8 MiB buffer, so on Linux raise `net.core.rmem_max` and `net.core.wmem_max` to 8388608 before serving
 many players with it, otherwise bursts overflow the default buffer.
 
+A server behind NAT only gathers its private addresses, and a STUN server in `ice_servers` finds the public
+mapping. Answers stop waiting on gathering after `gathering_timeout_ms`, 3 seconds by default, so an
+unanswered one can't run past the 10 seconds a vanilla client waits.
+
 ## Examples
 
 ```sh

@@ -213,6 +213,10 @@ pub const Options = struct {
     port_range_end: u16 = 0,
     enable_ice_udp_mux: bool = false,
     disable_trickle: bool = false,
+    /// A full-ICE answer goes out with what was gathered by then, once usable. An unanswered STUN server keeps
+    /// gathering open for over 20 seconds, longer than a vanilla client waits for the answer. Offers still wait,
+    /// so a slow relay allocation isn't left out.
+    gathering_timeout_ms: u32 = 3000,
     drop_unreliable_on_pressure: bool = true,
     unreliable_reserve_bytes: usize = framing.maximum_segment_payload + 1,
     unreliable_reserve_entries: usize = 1,
@@ -279,6 +283,8 @@ pub const Peer = struct {
     gathering_state: GatheringState = .new,
     description_sent: bool = false,
     description_kind: enum { offer, answer } = .offer,
+    /// Set while a full-ICE answer waits on gathering, see `Options.gathering_timeout_ms`.
+    gathering_deadline: ?std.Io.Timestamp = null,
 
     options: Options,
     queue: Queue,
@@ -824,6 +830,13 @@ pub const Peer = struct {
             const local_result = c.rtcSetLocalDescription(handles.id, "answer");
             if (self.options.trace) std.debug.print("nethernet WebRTC: set local answer result={d}\n", .{local_result});
             try check(local_result);
+
+            // Armed once the description exists, so an early poll can't find it missing and give up on the budget.
+            self.mutex.lockUncancelable(self.io);
+            if (self.options.disable_trickle) self.gathering_deadline = std.Io.Clock.awake.now(self.io)
+                .addDuration(.fromMilliseconds(self.options.gathering_timeout_ms));
+            self.notify();
+            self.mutex.unlock(self.io);
         }
     }
 
@@ -869,10 +882,14 @@ pub const Peer = struct {
             return error.ConnectionClosed;
         }
 
-        if (!self.options.disable_trickle or !self.gathered or self.description_sent) {
+        const complete = self.gathered;
+        if (!self.options.disable_trickle or self.description_sent or
+            (!complete and !self.gatheringExpiredLocked()))
+        {
             defer self.mutex.unlock(self.io);
             const event = try self.dequeueLocked(output, signals_only);
-            if (event == null and self.pendingLocked() == 0) self.idle_sequence = sequence;
+            if (event == null and self.pendingLocked() == 0 and self.gathering_deadline == null)
+                self.idle_sequence = sequence;
             return event;
         }
         self.mutex.unlock(self.io);
@@ -892,6 +909,15 @@ pub const Peer = struct {
         );
 
         if (result == c.RTC_ERR_TOO_SMALL) return error.NoSpaceLeft;
+        // Too early for a usable description, so it waits for gathering to complete after all.
+        if (!complete and (result <= 0 or result > output.len or
+            !hasUsableLocalCandidate(output[0 .. @as(usize, @intCast(result)) - 1])))
+        {
+            self.mutex.lockUncancelable(self.io);
+            self.gathering_deadline = null;
+            self.mutex.unlock(self.io);
+            return null;
+        }
 
         try check(result);
 
@@ -902,13 +928,32 @@ pub const Peer = struct {
         const data = output[0 .. @as(usize, @intCast(result)) - 1];
         if (self.options.trace) traceSdp("native local gathered", data);
         if (!hasUsableLocalCandidate(data)) return error.NoLocalIceCandidate;
+        if (!complete and self.options.trace)
+            std.debug.print("nethernet WebRTC: gathering still running after {d} ms, sending candidates gathered so far\n", .{self.options.gathering_timeout_ms});
+        self.mutex.lockUncancelable(self.io);
         self.description_sent = true;
+        self.gathering_deadline = null;
+        self.mutex.unlock(self.io);
         uppercaseLocalFingerprintDigests(data);
 
         return if (self.description_kind == .offer)
             .{ .offer = data }
         else
             .{ .answer = data };
+    }
+
+    fn gatheringExpiredLocked(self: *Peer) bool {
+        const deadline = self.gathering_deadline orelse return false;
+        return std.Io.Clock.awake.now(self.io).nanoseconds >= deadline.nanoseconds;
+    }
+
+    /// When a full-ICE description stops waiting on gathering, so a waiting caller can poll it then.
+    pub fn gatheringDeadline(self: *Peer) std.Io.Timeout {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.gathered or self.description_sent) return .none;
+        const deadline = self.gathering_deadline orelse return .none;
+        return .{ .deadline = .{ .raw = deadline, .clock = .awake } };
     }
 
     fn dequeueLocked(self: *Peer, output: []u8, signals_only: bool) !?Event {

@@ -824,7 +824,7 @@ pub const Connection = struct {
                 self.options.connection_timeout_ms
             else
                 self.options.negotiation_timeout_ms;
-            result = wake.deadline(started, timeout_ms);
+            result = wake.earliest(wake.deadline(started, timeout_ms), self.peer.gatheringDeadline());
         }
         for (&self.assemblies) |*assembly| {
             if (assembly.started) |started| {
