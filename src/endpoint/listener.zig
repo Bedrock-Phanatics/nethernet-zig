@@ -649,6 +649,17 @@ pub const Listener = struct {
             .domain = connection_options.server_identity_domain,
         };
 
+        // Checked before the peer exists, since creating one puts certificate generation on the native workers
+        // every connected player shares.
+        const identity = conn.verifyRemoteIdentity(self.allocator, self.io, connection_options, .server, body) catch |err| {
+            const status = errorStatus(err);
+            self.trace("offer rejected ({s}); HTTP {d}", .{ @errorName(err), @backingInt(status) });
+            return respond(&request, response_state, "", .{
+                .status = status,
+                .keep_alive = false,
+            });
+        };
+
         const connection = conn.Connection.create(
             self.allocator,
             self.io,
@@ -665,12 +676,12 @@ pub const Listener = struct {
         var transferred = false;
         defer if (!transferred) connection.destroy();
 
-        connection.applySignal(.{
+        connection.applyVerifiedOffer(.{
             .kind = Signal.offer,
             .connection_id = connection_id,
             .network_id = decoded_id,
             .data = body,
-        }) catch |err| {
+        }, identity) catch |err| {
             const status = errorStatus(err);
             self.trace("offer rejected ({s}); HTTP {d}", .{ @errorName(err), @backingInt(status) });
             return respond(&request, response_state, "", .{

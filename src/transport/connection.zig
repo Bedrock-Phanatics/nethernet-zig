@@ -214,6 +214,40 @@ fn remoteIdentityRequired(options: Options, role: Role) bool {
     return !options.allow_anonymous;
 }
 
+pub const RemoteIdentity = struct {
+    key: ?auth.Key,
+    issuer_verified: bool,
+};
+
+/// Checks the identity a remote description carries. A listener runs this on an offer first, so one it
+/// refuses never costs a native peer.
+pub fn verifyRemoteIdentity(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    options: Options,
+    role: Role,
+    sdp: []const u8,
+) !RemoteIdentity {
+    const verifier = verifierForRole(options, role);
+    const key = auth.verify(
+        allocator,
+        sdp,
+        std.Io.Clock.real.now(io).toSeconds(),
+        if (role == .client) .server else .client,
+        verifier,
+    ) catch |err| {
+        if (options.trace) std.debug.print("nethernet identity: rejected ({s})\n", .{@errorName(err)});
+        return err;
+    };
+
+    if (key == null and remoteIdentityRequired(options, role)) {
+        if (options.trace) std.debug.print("nethernet identity: missing or unverified, required\n", .{});
+        return error.IdentityNotAllowed;
+    }
+    if (options.trace) std.debug.print("nethernet identity: {s}\n", .{if (key == null) "anonymous allowed" else if (verifier != null) "proof and issuer verified" else "proof verified"});
+    return .{ .key = key, .issuer_verified = key != null and verifier != null };
+}
+
 pub fn validateServerIdentity(options: Options) !void {
     if (!options.allow_anonymous and options.verify_client == null)
         return error.MissingClientVerifier;
@@ -566,6 +600,16 @@ pub const Connection = struct {
     }
 
     pub fn applySignal(self: *Connection, signal: Signal) !void {
+        return self.apply(signal, null);
+    }
+
+    /// Applies an offer whose identity `verifyRemoteIdentity` already passed, without checking it again.
+    pub fn applyVerifiedOffer(self: *Connection, signal: Signal, identity: RemoteIdentity) !void {
+        if (!std.mem.eql(u8, signal.kind, Signal.offer)) return error.UnexpectedSignal;
+        return self.apply(signal, identity);
+    }
+
+    fn apply(self: *Connection, signal: Signal, verified: ?RemoteIdentity) !void {
         const matches_connection =
             signal.connection_id == self.id and
             std.mem.eql(u8, signal.network_id, self.remote_id);
@@ -617,31 +661,12 @@ pub const Connection = struct {
             return error.UnexpectedSignal;
         }
 
-        const identity_kind: auth.IdentityKind =
-            if (self.role == .client) .server else .client;
-
         if (self.options.trace) native.traceSdp("remote signed", signal.data);
 
-        const verifier = verifierForRole(self.options, self.role);
-        const key = auth.verify(
-            self.allocator,
-            signal.data,
-            std.Io.Clock.real.now(self.io).toSeconds(),
-            identity_kind,
-            verifier,
-        ) catch |err| {
-            if (self.options.trace) std.debug.print("nethernet identity: rejected ({s})\n", .{@errorName(err)});
-            return err;
-        };
-
-        if (key == null and remoteIdentityRequired(self.options, self.role)) {
-            if (self.options.trace) std.debug.print("nethernet identity: missing or unverified, required\n", .{});
-            return error.IdentityNotAllowed;
-        }
-
-        self.public_key = key;
-        self.identity_issuer_verified = key != null and verifier != null;
-        if (self.options.trace) std.debug.print("nethernet identity: {s}\n", .{if (key == null) "anonymous allowed" else if (verifier != null) "proof and issuer verified" else "proof verified"});
+        const identity = verified orelse
+            try verifyRemoteIdentity(self.allocator, self.io, self.options, self.role, signal.data);
+        self.public_key = identity.key;
+        self.identity_issuer_verified = identity.issuer_verified;
 
         const native_sdp = dropHostnameCandidates(auth.removeIdentity(terminated));
         if (self.options.trace) native.traceSdp("remote stripped", native_sdp);
@@ -923,6 +948,22 @@ test "reassembly growth and every allocation failure preserve ownership" {
         assemblyAllocationScenario,
         .{},
     );
+}
+
+test "an offer's identity is checked without a connection" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const sdp = "v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n";
+    try std.testing.expectError(error.IdentityNotAllowed, verifyRemoteIdentity(allocator, io, .{}, .server, sdp));
+    const anonymous = try verifyRemoteIdentity(allocator, io, .{ .allow_anonymous = true }, .server, sdp);
+    try std.testing.expect(anonymous.key == null and !anonymous.issuer_verified);
+
+    const connection = try Connection.create(allocator, io, .server, 1, "2", .{ .allow_anonymous = true });
+    defer connection.destroy();
+    try std.testing.expectError(error.UnexpectedSignal, connection.applyVerifiedOffer(
+        .{ .kind = Signal.answer, .connection_id = 1, .network_id = "2", .data = sdp },
+        anonymous,
+    ));
 }
 
 test "remote identity verifiers are selected by connection role" {
