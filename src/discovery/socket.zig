@@ -70,7 +70,7 @@ fn bindWindows(io: std.Io, address: net.IpAddress) !net.Socket {
 
     const Storage = extern struct { info: windows.AFD.BIND_INFO, address: Threaded.PosixAddress };
     // AFD_SHARE_EXCLUSIVE, what SO_EXCLUSIVEADDRUSE becomes.
-    var storage: Storage = .{ .info = .{ .Mode = @enumFromInt(3) }, .address = undefined };
+    var storage: Storage = .{ .info = .{ .Mode = @fromBackingInt(@intCast(3)) }, .address = undefined };
     const length = Threaded.addressToPosix(&address, &storage.address);
     try control(io, .{
         .file = .{ .handle = handle, .flags = .{ .nonblocking = true } },
