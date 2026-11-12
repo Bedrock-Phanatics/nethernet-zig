@@ -28,7 +28,7 @@ pub const StatusProvider = struct {
 
 pub const Options = struct {
     connection: conn.Options = .{},
-    maximum_negotiations: usize = 8,
+    maximum_negotiations: usize = 64,
     /// Unlimited when null. Counts by IP, or by /64 for IPv6, so clients behind one NAT share it. Loopback is exempt.
     maximum_negotiations_per_address: ?usize = 4,
     /// HTTP connections one address may hold at once, so a few idle sockets can't take every worker.
@@ -795,7 +795,7 @@ test "identity verification failures produce HTTP 403" {
     try std.testing.expectEqual(std.http.Status.internal_server_error, Listener.errorStatus(error.OutOfMemory));
 }
 
-const mapped_prefix = [_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff };
+const mapped_prefix = advertise.mapped_prefix;
 
 // IPv6 hosts usually get a whole /64, so it counts as one, except IPv4-mapped addresses
 fn sameHost(a: std.Io.net.IpAddress, b: std.Io.net.IpAddress) bool {
