@@ -16,7 +16,6 @@ pub const ChannelDiagnostics = native.ChannelDiagnostics;
 pub const SelectedIceAddresses = native.SelectedIceAddresses;
 
 pub const maximum_network_id_length = 4096;
-const maximum_signal_size = 1024 * 1024;
 const maximum_local_signal_size = 64 * 1024;
 const maximum_pending_candidate_bytes = 64 * 1024;
 const maximum_pending_candidates = 32;
@@ -595,7 +594,7 @@ pub const Connection = struct {
             return error.UnexpectedSignal;
         }
 
-        if (signal.data.len > maximum_signal_size) return error.MessageTooLarge;
+        if (signal.data.len > native.maximum_signal_size) return error.MessageTooLarge;
         if (is_candidate and !namesIpAddress(signal.data)) return;
 
         if (is_candidate) {

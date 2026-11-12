@@ -480,9 +480,6 @@ pub const Peer = struct {
         _ = c.rtcClosePeerConnection(handles.id);
     }
 
-    fn forceClose(self: *Peer) void {
-        self.close();
-    }
     pub fn destroy(self: *Peer) void {
         self.close();
 
@@ -1512,7 +1509,7 @@ fn gracefulDrain(
     timeout_ms: u32,
 ) !void {
     target.stopSends();
-    errdefer target.forceClose();
+    errdefer target.close();
 
     const started = std.Io.Clock.awake.now(io);
     const timeout = wake.deadline(started, timeout_ms);
@@ -1524,7 +1521,7 @@ fn gracefulDrain(
         const status = target.drainStatus();
         // Once our own shutdown finishes, the channels closing is how it ends
         if (shut and status != .open) {
-            target.forceClose();
+            target.close();
             return;
         }
         switch (status) {
@@ -1571,6 +1568,7 @@ const DrainHarness = struct {
     io: std.Io,
     wakeup: Wakeup = .{},
     observed: std.Io.Event = .unset,
+    awaiting_ack: std.Io.Event = .unset,
     buffered: std.atomic.Value(usize) = .init(0),
     unacked: std.atomic.Value(usize) = .init(0),
     status: std.atomic.Value(u8) = .init(0),
@@ -1599,10 +1597,12 @@ const DrainHarness = struct {
     }
 
     fn unackedAmount(self: *DrainHarness) usize {
-        return self.unacked.load(.acquire);
+        const amount = self.unacked.load(.acquire);
+        if (amount != 0) self.awaiting_ack.set(self.io);
+        return amount;
     }
 
-    fn forceClose(self: *DrainHarness) void {
+    fn close(self: *DrainHarness) void {
         self.closed.store(true, .release);
         self.wakeup.signal(self.io);
     }
@@ -1702,7 +1702,8 @@ test "graceful drain lingers after the final acknowledgement" {
     harness.unacked.store(1, .release);
     var draining = try io.concurrent(DrainHarness.drain, .{ &harness, @as(u32, 2000) });
     defer draining.cancel(io) catch {};
-    try harness.observed.wait(io);
+    // The drain must have seen the data unacknowledged, or it has nothing to linger after.
+    try harness.awaiting_ack.wait(io);
     const acknowledged = std.Io.Clock.awake.now(io);
     harness.unacked.store(0, .release);
     try draining.await(io);
@@ -1732,7 +1733,7 @@ test "a remote close ends the linger without shutting down" {
     var draining = try io.concurrent(DrainHarness.drain, .{ &harness, @as(u32, 120_000) });
     defer draining.cancel(io) catch {};
     try harness.observed.wait(io);
-    harness.forceClose();
+    harness.close();
     try draining.await(io);
     try std.testing.expect(!harness.shut.load(.acquire));
 }
