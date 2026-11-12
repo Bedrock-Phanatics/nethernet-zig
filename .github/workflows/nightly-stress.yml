@@ -2,6 +2,10 @@ name: transport stress
 
 on:
   workflow_dispatch:
+    inputs:
+      profile:
+        description: perf or massif, then stress arguments. Empty runs the stress and sanitizer jobs
+        default: ''
   schedule:
     - cron: '0 4 * * 0'
 
@@ -10,6 +14,7 @@ permissions:
 
 jobs:
   stress:
+    if: inputs.profile == ''
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -26,17 +31,20 @@ jobs:
           --rate 20 --churn-messages 10000
 
   sanitizers:
+    if: inputs.profile == ''
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        mode: [asan, tsan, zig-tsan]
+        mode: [asan, tsan, zig-tsan, valgrind]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.17.0
+      - if: matrix.mode == 'valgrind'
+        run: sudo apt-get update && sudo apt-get install -y valgrind
       # TSan defers the signals Zig uses to cancel blocked accepts, so only ASan runs the listener tests.
       - if: matrix.mode == 'asan'
         run: sh tools/stress-diagnostics.sh ${{ matrix.mode }}
@@ -45,4 +53,20 @@ jobs:
       - run: >
           sh tools/stress-diagnostics.sh ${{ matrix.mode }}
           --connections 8 --duration-ms 20000 --payload-size 8192
-          --churn-messages 200
+          --churn-messages 200 --timeout-ms 60000
+
+  profile:
+    if: inputs.profile != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.0
+      - run: sudo apt-get update && sudo apt-get install -y linux-tools-common linux-tools-generic "linux-tools-$(uname -r)"
+      - run: sudo sysctl kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0
+      - run: sudo apt-get install -y valgrind
+      - run: sh tools/stress-diagnostics.sh $PROFILE_ARGS
+        env:
+          PROFILE_ARGS: ${{ inputs.profile }}
