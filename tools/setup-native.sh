@@ -30,7 +30,9 @@ test "$(git -C .deps/libdatachannel rev-parse HEAD)" = \
 test "$(git -C .deps/mbedtls rev-parse HEAD)" = \
     068ff080b369adfac81509f9b57b2afabaf82dc5
 
+# Records stay under the path MTU, so the default 16 KiB buffers only cost memory per connection.
 for setting in "set MBEDTLS_SSL_DTLS_SRTP" "set MBEDTLS_AES_ROM_TABLES" \
+    "set MBEDTLS_SSL_IN_CONTENT_LEN 4096" "set MBEDTLS_SSL_OUT_CONTENT_LEN 4096" \
     "unset MBEDTLS_DEBUG_C" "unset MBEDTLS_SELF_TEST"; do
     python3 .deps/mbedtls/scripts/config.py \
         -f .deps/mbedtls/include/mbedtls/mbedtls_config.h $setting
@@ -40,7 +42,7 @@ patches=""
 for name in bounds mbedtls-link-order threadpool dtls-timer sctp-timer-wheel juice-timers \
     sctp-receive-pause dtls-incoming juice-mux-routing sctp-unacked closed-callbacks \
     sctp-close-drain dtls-close-notify sctp-inline-recv juice-epoll remote-description-first \
-    juice-registry-mutex; do
+    juice-registry-mutex sctp-streams; do
     patches="$patches $(pwd)/tools/libdatachannel-$name.patch"
 done
 # Patches are reapplied to a clean tree whenever one changes, so edited patches take effect.

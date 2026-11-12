@@ -77,6 +77,8 @@ if ($Backend -eq 'MbedTLS') {
     foreach ($setting in @(
         @('set', 'MBEDTLS_SSL_DTLS_SRTP'),
         @('set', 'MBEDTLS_AES_ROM_TABLES'),
+        @('set', 'MBEDTLS_SSL_IN_CONTENT_LEN', '4096'),
+        @('set', 'MBEDTLS_SSL_OUT_CONTENT_LEN', '4096'),
         @('unset', 'MBEDTLS_DEBUG_C'),
         @('unset', 'MBEDTLS_SELF_TEST')
     )) {
@@ -91,7 +93,7 @@ if ($Backend -eq 'MbedTLS') {
 $patchNames = @('bounds', 'threadpool', 'dtls-timer', 'sctp-timer-wheel', 'juice-timers',
     'sctp-receive-pause', 'dtls-incoming', 'juice-mux-routing', 'sctp-unacked', 'closed-callbacks',
     'sctp-close-drain', 'dtls-close-notify', 'sctp-inline-recv', 'juice-epoll', 'remote-description-first',
-    'juice-registry-mutex')
+    'juice-registry-mutex', 'sctp-streams')
 if ($Backend -eq 'MbedTLS') {
     $patchNames += 'mbedtls-link-order'
 }
