@@ -5,6 +5,7 @@ const jwt = @import("../auth/token.zig");
 const trace = @import("../internal/trace.zig");
 const wake = @import("../internal/wakeup.zig");
 const Signal = @import("../protocol/signal.zig").Signal;
+const advertise = @import("advertise.zig");
 const framing = @import("framing.zig");
 const native = @import("peer.zig");
 pub const CallbackStats = native.CallbackStats;
@@ -30,9 +31,10 @@ pub fn validNetworkId(text: []const u8) bool {
 
 fn signalingPeerCandidate(
     offer: []const u8,
-    peer_address: std.Io.net.IpAddress,
+    signaling_address: std.Io.net.IpAddress,
     output: *[256]u8,
 ) ?[:0]const u8 {
+    const peer_address = advertise.unmapped(signaling_address);
     var address_buffer: [64]u8 = undefined;
     const formatted = std.fmt.bufPrint(&address_buffer, "{f}", .{peer_address}) catch return null;
     const host = switch (peer_address) {
@@ -99,6 +101,16 @@ test "signaling peer candidate uses the offered UDP host port" {
         "candidate:signaling 1 udp 1694498815 2001:db8::8 45678 typ srflx raddr :: rport 0",
         signalingPeerCandidate(offer, ipv6, &output).?,
     );
+    const mapped = try std.Io.net.IpAddress.parseLiteral("[::ffff:198.51.100.8]:19132");
+    try std.testing.expectEqualStrings(
+        "candidate:signaling 1 udp 1694498815 198.51.100.8 45678 typ srflx raddr 0.0.0.0 rport 0",
+        signalingPeerCandidate(offer, mapped, &output).?,
+    );
+    try std.testing.expect(signalingPeerCandidate(
+        offer ++ "a=candidate:c 1 udp 1 198.51.100.8 12345 typ srflx\r\n",
+        mapped,
+        &output,
+    ) == null);
 }
 
 /// libdatachannel resolves a candidate that names a host on a detached thread of its own, so a peer could

@@ -4,7 +4,18 @@ const IpAddress = std.Io.net.IpAddress;
 pub const maximum_addresses = 8;
 pub const maximum_sdp_size = 256 * 1024;
 const maximum_address_length = 45;
-const mapped_prefix = [_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff };
+pub const mapped_prefix = [_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff };
+
+/// A dual-stack socket reports IPv4 clients as IPv4-mapped, which no candidate ever names.
+pub fn unmapped(address: IpAddress) IpAddress {
+    return switch (address) {
+        .ip4 => address,
+        .ip6 => |ip| if (std.mem.startsWith(u8, &ip.bytes, &mapped_prefix))
+            .{ .ip4 = .{ .bytes = ip.bytes[12..16].*, .port = ip.port } }
+        else
+            address,
+    };
+}
 
 /// Public addresses a server answers with. Only IP literals are taken, so nothing is resolved and
 /// no translated port can be configured: the advertised port is always the ICE socket's own.
