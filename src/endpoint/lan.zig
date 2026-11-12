@@ -233,15 +233,18 @@ pub const Listener = struct {
             .{self.discovery.id},
         );
 
-        const connection = try conn.Connection.create(
+        // One offer that can't get a peer must not end accepting for everyone else.
+        const connection = conn.Connection.create(
             self.allocator,
             self.discovery.io,
             .server,
             signal.connection_id,
             signal.network_id,
             connection_options,
-        );
-        errdefer connection.destroy();
+        ) catch {
+            self.rejected_negotiations +|= 1;
+            return;
+        };
 
         connection.applySignal(signal) catch |err| {
             self.report(connection, err) catch {};
