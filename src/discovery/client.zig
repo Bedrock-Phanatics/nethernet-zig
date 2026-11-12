@@ -372,7 +372,6 @@ pub const Discovery = struct {
         self.receive_mutex.lockUncancelable(self.io);
         defer self.receive_mutex.unlock(self.io);
         self.operation_active = false;
-        self.notify();
     }
 
     pub fn subscribe(self: *Discovery, subscriber: ?*wake.Wakeup) void {
@@ -506,6 +505,25 @@ fn replaceResponse(allocator: std.mem.Allocator, known: *Known, data: []const u8
     const copy = try allocator.dupe(u8, data);
     if (known.response) |old| allocator.free(old);
     known.response = copy;
+}
+
+test "finishing an idle discovery operation does not wake its host" {
+    const discovery = try Discovery.listen(
+        std.testing.allocator,
+        std.testing.io,
+        try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0"),
+        .{},
+    );
+    defer discovery.destroy();
+    var host: wake.Wakeup = .{};
+    discovery.subscribe(&host);
+    defer discovery.unsubscribe(&host);
+    const token = host.prepare();
+    const discovery_token = discovery.wakeup.prepare();
+    try discovery.beginOperation();
+    discovery.endOperation();
+    try std.testing.expect(!host.signaled(token));
+    try std.testing.expect(!discovery.wakeup.signaled(discovery_token));
 }
 
 test "UDP discovery and addressed signaling over loopback" {
