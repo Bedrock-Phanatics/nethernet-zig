@@ -5,6 +5,7 @@ pub const identity_issuer = core.identity_issuer;
 pub const sdp_identity = core.sdp_identity;
 pub const identity_file = core.identity_file;
 pub const framing = core.framing;
+pub const advertise = core.advertise;
 pub const Reliability = core.Reliability;
 pub const Signal = core.Signal;
 pub const parseSignalErrorCode = core.signal.parseErrorCode;
