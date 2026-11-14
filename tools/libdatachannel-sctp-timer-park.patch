@@ -1,0 +1,153 @@
+diff --git a/deps/usrsctp/usrsctplib/netinet/sctp_callout.c b/deps/usrsctp/usrsctplib/netinet/sctp_callout.c
+index 45889a5..f804f72 100755
+--- a/deps/usrsctp/usrsctplib/netinet/sctp_callout.c
++++ b/deps/usrsctp/usrsctplib/netinet/sctp_callout.c
+@@ -78,9 +78,17 @@ uint32_t sctp_get_tick_count(void) {
+  * SCTP_TIMERQ_LOCK protects:
+  * - sctp_callwheel
+  * - sctp_os_timer_next: next timer to check
++ * - sctp_os_timer_pending, sctp_os_timer_parked
+  */
+ static sctp_os_timer_t *sctp_os_timer_next = NULL;
+ 
++/* The timer thread parks instead of ticking while no timer is pending */
++static uint32_t sctp_os_timer_pending = 0;
++#if defined(__Userspace__)
++static int sctp_os_timer_parked = 0;
++static userland_cond_t sctp_os_timer_wakeup;
++#endif
++
+ /* Timers hash into a wheel by expiry tick so a tick only visits elapsed buckets */
+ #define SCTP_CALLWHEEL_SIZE 1024
+ static struct calloutlist sctp_callwheel[SCTP_CALLWHEEL_SIZE];
+@@ -130,6 +138,8 @@ sctp_os_timer_start(sctp_os_timer_t *c, uint32_t to_ticks, void (*ftn) (void *),
+ 		 * flags.  We don't bother since we are setting these
+ 		 * below and we still hold the lock.
+ 		 */
++	} else {
++		sctp_os_timer_pending++;
+ 	}
+ 
+ 	/*
+@@ -144,6 +154,16 @@ sctp_os_timer_start(sctp_os_timer_t *c, uint32_t to_ticks, void (*ftn) (void *),
+ 	c->c_func = ftn;
+ 	c->c_time = ticks + to_ticks;
+ 	TAILQ_INSERT_TAIL(sctp_callwheel_bucket(c->c_time), c, tqe);
++#if defined(__Userspace__)
++	if (sctp_os_timer_parked) {
++		sctp_os_timer_parked = 0;
++#if defined(_WIN32)
++		WakeAllConditionVariable(&sctp_os_timer_wakeup);
++#else
++		pthread_cond_signal(&sctp_os_timer_wakeup);
++#endif
++	}
++#endif
+ 	SCTP_TIMERQ_UNLOCK();
+ 	return (ret);
+ }
+@@ -165,6 +185,7 @@ sctp_os_timer_stop(sctp_os_timer_t *c)
+ 		sctp_os_timer_next = TAILQ_NEXT(c, tqe);
+ 	}
+ 	TAILQ_REMOVE(sctp_callwheel_bucket(c->c_time), c, tqe);
++	sctp_os_timer_pending--;
+ 	SCTP_TIMERQ_UNLOCK();
+ 	return (1);
+ }
+@@ -188,6 +209,7 @@ sctp_handle_tick(uint32_t elapsed_ticks)
+ 			if (SCTP_UINT32_GE(ticks, c->c_time)) {
+ 				sctp_os_timer_next = TAILQ_NEXT(c, tqe);
+ 				TAILQ_REMOVE(sctp_callwheel_bucket(c->c_time), c, tqe);
++				sctp_os_timer_pending--;
+ 				c_func = c->c_func;
+ 				c_arg = c->c_arg;
+ 				c->c_flags &= ~SCTP_CALLOUT_PENDING;
+@@ -216,11 +238,44 @@ sctp_timeout(void *arg SCTP_UNUSED)
+ #if defined(__Userspace__)
+ #define TIMEOUT_INTERVAL 10
+ 
++/* Called with SCTP_TIMERQ_LOCK held. The count only lets the thread park, so it is checked against the wheel first. */
++static int
++sctp_os_timer_idle(void)
++{
++	sctp_os_timer_t *c;
++	uint32_t pending = 0;
++	int i;
++
++	if (sctp_os_timer_pending != 0) {
++		return (0);
++	}
++	for (i = 0; i < SCTP_CALLWHEEL_SIZE; i++) {
++		TAILQ_FOREACH(c, sctp_callwheel_bucket((uint32_t)i), tqe) {
++			pending++;
++		}
++	}
++	sctp_os_timer_pending = pending;
++	return (pending == 0);
++}
++
+ void *
+ user_sctp_timer_iterate(void *arg)
+ {
+ 	sctp_userspace_set_threadname("SCTP timer");
+ 	for (;;) {
++		SCTP_TIMERQ_LOCK();
++		while (!atomic_cmpset_int(&SCTP_BASE_VAR(timer_thread_should_exit), 1, 1) &&
++		       sctp_os_timer_idle()) {
++			/* ticks stand still while parked, which no pending timer can notice */
++			sctp_os_timer_parked = 1;
++#if defined(_WIN32)
++			SleepConditionVariableCS(&sctp_os_timer_wakeup, &SCTP_BASE_VAR(timer_mtx), INFINITE);
++#else
++			pthread_cond_wait(&sctp_os_timer_wakeup, &SCTP_BASE_VAR(timer_mtx));
++#endif
++		}
++		sctp_os_timer_parked = 0;
++		SCTP_TIMERQ_UNLOCK();
+ #if defined(_WIN32)
+ 		Sleep(TIMEOUT_INTERVAL);
+ #else
+@@ -249,9 +304,19 @@ sctp_start_timer_thread(void)
+ 	 */
+ 	int rc;
+ 
++#if defined(_WIN32)
++	InitializeConditionVariable(&sctp_os_timer_wakeup);
++#else
++	(void)pthread_cond_init(&sctp_os_timer_wakeup, NULL);
++#endif
+ 	rc = sctp_userspace_thread_create(&SCTP_BASE_VAR(timer_thread), user_sctp_timer_iterate);
+ 	if (rc) {
+ 		SCTP_PRINTF("ERROR; return code from sctp_thread_create() is %d\n", rc);
++#if defined(_WIN32)
++		DeleteConditionVariable(&sctp_os_timer_wakeup);
++#else
++		(void)pthread_cond_destroy(&sctp_os_timer_wakeup);
++#endif
+ 	} else {
+ 		SCTP_BASE_VAR(timer_thread_started) = 1;
+ 	}
+@@ -262,11 +327,23 @@ sctp_stop_timer_thread(void)
+ {
+ 	atomic_cmpset_int(&SCTP_BASE_VAR(timer_thread_should_exit), 0, 1);
+ 	if (SCTP_BASE_VAR(timer_thread_started)) {
++		SCTP_TIMERQ_LOCK();
++#if defined(_WIN32)
++		WakeAllConditionVariable(&sctp_os_timer_wakeup);
++#else
++		pthread_cond_signal(&sctp_os_timer_wakeup);
++#endif
++		SCTP_TIMERQ_UNLOCK();
+ #if defined(_WIN32)
+ 		WaitForSingleObject(SCTP_BASE_VAR(timer_thread), INFINITE);
+ 		CloseHandle(SCTP_BASE_VAR(timer_thread));
+ #else
+ 		pthread_join(SCTP_BASE_VAR(timer_thread), NULL);
++#endif
++#if defined(_WIN32)
++		DeleteConditionVariable(&sctp_os_timer_wakeup);
++#else
++		(void)pthread_cond_destroy(&sctp_os_timer_wakeup);
+ #endif
+ 	}
+ }
