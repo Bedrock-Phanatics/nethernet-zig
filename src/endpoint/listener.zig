@@ -65,6 +65,13 @@ fn listenExclusive(io: std.Io, address: std.Io.net.IpAddress) !std.Io.net.Server
     const fd: linux.fd_t = @intCast(opened);
     errdefer _ = linux.close(fd);
     try std.posix.setsockopt(fd, linux.SOL.SOCKET, linux.SO.REUSEADDR, &std.mem.toBytes(@as(c_int, 1)));
+    // An Io polling with epoll needs the socket nonblocking or accept stalls its thread, while std's threaded Io
+    // must block, so it gets whatever mode the Io gives its own sockets
+    if (try ioSocketsNonblocking(io, address)) {
+        const flags = linux.fcntl(fd, linux.F.GETFL, 0);
+        if (linux.errno(flags) != .SUCCESS) return error.Unexpected;
+        if (linux.errno(linux.fcntl(fd, linux.F.SETFL, flags | nonblock_flag)) != .SUCCESS) return error.Unexpected;
+    }
 
     var storage: linux.sockaddr.in6 = undefined;
     var len: linux.socklen_t = undefined;
@@ -95,6 +102,18 @@ fn listenExclusive(io: std.Io, address: std.Io.net.IpAddress) !std.Io.net.Server
         .ip6 => |*ip6| ip6.port = std.mem.bigToNative(u16, storage.port),
     }
     return .{ .socket = .{ .handle = fd, .address = bound }, .options = {} };
+}
+
+const nonblock_flag: usize = if (builtin.os.tag == .linux) @as(usize, 1) << @bitOffsetOf(std.os.linux.O, "NONBLOCK") else 0;
+
+fn ioSocketsNonblocking(io: std.Io, address: std.Io.net.IpAddress) !bool {
+    var any = address;
+    any.setPort(0);
+    var probe = try any.listen(io, .{});
+    defer probe.deinit(io);
+    const flags = std.os.linux.fcntl(probe.socket.handle, std.os.linux.F.GETFL, 0);
+    if (std.os.linux.errno(flags) != .SUCCESS) return error.Unexpected;
+    return flags & nonblock_flag != 0;
 }
 
 pub const Listener = struct {
