@@ -66,6 +66,7 @@ seconds) bounds a whole HTTP join. LAN hosts send their candidates in the answer
 | `Callback` | `connection.setCallback` runs a function instead, for hosts with their own scheduler |
 | `identity_issuer.Authority` | Verifies client identities against Minecraft's keys |
 | `Peer.setNativeThreadPoolSize` | Native worker count, at most four by default |
+| `Peer.setSctpTimers` | Process-wide SCTP retransmission and acknowledgement timers for peers created afterwards |
 
 Messages returned by `receive` and `poll` are borrowed until the next call. Poll a connection from
 one thread, while `send`, `close` and `closeGracefully` are safe from any thread. A callback runs on
@@ -93,6 +94,11 @@ reading is paused, what SCTP had already accepted is handed over on the close in
 connection fails behind what it already took, which is still read in order, and
 `callbackStats().spill_overflows` counts it. Tearing a connection down sends a DTLS
 close_notify, so the peer sees the close at once instead of when ICE consent expires.
+
+A lost reliable message waits for SCTP's retransmission timeout, at least 200 ms by default. Between nethernet
+peers at 20 ms RTT and 1% loss, `Peer.setSctpTimers(.{ .minimum_retransmit_timeout_ms = 50 })` cut the p99 round
+trip from 191 to 112 ms, and a 5 ms `delayed_ack_ms` on top to 72 ms. It applies to every peer in the process,
+and vanilla clients aren't verified with it, so the defaults stay.
 
 ## Networking
 

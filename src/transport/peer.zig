@@ -244,6 +244,23 @@ pub const Peer = struct {
         native_pool_configured.store(true, .release);
     }
 
+    pub const SctpTimers = struct {
+        minimum_retransmit_timeout_ms: u31 = 0,
+        initial_retransmit_timeout_ms: u31 = 0,
+        /// Negative sends every acknowledgement at once.
+        delayed_ack_ms: i32 = 0,
+    };
+
+    /// Zero keeps libdatachannel's default. Applies process wide to peers created afterwards.
+    pub fn setSctpTimers(timers: SctpTimers) !void {
+        var settings = std.mem.zeroes(c.rtcSctpSettings);
+        settings.congestionControlModule = -1;
+        settings.minRetransmitTimeoutMs = timers.minimum_retransmit_timeout_ms;
+        settings.initialRetransmitTimeoutMs = timers.initial_retransmit_timeout_ms;
+        settings.delayedSackTimeMs = timers.delayed_ack_ms;
+        try check(c.rtcSetSctpSettings(&settings));
+    }
+
     var native_pool_configured: std.atomic.Value(bool) = .init(false);
 
     fn configureNativePool() void {

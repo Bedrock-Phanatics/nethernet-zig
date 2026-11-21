@@ -33,6 +33,9 @@ const Config = struct {
     rtc_threads: u32 = 0,
     slow_server_ms: u32 = 0,
     disconnect_at_ms: u64 = 0,
+    rto_min_ms: u31 = 0,
+    rto_initial_ms: u31 = 0,
+    sack_delay_ms: i32 = 0,
 };
 
 const CountingAllocator = struct {
@@ -197,6 +200,11 @@ pub fn main(init: std.process.Init) !void {
     if (config.connections == 0 or config.payload_size < 16 or config.burst == 0 or
         config.max_in_flight == 0 or config.poll_budget == 0) return error.InvalidConfiguration;
     if (config.rtc_threads != 0) try nethernet.Peer.setNativeThreadPoolSize(config.rtc_threads);
+    if (config.rto_min_ms != 0 or config.rto_initial_ms != 0 or config.sack_delay_ms != 0) try nethernet.Peer.setSctpTimers(.{
+        .minimum_retransmit_timeout_ms = config.rto_min_ms,
+        .initial_retransmit_timeout_ms = config.rto_initial_ms,
+        .delayed_ack_ms = config.sack_delay_ms,
+    });
 
     var wakeup: nethernet.Wakeup = .{};
     const rss_process_start = residentBytes(io);
