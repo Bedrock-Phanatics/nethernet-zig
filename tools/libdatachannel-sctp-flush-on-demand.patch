@@ -1,0 +1,66 @@
+--- a/src/impl/sctptransport.cpp
++++ b/src/impl/sctptransport.cpp
+@@ -384,9 +384,13 @@
+ 	if (message->size() > mMaxMessageSize)
+ 		throw std::invalid_argument("Message is too large");
+ 
++	// Raised before trying, so an upcall that frees space after a failed attempt still flushes
++	mSendBlocked = true;
+ 	// Flush the queue, and if nothing is pending, try to send directly
+-	if (trySendQueue() && trySendMessage(message))
++	if (trySendQueue() && trySendMessage(message)) {
++		mSendBlocked = false;
+ 		return true;
++	}
+ 
+ 	mSendQueue.push(message);
+ 	updateBufferedAmount(to_uint16(message->stream), ptrdiff_t(message_size_func(message)));
+@@ -399,7 +403,8 @@
+ 		if (state() != State::Connected)
+ 			return false;
+ 
+-		trySendQueue();
++		if (trySendQueue())
++			mSendBlocked = false;
+ 		return true;
+ 
+ 	} catch (const std::exception &e) {
+@@ -414,6 +419,7 @@
+ 	// RFC 8831 6.7. Closing a Data Channel
+ 	// Closing of a data channel MUST be signaled by resetting the corresponding outgoing streams
+ 	// See https://www.rfc-editor.org/rfc/rfc8831.html#section-6.7
++	mSendBlocked = true;
+ 	mSendQueue.push(make_message(0, Message::Reset, to_uint16(stream)));
+ 
+ 	// This method must not call the buffered callback synchronously
+@@ -591,7 +597,8 @@
+ 	std::lock_guard lock(mSendMutex);
+ 	--mPendingFlushCount;
+ 	try {
+-		trySendQueue();
++		if (trySendQueue())
++			mSendBlocked = false;
+ 	} catch (const std::exception &e) {
+ 		PLOG_WARNING << e.what();
+ 	}
+@@ -802,7 +809,8 @@
+ 		if ((events & SCTP_EVENT_READ) && feeding != this)
+ 			enqueueRecv();
+ 
+-		if (events & SCTP_EVENT_WRITE)
++		// Every acknowledgement makes room, but a flush only helps a send that is waiting for it
++		if ((events & SCTP_EVENT_WRITE) && mSendBlocked)
+ 			enqueueFlush();
+ 
+ 	} catch (const std::exception &e) {
+--- a/src/impl/sctptransport.hpp
++++ b/src/impl/sctptransport.hpp
+@@ -110,6 +110,8 @@
+ 	std::atomic<bool> mRecvPaused = false;
+ 	std::atomic<bool> mClosing = false;
+ 	std::atomic<int> mPendingFlushCount = 0;
++	// Set while a send may wait for space, so writable upcalls only schedule a flush then
++	std::atomic<bool> mSendBlocked = false;
+ 	std::mutex mRecvMutex;
+ 	std::recursive_mutex mSendMutex; // buffered amount callback is synchronous
+ 	Queue<message_ptr> mSendQueue;
