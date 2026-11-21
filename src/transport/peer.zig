@@ -296,6 +296,8 @@ pub const Peer = struct {
     spilled_messages: u64 = 0,
     spill_overflows: u64 = 0,
     active_sends: usize = 0,
+    /// At least what each channel's native send queue holds. Only `send` touches it, and callers serialize sends.
+    buffered_bound: [2]usize = .{ 0, 0 },
     segment_payload: std.atomic.Value(usize) = .init(0),
     /// Awake-clock nanoseconds when the last send finished, zero before any.
     last_send: std.atomic.Value(i64) = .init(0),
@@ -1017,23 +1019,23 @@ pub const Peer = struct {
         );
 
         const channel = channels[@backingInt(reliability)];
-        const buffered_zone = trace.zone(@src(), "rtcGetBufferedAmount");
-        const buffered = c.rtcGetBufferedAmount(channel);
-        buffered_zone.end();
-        try check(buffered);
-
         const fragment_count = if (data.len == 0)
             0
         else
             (data.len - 1) / segment + 1;
 
         const send_size = data.len + fragment_count;
-        const buffered_size: usize = @intCast(buffered);
+        const limit = self.options.maximum_buffered_send;
+        const bound = &self.buffered_bound[@backingInt(reliability)];
 
-        if (buffered_size > self.options.maximum_buffered_send or
-            send_size > self.options.maximum_buffered_send - buffered_size)
-        {
-            return error.Backpressure;
+        // The queue only grows by what we send, so the bound can skip the native lookup until it nears the limit
+        if (bound.* > limit or send_size > limit - bound.*) {
+            const buffered_zone = trace.zone(@src(), "rtcGetBufferedAmount");
+            const buffered = c.rtcGetBufferedAmount(channel);
+            buffered_zone.end();
+            try check(buffered);
+            bound.* = @intCast(buffered);
+            if (bound.* > limit or send_size > limit - bound.*) return error.Backpressure;
         }
 
         if (data.len != 0 and
@@ -1057,6 +1059,7 @@ pub const Peer = struct {
                 return err;
             };
         }
+        bound.* += send_size;
         self.last_send.store(@intCast(std.Io.Clock.awake.now(self.io).nanoseconds), .release);
     }
 
