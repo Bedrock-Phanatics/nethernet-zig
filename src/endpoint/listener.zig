@@ -388,6 +388,9 @@ pub const Listener = struct {
     fn writeError(self: *Listener, stream: std.Io.net.Stream, status: std.http.Status) void {
         var buffer: [256]u8 = undefined;
         var writer = stream.writer(self.io, &buffer);
+        // A failed write that observed a close takes the cancelation with it, which would leave the
+        // worker's next accept uncancelable, so it is put back for the caller to see
+        defer if (writer.err) |err| if (err == error.Canceled) self.io.recancel();
         writer.interface.print(
             "HTTP/1.1 {d} {s}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
             .{ @backingInt(status), status.phrase() orelse "Error" },
@@ -798,7 +801,7 @@ pub const Listener = struct {
                         });
 
                         answered = true;
-                        stream.shutdown(self.io, .send) catch {};
+                        stream.shutdown(self.io, .send) catch |err| if (err == error.Canceled) return error.Canceled;
                         self.trace("HTTP 200 application/sdp returned", .{});
                     },
 
@@ -1038,6 +1041,32 @@ test "HTTP capacity exhaustion returns 503 and releases reservations" {
         try std.testing.expectEqual(@as(usize, 0), accepts);
         try std.testing.expectEqual(@as(usize, 0), negotiations);
     }
+}
+
+test "an error response written during a close keeps the cancelation for the worker" {
+    const io = std.testing.io;
+    var server = try (try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0")).listen(io, .{});
+    defer server.deinit(io);
+    const client = try server.socket.address.connect(io, .{ .mode = .stream });
+    defer client.close(io);
+    const accepted = try server.accept(io);
+    defer accepted.close(io);
+
+    const Worker = struct {
+        fn run(stream: std.Io.net.Stream) bool {
+            var listener: Listener = undefined;
+            listener.io = io;
+            // Hold off until the cancelation is pending, then let the write be the first point that sees it
+            const protection = io.swapCancelProtection(.blocked);
+            io.sleep(.fromMilliseconds(100), .awake) catch unreachable;
+            _ = io.swapCancelProtection(protection);
+            listener.writeError(stream, .bad_request);
+            io.checkCancel() catch return true;
+            return false;
+        }
+    };
+    var worker = try io.concurrent(Worker.run, .{accepted});
+    try std.testing.expect(worker.cancel(io));
 }
 
 test "a second listener cannot take a port that is already serving" {
