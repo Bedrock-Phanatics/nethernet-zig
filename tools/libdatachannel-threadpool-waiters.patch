@@ -19,7 +19,7 @@
  	}
  
  	std::unique_lock lock(mWorkersMutex);
-@@ -70,8 +73,21 @@
+@@ -70,8 +73,25 @@
  	return false;
  }
  
@@ -35,13 +35,17 @@
  std::function<void()> ThreadPool::dequeue() {
  	std::unique_lock lock(mMutex);
 +	thread_local Waiter *local = nullptr;
-+	if (!local)
++	if (!local && !mSpare.empty()) {
++		local = mSpare.back();
++		mSpare.pop_back();
++	} else if (!local) {
 +		local = mWaiters.emplace_back(std::make_unique<Waiter>()).get();
++	}
 +	Waiter &waiter = *local;
  	while (!mJoining) {
  		std::optional<clock::time_point> time;
  		if (!mTasks.empty()) {
-@@ -86,10 +102,14 @@
+@@ -86,11 +106,19 @@
  		--mBusyWorkers;
  		scope_guard guard([&]() { ++mBusyWorkers; });
  		mWaitingCondition.notify_all();
@@ -56,11 +60,16 @@
 +		if (!waiter.woken)
 +			mIdle.erase(std::find(mIdle.begin(), mIdle.end(), &waiter));
  	}
++	// The pool respawns after a join, so the next worker reuses this waiter. A signal still on its
++	// way only wakes that worker spuriously.
++	mSpare.push_back(local);
++	local = nullptr;
  	return nullptr;
  }
+ 
 --- a/src/impl/threadpool.hpp
 +++ b/src/impl/threadpool.hpp
-@@ -77,7 +77,18 @@
+@@ -77,7 +77,19 @@
  	};
  	std::priority_queue<Task, std::deque<Task>, std::greater<Task>> mTasks;
  
@@ -74,13 +83,14 @@
 +	std::vector<Waiter *> mIdle; // guarded by mMutex, the most recently idle last
 +	// Waiters live as long as the pool, so a signal sent after unlocking never outlives its target
 +	std::vector<std::unique_ptr<Waiter>> mWaiters; // guarded by mMutex
++	std::vector<Waiter *> mSpare;                  // guarded by mMutex, left by joined workers
 +	Waiter *popIdle();                              // requires mMutex
 +
 +	std::condition_variable mWaitingCondition;
  	mutable std::mutex mMutex, mWorkersMutex;
  };
  
-@@ -108,12 +119,15 @@
+@@ -108,12 +120,15 @@
  	std::future<R> result = task->get_future();
  	std::function<void()> func = [task = std::move(task)]() { return (*task)(); };
  
