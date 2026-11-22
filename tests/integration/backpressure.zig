@@ -5,6 +5,7 @@ const receiveDeadline = @import("concurrency.zig").receiveDeadline;
 
 const message_size = 1200;
 const message_count = 3000;
+const maximum_buffered_send = 256 * 1024;
 
 fn connect(io: std.Io, client: *Connection, server: *Connection) !void {
     try client.start();
@@ -29,7 +30,7 @@ fn connect(io: std.Io, client: *Connection, server: *Connection) !void {
 fn createPair(io: std.Io, id: u64) ![2]*Connection {
     const allocator = std.testing.allocator;
     const client = try Connection.create(allocator, io, .client, id, "server", .{
-        .native = .{ .disable_trickle = true, .maximum_buffered_send = 256 * 1024 },
+        .native = .{ .disable_trickle = true, .maximum_buffered_send = maximum_buffered_send },
     });
     errdefer client.destroy();
     const server = try Connection.create(allocator, io, .server, id, "client", .{
@@ -59,6 +60,8 @@ const Sender = struct {
                     },
                     else => return err,
                 };
+                // Sends skip the native lookup while their bound allows, so check it never lets the queue past the limit
+                try std.testing.expect(try self.connection.bufferedAmount() <= maximum_buffered_send);
                 break;
             }
         }
