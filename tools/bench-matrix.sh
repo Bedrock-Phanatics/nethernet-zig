@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Runs the stress workloads against several native builds, alternating them within each repetition so
-# machine drift lands on all alike. One JSON line per run goes to <out>/<prefix name>.jsonl.
 # usage: tools/bench-matrix.sh <out> <repetitions> <native prefix>...
 set -eu
 cd "$(dirname "$0")/.."

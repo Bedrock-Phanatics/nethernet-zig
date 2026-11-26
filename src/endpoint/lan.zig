@@ -17,8 +17,7 @@ pub const Options = struct {
     maximum_offers_per_second: u32 = 16,
     /// Signaled on discovery traffic and negotiation progress instead of the listener's own wakeup.
     wakeup: ?*wake.Wakeup = null,
-    /// Vanilla LAN hosts answer without an identity, which keeps an answer within one datagram for consoles.
-    /// go-nethernet before its LAN fit change rejects such answers, so sign them for those clients.
+    /// Vanilla answers unsigned over LAN; older go-nethernet clients reject that.
     sign_answers: bool = false,
 };
 
@@ -312,7 +311,6 @@ pub fn dial(
 
     var connection_options = options;
     connection_options.local_network_id = local_id;
-    // Vanilla hosts answer without an identity over LAN; one that is sent is still verified.
     if (options.verify_server == null) connection_options.allow_anonymous = true;
 
     var random: [8]u8 = undefined;
@@ -367,10 +365,9 @@ pub fn dial(
     return connection;
 }
 
-/// Vanilla declares at most this much message data, and Xbox consoles lose an answer split into IP fragments.
+/// Xbox consoles lose an answer split into IP fragments.
 const maximum_signal_length = codec.maximum_declared_message_data;
 
-/// Drops the last candidates until the signal fits one discovery datagram, keeping at least one.
 fn fitSignal(signal: Signal, buffer: *[maximum_signal_length]u8) Signal {
     const limit = maximum_signal_length - (signal.kind.len + 2 + std.fmt.count("{d}", .{signal.connection_id}));
     if (signal.data.len <= limit) return signal;
@@ -403,7 +400,6 @@ const Lines = struct {
     data: []const u8,
     start: usize = 0,
 
-    /// Each line with its ending.
     fn next(self: *Lines) ?[]const u8 {
         if (self.start == self.data.len) return null;
         const end = if (std.mem.indexOfScalarPos(u8, self.data, self.start, '\n')) |newline| newline + 1 else self.data.len;

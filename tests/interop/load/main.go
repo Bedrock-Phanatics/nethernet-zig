@@ -65,8 +65,7 @@ func serve(addr string) {
 	}
 }
 
-// Every tenth message is unreliable. Newer go-nethernet receives either kind from both channels, so the
-// echo and the counts go by the sequence instead of the channel a message came from.
+// Newer go-nethernet receives either kind from both channels, so the sequence decides.
 func reliabilityOf(data []byte, fallback nethernet.MessageReliability) nethernet.MessageReliability {
 	if len(data) < 8 {
 		return fallback
@@ -148,8 +147,6 @@ func load(addr string, n, rate int, duration time.Duration, dialers int) {
 		for _, r := range []nethernet.MessageReliability{nethernet.MessageReliabilityReliable, nethernet.MessageReliabilityUnreliable} {
 			go func() {
 				var local []time.Duration
-				// Each receiver sees an increasing share of the reliable stream, which go-nethernet may
-				// hand to either of them.
 				var lastReliable uint64
 				defer func() { s.mu.Lock(); s.rtts = append(s.rtts, local...); s.mu.Unlock() }()
 				for {

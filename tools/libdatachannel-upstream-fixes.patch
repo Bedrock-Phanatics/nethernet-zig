@@ -1,13 +1,12 @@
 --- a/src/impl/dtlstransport.cpp
 +++ b/src/impl/dtlstransport.cpp
-@@ -455,9 +455,8 @@
+@@ -455,9 +455,7 @@
  
  void DtlsTransport::start() {
  	PLOG_DEBUG << "Starting DTLS transport";
 -	registerIncoming();
 -	changeState(State::Connecting);
  
-+	// Before incoming datagrams can reach the session
  	{
  		std::lock_guard lock(mSslMutex);
  		size_t mtu = mMtu.value_or(DEFAULT_MTU) - 8 - 40; // UDP/IPv6

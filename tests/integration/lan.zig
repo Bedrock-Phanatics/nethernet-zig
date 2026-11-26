@@ -143,7 +143,6 @@ test "LAN discovery signaling negotiates WebRTC with trickle ICE" {
     taken = true;
     defer client.destroy();
 
-    // Like vanilla, a LAN host answers without an identity.
     try std.testing.expect(client.public_key == null);
     const transfer_started = std.Io.Clock.awake.now(io);
     try client.send("LAN application payload", .reliable);

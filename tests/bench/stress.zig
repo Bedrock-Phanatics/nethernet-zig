@@ -33,7 +33,6 @@ const Config = struct {
     rtc_threads: u32 = 0,
     slow_server_ms: u32 = 0,
     disconnect_at_ms: u64 = 0,
-    /// Poll every connection on each wake, as a shared `Wakeup` forces, instead of only flagged ones.
     scan: bool = false,
     rto_min_ms: u31 = 0,
     rto_initial_ms: u31 = 0,
@@ -87,7 +86,6 @@ const CountingAllocator = struct {
     }
 };
 
-/// Set from a connection's callback, so a pass only polls connections with something new.
 const Flag = struct {
     wakeup: *nethernet.Wakeup,
     io: std.Io,

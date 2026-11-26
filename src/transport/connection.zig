@@ -196,7 +196,6 @@ pub const Options = struct {
     /// A configured verifier still requires an identity.
     allow_anonymous: bool = false,
     identity: ?auth.Identity = null,
-    /// Whether local descriptions carry an identity assertion. Vanilla sends none over LAN.
     send_identity: bool = true,
     server_identity_key: ?auth.KeyPair = null,
     server_identity_domain: []const u8 = "self",
