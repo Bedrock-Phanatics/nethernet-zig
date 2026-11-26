@@ -1,0 +1,194 @@
+diff --git a/deps/libjuice/src/agent.c b/deps/libjuice/src/agent.c
+index 03d8cb8..7a21e3c 100644
+--- a/deps/libjuice/src/agent.c
++++ b/deps/libjuice/src/agent.c
+@@ -549,7 +549,11 @@ int agent_set_remote_description(juice_agent_t *agent, const char *sdp) {
+ 		return JUICE_ERR_FAILED;
+ 	}
+ 
+-	agent->remote = remote;
++	// Preserve existing candidates referenced by active pairs.
++	strcpy(agent->remote.ice_ufrag, remote.ice_ufrag);
++	strcpy(agent->remote.ice_pwd, remote.ice_pwd);
++	agent->remote.ice_lite = remote.ice_lite;
++	agent->remote.finished = agent->remote.finished || remote.finished;
+ 
+ 	agent_update_pac_timer(agent);
+ 
+@@ -569,9 +573,13 @@ int agent_set_remote_description(juice_agent_t *agent, const char *sdp) {
+ 	for (int i = 0; i < agent->candidate_pairs_count; ++i) {
+ 		agent_unfreeze_candidate_pair(agent, agent->candidate_pairs + i);
+ 	}
+-	JLOG_DEBUG("Adding %d candidates from remote description", (int)agent->remote.candidates_count);
+-	for (int i = 0; i < agent->remote.candidates_count; ++i) {
+-		ice_candidate_t *remote = agent->remote.candidates + i;
++	JLOG_DEBUG("Adding %d candidates from remote description", (int)remote.candidates_count);
++	for (int i = 0; i < remote.candidates_count; ++i) {
++		if (ice_add_candidate(remote.candidates + i, &agent->remote)) {
++			JLOG_WARN("Failed to add candidate from remote description");
++			continue;
++		}
++		ice_candidate_t *remote = agent->remote.candidates + agent->remote.candidates_count - 1;
+ 		if (agent_add_candidate_pairs_for_remote(agent, remote))
+ 			JLOG_WARN("Failed to add candidate pair");
+ 	}
+diff --git a/deps/libjuice/src/agent.c b/deps/libjuice/src/agent.c
+index 7a21e3c..73f244f 100644
+--- a/deps/libjuice/src/agent.c
++++ b/deps/libjuice/src/agent.c
+@@ -1744,8 +1744,11 @@ int agent_send_stun_binding(juice_agent_t *agent, agent_stun_entry_t *entry, stu
+ 			// Once the controlling agent has picked a valid pair for nomination, it repeats the
+ 			// connectivity check that produced this valid pair [...], this time with the
+ 			// USE-CANDIDATE attribute.
++
++			// Keep the attribute on the later checks of the pair: a controlled agent that already
++			// has the nomination changes nothing, and one that missed it gets it again.
+ 			msg.use_candidate = agent->mode == AGENT_MODE_CONTROLLING && entry->pair &&
+-			                    entry->pair->nomination_requested && !entry->pair->nominated;
++			                    entry->pair->nomination_requested;
+ 
+ 			entry->mode = agent->mode; // save current mode in case of conflict
+ 			break;
+diff --git a/deps/libjuice/src/agent.c b/deps/libjuice/src/agent.c
+index 6d1dcf2..e66af01 100644
+--- a/deps/libjuice/src/agent.c
++++ b/deps/libjuice/src/agent.c
+@@ -1437,7 +1437,7 @@ int agent_process_stun_binding(juice_agent_t *agent, const stun_message_t *msg,
+ 			return -1;
+ 
+ 		ice_candidate_pair_t *pair = entry->pair;
+-		if (msg->ice_controlling == msg->ice_controlled) {
++		if (msg->has_ice_controlling == msg->has_ice_controlled) {
+ 			JLOG_WARN("Controlling and controlled attributes mismatch in request");
+ 			agent_send_stun_binding(agent, entry, STUN_CLASS_RESP_ERROR, 400, msg->transaction_id,
+ 			                        NULL);
+@@ -1451,7 +1451,7 @@ int agent_process_stun_binding(juice_agent_t *agent, const stun_message_t *msg,
+ 		//  ERROR-CODE attribute with a value of 487 (Role Conflict) but retains its role.
+ 		//  * If the agent's tiebreaker value is less than the contents of the ICE-CONTROLLING
+ 		//  attribute, the agent switches to the controlled role.
+-		if (agent->mode == AGENT_MODE_CONTROLLING && msg->ice_controlling) {
++		if (agent->mode == AGENT_MODE_CONTROLLING && msg->has_ice_controlling) {
+ 			JLOG_WARN("ICE role conflict (both controlling)");
+ 			if (agent->ice_tiebreaker >= msg->ice_controlling) {
+ 				JLOG_DEBUG("Asking remote peer to switch roles");
+@@ -1471,9 +1471,9 @@ int agent_process_stun_binding(juice_agent_t *agent, const stun_message_t *msg,
+ 		//  * If the agent's tiebreaker value is less than the contents of the ICE-CONTROLLED
+ 		//  attribute, the agent generates a Binding error response and includes an ERROR-CODE
+ 		//  attribute with a value of 487 (Role Conflict) but retains its role.
+-		if (agent->mode == AGENT_MODE_CONTROLLED && msg->ice_controlled) {
++		if (agent->mode == AGENT_MODE_CONTROLLED && msg->has_ice_controlled) {
+ 			JLOG_WARN("ICE role conflict (both controlled)");
+-			if (agent->ice_tiebreaker >= msg->ice_controlling) {
++			if (agent->ice_tiebreaker >= msg->ice_controlled) {
+ 				JLOG_DEBUG("Switching to controlling role");
+ 				agent->mode = AGENT_MODE_CONTROLLING;
+ 				agent_update_candidate_pairs(agent);
+@@ -1485,7 +1485,7 @@ int agent_process_stun_binding(juice_agent_t *agent, const stun_message_t *msg,
+ 			break;
+ 		}
+ 		if (msg->use_candidate) {
+-			if (!msg->ice_controlling) {
++			if (!msg->has_ice_controlling) {
+ 				JLOG_WARN("STUN message use_candidate missing ice_controlling attribute");
+ 				agent_send_stun_binding(agent, entry, STUN_CLASS_RESP_ERROR, 400,
+ 				                        msg->transaction_id, NULL);
+@@ -1713,8 +1713,10 @@ int agent_send_stun_binding(juice_agent_t *agent, agent_stun_entry_t *entry, stu
+ 			snprintf(msg.credentials.username, STUN_MAX_USERNAME_LEN, "%s:%s",
+ 			         agent->remote.ice_ufrag, agent->local.ice_ufrag);
+ 			password = agent->remote.ice_pwd;
+-			msg.ice_controlling = agent->mode == AGENT_MODE_CONTROLLING ? agent->ice_tiebreaker : 0;
+-			msg.ice_controlled = agent->mode == AGENT_MODE_CONTROLLED ? agent->ice_tiebreaker : 0;
++			msg.has_ice_controlling = agent->mode == AGENT_MODE_CONTROLLING;
++			msg.has_ice_controlled = agent->mode == AGENT_MODE_CONTROLLED;
++			msg.ice_controlling = msg.has_ice_controlling ? agent->ice_tiebreaker : 0;
++			msg.ice_controlled = msg.has_ice_controlled ? agent->ice_tiebreaker : 0;
+ 
+ 			// RFC 8445 7.1.1. PRIORITY
+ 			// The PRIORITY attribute MUST be included in a Binding request and be set to the value
+diff --git a/deps/libjuice/src/stun.c b/deps/libjuice/src/stun.c
+index e6d46d0..9c61b50 100644
+--- a/deps/libjuice/src/stun.c
++++ b/deps/libjuice/src/stun.c
+@@ -157,14 +157,14 @@ int stun_write(void *buf, size_t size, const stun_message_t *msg, const char *pa
+ 			goto overflow;
+ 		pos += len;
+ 	}
+-	if (msg->ice_controlling) {
++	if (msg->has_ice_controlling) {
+ 		uint64_t ice_controlling = htonll(msg->ice_controlling);
+ 		len = stun_write_attr(pos, end - pos, STUN_ATTR_ICE_CONTROLLING, &ice_controlling, 8);
+ 		if (len <= 0)
+ 			goto overflow;
+ 		pos += len;
+ 	}
+-	if (msg->ice_controlled) {
++	if (msg->has_ice_controlled) {
+ 		uint64_t ice_controlled = htonll(msg->ice_controlled);
+ 		len = stun_write_attr(pos, end - pos, STUN_ATTR_ICE_CONTROLLED, &ice_controlled, 8);
+ 		if (len <= 0)
+@@ -916,6 +916,7 @@ int stun_read_attr(const void *data, size_t size, stun_message_t *msg, uint8_t *
+ 		}
+ 		uint32_t *value32 = (uint32_t *)attr->value;
+ 		msg->ice_controlling = ((uint64_t)ntohl(value32[0]) << 32) | ntohl(value32[1]);
++		msg->has_ice_controlling = true;
+ 		break;
+ 	}
+ 	case STUN_ATTR_ICE_CONTROLLED: {
+@@ -926,6 +927,7 @@ int stun_read_attr(const void *data, size_t size, stun_message_t *msg, uint8_t *
+ 		}
+ 		uint32_t *value32 = (uint32_t *)attr->value;
+ 		msg->ice_controlled = ((uint64_t)ntohl(value32[0]) << 32) | ntohl(value32[1]);
++		msg->has_ice_controlled = true;
+ 		break;
+ 	}
+ 	case STUN_ATTR_CHANNEL_NUMBER: {
+diff --git a/deps/libjuice/src/stun.h b/deps/libjuice/src/stun.h
+index 398bfb0..61f4246 100644
+--- a/deps/libjuice/src/stun.h
++++ b/deps/libjuice/src/stun.h
+@@ -319,6 +319,8 @@ typedef struct stun_message {
+ 	uint32_t priority;
+ 	uint64_t ice_controlling;
+ 	uint64_t ice_controlled;
++	bool has_ice_controlling;
++	bool has_ice_controlled;
+ 	bool use_candidate;
+ 	addr_record_t mapped;
+ 
+diff --git a/deps/libjuice/src/turn.c b/deps/libjuice/src/turn.c
+index 985300d..7b8c4b8 100644
+--- a/deps/libjuice/src/turn.c
++++ b/deps/libjuice/src/turn.c
+@@ -156,14 +156,15 @@ static void delete_entry(turn_map_t *map, turn_entry_t *entry) {
+ */
+ static turn_entry_t *find_entry(turn_map_t *map, const addr_record_t *record,
+                                 turn_entry_type_t type, bool allow_deleted) {
+-	// RFC 5766: only addresses are compared and port numbers are not considered.
+-	unsigned long key = (addr_record_hash(record, false /*no port*/) + (int)type) % map->map_size;
++	// RFC 5766: (For permissions) only addresses are compared and port numbers are not considered
++	bool with_port = (type != TURN_ENTRY_TYPE_PERMISSION);
++	unsigned long key = addr_record_hash(record, with_port) % map->map_size;
+ 	unsigned long pos = key;
+ 	while (true) {
+ 		turn_entry_t *entry = map->map + pos;
+ 		if (entry->type == TURN_ENTRY_TYPE_EMPTY ||
+ 		    (entry->type == type &&
+-		     addr_record_is_equal(&entry->record, record, false /*no port*/)))
++		     addr_record_is_equal(&entry->record, record, with_port)))
+ 			break;
+ 
+ 		if (allow_deleted && entry->type == TURN_ENTRY_TYPE_DELETED)
+diff --git a/deps/libjuice/src/conn_poll.c b/deps/libjuice/src/conn_poll.c
+index 7d6ed7b..244f243 100644
+--- a/deps/libjuice/src/conn_poll.c
++++ b/deps/libjuice/src/conn_poll.c
+@@ -481,6 +481,9 @@ int conn_poll_process(conn_registry_t *registry, pfds_record_t *pfds) {
+ 		if (conn_impl->tcp_sock == INVALID_SOCKET)
+ 			continue;
+ 
++		if (i >= pfds->size)
++			break;
++
+ 		struct pollfd *tcp_pfd = pfds->pfds + i;
+ 		if (tcp_pfd->fd != conn_impl->tcp_sock)
+ 			break;

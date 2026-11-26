@@ -1,0 +1,37 @@
+--- a/src/impl/dtlstransport.cpp
++++ b/src/impl/dtlstransport.cpp
+@@ -455,9 +455,8 @@
+ 
+ void DtlsTransport::start() {
+ 	PLOG_DEBUG << "Starting DTLS transport";
+-	registerIncoming();
+-	changeState(State::Connecting);
+ 
++	// Before incoming datagrams can reach the session
+ 	{
+ 		std::lock_guard lock(mSslMutex);
+ 		size_t mtu = mMtu.value_or(DEFAULT_MTU) - 8 - 40; // UDP/IPv6
+@@ -465,6 +464,9 @@
+ 		PLOG_VERBOSE << "DTLS MTU set to " << mtu;
+ 	}
+ 
++	registerIncoming();
++	changeState(State::Connecting);
++
+ 	enqueueRecv(); // to initiate the handshake
+ }
+ 
+diff --git a/src/impl/iceudpmuxlistener.cpp b/src/impl/iceudpmuxlistener.cpp
+index e3ec31d..81f2ef4 100644
+--- a/src/impl/iceudpmuxlistener.cpp
++++ b/src/impl/iceudpmuxlistener.cpp
+@@ -28,7 +28,8 @@ void IceUdpMuxListener::UnhandledStunRequestCallback(const juice_mux_binding_req
+ }
+ #endif
+ 
+-IceUdpMuxListener::IceUdpMuxListener(uint16_t port, [[maybe_unused]] optional<string> bindAddress) : port(port) {
++IceUdpMuxListener::IceUdpMuxListener(uint16_t port, [[maybe_unused]] optional<string> bindAddress)
++    : port(port), mStopped(false) {
+ 	PLOG_VERBOSE << "Creating IceUdpMuxListener";
+ 
+ #if !USE_NICE
