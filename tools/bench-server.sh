@@ -10,7 +10,7 @@ connections=$1
 rate=$2
 seconds=$3
 shift 3
-[ -x zig-out/bin/nethernet-load ] || (cd tests/interop && go build -o ../../zig-out/bin/nethernet-load ./load)
+(cd tests/interop && go build -o ../../zig-out/bin/nethernet-load ./load)
 
 addr="127.0.0.1:$((18800 + RANDOM % 100))"
 "${@//\{addr\}/$addr}" > /dev/null 2>&1 &
