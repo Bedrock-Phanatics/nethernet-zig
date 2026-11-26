@@ -29,3 +29,5 @@ race:sctp_send_stream_reset_out_if_possible
 race:rtc::impl::Channel::resetCallbacks
 race:rtc::impl::Channel::triggerClosed
 race:sctp_send_shutdown
+# Reads the atomically counted associations for its limit without a lock
+race:sctp_aloc_assoc_locked
