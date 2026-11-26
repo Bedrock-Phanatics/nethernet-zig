@@ -1,0 +1,195 @@
+--- a/deps/libjuice/src/conn_poll.c
++++ b/deps/libjuice/src/conn_poll.c
+@@ -37,13 +37,24 @@
+ #ifdef __linux__
+ 	// The poll loop takes over while any ICE-TCP socket exists, their interest set changes
+ 	int epoll_fd;
+-	timestamp_t next_timestamp;
+ 	int live;
+ 	int tcp_count;
+ 	bool rescan;
++	// Min-heap of agent deadlines, so a due timer costs O(log n) instead of a pass over every agent.
++	// Entries an agent has since moved away from are dropped when they surface.
++	struct conn_timer *timers;
++	int timers_count;
++	int timers_size;
+ #endif
+ } registry_impl_t;
+ 
++#ifdef __linux__
++typedef struct conn_timer {
++	timestamp_t time;
++	int index;
++} conn_timer_t;
++#endif
++
+ typedef enum conn_state { CONN_STATE_NEW = 0, CONN_STATE_READY, CONN_STATE_FINISHED } conn_state_t;
+ 
+ typedef struct conn_impl {
+@@ -60,6 +71,8 @@
+ 	timestamp_t next_timestamp;
+ #ifdef __linux__
+ 	bool epoll_udp;
++	bool timer_set;
++	timestamp_t timer_time; // earliest heap entry while timer_set
+ #endif
+ } conn_impl_t;
+ 
+@@ -109,10 +122,91 @@
+ 	conn_impl->epoll_udp = false;
+ }
+ 
++static void conn_epoll_schedule(registry_impl_t *registry_impl, juice_agent_t *agent) {
++	conn_impl_t *conn_impl = agent->conn_impl;
++	timestamp_t time = conn_impl->next_timestamp;
++	if (agent->conn_index < 0 || (conn_impl->timer_set && conn_impl->timer_time <= time))
++		return;
++
++	if (registry_impl->timers_count == registry_impl->timers_size) {
++		int size = registry_impl->timers_size ? registry_impl->timers_size * 2 : 64;
++		conn_timer_t *timers = realloc(registry_impl->timers, size * sizeof(conn_timer_t));
++		if (!timers) {
++			// Retried by a full sweep, which reschedules every agent
++			JLOG_ERROR("Memory allocation failed for connection timers");
++			registry_impl->rescan = true;
++			return;
++		}
++		registry_impl->timers = timers;
++		registry_impl->timers_size = size;
++	}
++
++	conn_timer_t *timers = registry_impl->timers;
++	int i = registry_impl->timers_count++;
++	while (i > 0 && timers[(i - 1) / 2].time > time) {
++		timers[i] = timers[(i - 1) / 2];
++		i = (i - 1) / 2;
++	}
++	timers[i].time = time;
++	timers[i].index = agent->conn_index;
++	conn_impl->timer_set = true;
++	conn_impl->timer_time = time;
++}
++
++static conn_timer_t conn_epoll_pop_timer(registry_impl_t *registry_impl) {
++	conn_timer_t *timers = registry_impl->timers;
++	conn_timer_t top = timers[0];
++	conn_timer_t last = timers[--registry_impl->timers_count];
++	int count = registry_impl->timers_count;
++	int i = 0;
++	while (2 * i + 1 < count) {
++		int child = 2 * i + 1;
++		if (child + 1 < count && timers[child + 1].time < timers[child].time)
++			++child;
++		if (timers[child].time >= last.time)
++			break;
++		timers[i] = timers[child];
++		i = child;
++	}
++	if (count > 0)
++		timers[i] = last;
++	return top;
++}
++
++static void conn_epoll_fail(registry_impl_t *registry_impl, conn_impl_t *conn_impl) {
++	JLOG_WARN("Agent update failed");
++	conn_impl->state = CONN_STATE_FINISHED;
++	conn_epoll_unwatch(registry_impl, conn_impl);
++	registry_impl->live--;
++}
++
++static void conn_epoll_run_timers(conn_registry_t *registry, timestamp_t now) {
++	registry_impl_t *registry_impl = registry->impl;
++	while (registry_impl->timers_count > 0 && registry_impl->timers[0].time <= now) {
++		conn_timer_t timer = conn_epoll_pop_timer(registry_impl);
++		if (timer.index >= registry->agents_size)
++			continue;
++
++		juice_agent_t *agent = registry->agents[timer.index];
++		conn_impl_t *conn_impl = agent ? agent->conn_impl : NULL;
++		if (!conn_impl || conn_impl->state != CONN_STATE_READY || !conn_impl->timer_set ||
++		    conn_impl->timer_time != timer.time)
++			continue;
++
++		conn_impl->timer_set = false;
++		if (conn_impl->next_timestamp <= now &&
++		    agent_conn_update(agent, &conn_impl->next_timestamp) != 0) {
++			conn_epoll_fail(registry_impl, conn_impl);
++			continue;
++		}
++		conn_epoll_schedule(registry_impl, agent);
++	}
++}
++
+ static int conn_epoll_sweep(conn_registry_t *registry, timestamp_t now) {
+ 	registry_impl_t *registry_impl = registry->impl;
+-	registry_impl->next_timestamp = now + 60000;
+ 	registry_impl->rescan = false;
++	registry_impl->timers_count = 0;
+ 
+ 	int live = 0;
+ 	for (int i = 0; i < registry->agents_size; ++i) {
+@@ -139,9 +233,8 @@
+ 			}
+ 		}
+ 
+-		if (registry_impl->next_timestamp > conn_impl->next_timestamp)
+-			registry_impl->next_timestamp = conn_impl->next_timestamp;
+-
++		conn_impl->timer_set = false;
++		conn_epoll_schedule(registry_impl, agent);
+ 		live++;
+ 	}
+ 	return live;
+@@ -153,16 +246,21 @@
+ 
+ 	mutex_lock(&registry->mutex);
+ 	if (registry_impl->tcp_count > 0) {
++		// The poll loop keeps its own timers meanwhile, so the heap is rebuilt once it hands back
++		registry_impl->rescan = true;
+ 		mutex_unlock(&registry->mutex);
+ 		return 2;
+ 	}
+ 
+ 	timestamp_t now = current_timestamp();
+-	if (registry_impl->rescan || now >= registry_impl->next_timestamp)
++	if (registry_impl->rescan)
+ 		registry_impl->live = conn_epoll_sweep(registry, now);
++	else
++		conn_epoll_run_timers(registry, now);
+ 
+ 	int live = registry_impl->live;
+-	timediff_t timediff = registry_impl->next_timestamp - now;
++	timediff_t timediff =
++	    registry_impl->timers_count > 0 ? registry_impl->timers[0].time - now : 60000;
+ 	mutex_unlock(&registry->mutex);
+ 
+ 	if (live <= 0)
+@@ -221,8 +319,8 @@
+ 		if (conn_impl->state == CONN_STATE_FINISHED) {
+ 			conn_epoll_unwatch(registry_impl, conn_impl);
+ 			registry_impl->live--;
+-		} else if (registry_impl->next_timestamp > conn_impl->next_timestamp) {
+-			registry_impl->next_timestamp = conn_impl->next_timestamp;
++		} else {
++			conn_epoll_schedule(registry_impl, agent);
+ 		}
+ 	}
+ 	mutex_unlock(&registry->mutex);
+@@ -327,6 +425,7 @@
+ #ifdef __linux__
+ 	if (registry_impl->epoll_fd >= 0)
+ 		close(registry_impl->epoll_fd);
++	free(registry_impl->timers);
+ #endif
+ 	free(registry->impl);
+ 	registry->impl = NULL;
+@@ -818,8 +917,7 @@
+ 	mutex_lock(&registry->mutex);
+ 	conn_impl->next_timestamp = current_timestamp();
+ #ifdef __linux__
+-	if (registry_impl->next_timestamp > conn_impl->next_timestamp)
+-		registry_impl->next_timestamp = conn_impl->next_timestamp;
++	conn_epoll_schedule(registry_impl, agent);
+ #endif
+ 	mutex_unlock(&registry->mutex);
+ 
