@@ -163,8 +163,10 @@ sh tests/interop/run.sh            # needs Go
 ```
 
 `tools/stress-diagnostics.sh asan|tsan|zig-tsan|valgrind` runs the stress harness under sanitizers
-on Linux, `perf` and `massif` profile its CPU and native heap, or the integration tests with `NETHERNET_DIAGNOSTICS_STEP=test-integration`. `zig build echo-install` and `tests/interop/load` measure a server against go-nethernet
-clients from another process.
+on Linux, `perf` and `massif` profile its CPU and native heap, or the integration tests with `NETHERNET_DIAGNOSTICS_STEP=test-integration`. `tools/bench-server.sh` measures a server, such as
+`zig-out/bin/nethernet-echo` from `zig build echo-install`, against go-nethernet clients from another process.
+`tools/bench-matrix.sh` runs the stress workloads against several native builds, alternating them so drift
+affects each alike.
 
 ## License
 
