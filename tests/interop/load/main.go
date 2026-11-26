@@ -56,13 +56,25 @@ func serve(addr string) {
 					if err != nil {
 						return
 					}
-					if _, err := c.Send(data, r); err != nil {
+					if _, err := c.Send(data, reliabilityOf(data, r)); err != nil {
 						return
 					}
 				}
 			}()
 		}
 	}
+}
+
+// Every tenth message is unreliable. Newer go-nethernet receives either kind from both channels, so the
+// echo and the counts go by the sequence instead of the channel a message came from.
+func reliabilityOf(data []byte, fallback nethernet.MessageReliability) nethernet.MessageReliability {
+	if len(data) < 8 {
+		return fallback
+	}
+	if binary.LittleEndian.Uint64(data)%10 == 0 {
+		return nethernet.MessageReliabilityUnreliable
+	}
+	return nethernet.MessageReliabilityReliable
 }
 
 // Same mix as the stress harness bedrock profile.
@@ -133,10 +145,12 @@ func load(addr string, n, rate int, duration time.Duration, dialers int) {
 		if conn == nil {
 			continue
 		}
-		var lastReliable atomic.Uint64
 		for _, r := range []nethernet.MessageReliability{nethernet.MessageReliabilityReliable, nethernet.MessageReliabilityUnreliable} {
 			go func() {
 				var local []time.Duration
+				// Each receiver sees an increasing share of the reliable stream, which go-nethernet may
+				// hand to either of them.
+				var lastReliable uint64
 				defer func() { s.mu.Lock(); s.rtts = append(s.rtts, local...); s.mu.Unlock() }()
 				for {
 					data, err := conn.Receive(r)
@@ -148,11 +162,11 @@ func load(addr string, n, rate int, duration time.Duration, dialers int) {
 						continue
 					}
 					sequence := binary.LittleEndian.Uint64(data)
-					if r == nethernet.MessageReliabilityReliable {
-						if sequence <= lastReliable.Load() {
+					if reliabilityOf(data, r) == nethernet.MessageReliabilityReliable {
+						if sequence <= lastReliable {
 							s.reordered.Add(1)
 						}
-						lastReliable.Store(sequence)
+						lastReliable = sequence
 						s.received.Add(1)
 					} else {
 						s.unreliableReceived.Add(1)
@@ -175,10 +189,7 @@ func load(addr string, n, rate int, duration time.Duration, dialers int) {
 				size := payloadSize(sequence)
 				binary.LittleEndian.PutUint64(buffer, sequence)
 				binary.LittleEndian.PutUint64(buffer[8:], uint64(time.Since(epoch)))
-				r := nethernet.MessageReliabilityReliable
-				if sequence%10 == 0 {
-					r = nethernet.MessageReliabilityUnreliable
-				}
+				r := reliabilityOf(buffer, nethernet.MessageReliabilityReliable)
 				if _, err := conn.Send(buffer[:size], r); err != nil {
 					return
 				}
