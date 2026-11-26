@@ -4,7 +4,7 @@
  	char mMasterSecret[48];
  	char mRandBytes[64];
  	mbedtls_tls_prf_types mTlsProfile = MBEDTLS_SSL_TLS_PRF_NONE;
-+	std::atomic<bool> mPeerVerified = false;
++	bool mPeerVerified = false; // set by CertificateCallback during the handshake
  
 +	static const int *PreferredCiphersuites();
  	static int CertificateCallback(void *ctx, mbedtls_x509_crt *crt, int depth, uint32_t *flags);
