@@ -26,3 +26,8 @@ artifacts/
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# Local tooling
+.code-review-graph/
+.claude/
+.mcp.json
