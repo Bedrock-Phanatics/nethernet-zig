@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const auth = @import("../auth/sdp.zig");
+const codec = @import("../discovery/codec.zig");
 const discovery_client = @import("../discovery/client.zig");
 const Discovery = discovery_client.Discovery;
 const wake = @import("../internal/wakeup.zig");
@@ -16,6 +17,9 @@ pub const Options = struct {
     maximum_offers_per_second: u32 = 16,
     /// Signaled on discovery traffic and negotiation progress instead of the listener's own wakeup.
     wakeup: ?*wake.Wakeup = null,
+    /// Vanilla LAN hosts answer without an identity, which keeps an answer within one datagram for consoles.
+    /// go-nethernet before its LAN fit change rejects such answers, so sign them for those clients.
+    sign_answers: bool = false,
 };
 
 pub const Listener = struct {
@@ -51,11 +55,10 @@ pub const Listener = struct {
         @memset(pending, null);
 
         var actual_options = options;
-        if (actual_options.connection.identity == null and
+        if (options.sign_answers and actual_options.connection.identity == null and
             actual_options.connection.server_identity_key == null)
         {
-            actual_options.connection.server_identity_key =
-                auth.KeyPair.generate(discovery.io);
+            actual_options.connection.server_identity_key = auth.KeyPair.generate(discovery.io);
         }
 
         self.* = .{
@@ -139,6 +142,7 @@ pub const Listener = struct {
             try self.handle(signal);
         }
 
+        var fitted: [maximum_signal_length]u8 = undefined;
         for (self.pending) |*slot| {
             const connection = slot.* orelse continue;
 
@@ -158,7 +162,7 @@ pub const Listener = struct {
             if (event) |value| {
                 switch (value) {
                     // One peer failing must not hold up the others
-                    .signal => |signal| self.discovery.send(signal) catch {
+                    .signal => |signal| self.discovery.send(fitSignal(signal, &fitted)) catch {
                         connection.destroy();
                         slot.* = null;
                     },
@@ -225,6 +229,7 @@ pub const Listener = struct {
         var connection_options = self.options.connection;
         // Vanilla hosts send their candidates in the answer, a lost LAN candidate packet can't stall the join.
         connection_options.native.disable_trickle = true;
+        connection_options.send_identity = self.options.sign_answers;
 
         var local_buf: [20]u8 = undefined;
         connection_options.local_network_id = try std.fmt.bufPrint(
@@ -307,6 +312,8 @@ pub fn dial(
 
     var connection_options = options;
     connection_options.local_network_id = local_id;
+    // Vanilla hosts answer without an identity over LAN; one that is sent is still verified.
+    if (options.verify_server == null) connection_options.allow_anonymous = true;
 
     var random: [8]u8 = undefined;
     discovery.io.random(&random);
@@ -358,6 +365,93 @@ pub fn dial(
     }
 
     return connection;
+}
+
+/// Vanilla declares at most this much message data, and Xbox consoles lose an answer split into IP fragments.
+const maximum_signal_length = codec.maximum_declared_message_data;
+
+/// Drops the last candidates until the signal fits one discovery datagram, keeping at least one.
+fn fitSignal(signal: Signal, buffer: *[maximum_signal_length]u8) Signal {
+    const limit = maximum_signal_length - (signal.kind.len + 2 + std.fmt.count("{d}", .{signal.connection_id}));
+    if (signal.data.len <= limit) return signal;
+
+    var keep = candidateCount(signal.data);
+    var size = signal.data.len;
+    while (keep > 1 and size > limit) {
+        keep -= 1;
+        size -= candidateLine(signal.data, keep).len;
+    }
+    if (size > limit) return signal;
+
+    var length: usize = 0;
+    var seen: usize = 0;
+    var lines: Lines = .{ .data = signal.data };
+    while (lines.next()) |line| {
+        if (isCandidate(line)) {
+            defer seen += 1;
+            if (seen >= keep) continue;
+        }
+        @memcpy(buffer[length..][0..line.len], line);
+        length += line.len;
+    }
+    var fitted = signal;
+    fitted.data = buffer[0..length];
+    return fitted;
+}
+
+const Lines = struct {
+    data: []const u8,
+    start: usize = 0,
+
+    /// Each line with its ending.
+    fn next(self: *Lines) ?[]const u8 {
+        if (self.start == self.data.len) return null;
+        const end = if (std.mem.indexOfScalarPos(u8, self.data, self.start, '\n')) |newline| newline + 1 else self.data.len;
+        defer self.start = end;
+        return self.data[self.start..end];
+    }
+};
+
+fn isCandidate(line: []const u8) bool {
+    return std.mem.startsWith(u8, line, "a=candidate:");
+}
+
+fn candidateCount(sdp: []const u8) usize {
+    var count: usize = 0;
+    var lines: Lines = .{ .data = sdp };
+    while (lines.next()) |line| count += @intFromBool(isCandidate(line));
+    return count;
+}
+
+fn candidateLine(sdp: []const u8, index: usize) []const u8 {
+    var seen: usize = 0;
+    var lines: Lines = .{ .data = sdp };
+    while (lines.next()) |line| {
+        if (!isCandidate(line)) continue;
+        if (seen == index) return line;
+        seen += 1;
+    }
+    unreachable;
+}
+
+test "answers drop their last candidates to fit one datagram" {
+    const head = "v=0\r\na=x:" ++ @as([950]u8, @splat('y')) ++ "\r\n";
+    const first = "a=candidate:1 1 udp 2130706431 192.168.1.2 50000 typ host\r\n";
+    const second = "a=candidate:2 1 udp 2130706175 fd00::2 50001 typ host\r\n";
+    const third = "a=candidate:3 1 udp 2130705919 10.0.0.2 50002 typ host\r\n";
+    const tail = "a=end-of-candidates\r\n";
+    var buffer: [maximum_signal_length]u8 = undefined;
+
+    const short: Signal = .{ .kind = Signal.answer, .connection_id = 7, .data = head ++ first ++ tail };
+    try std.testing.expectEqualStrings(short.data, fitSignal(short, &buffer).data);
+
+    const long: Signal = .{ .kind = Signal.answer, .connection_id = 7, .data = head ++ first ++ second ++ third ++ tail };
+    const fitted = fitSignal(long, &buffer);
+    try std.testing.expectEqualStrings(head ++ first ++ second ++ tail, fitted.data);
+    try std.testing.expect(Signal.answer.len + 3 + fitted.data.len <= maximum_signal_length);
+
+    const huge: Signal = .{ .kind = Signal.answer, .connection_id = 7, .data = head ++ @as([400]u8, @splat('y')) ++ first ++ second };
+    try std.testing.expectEqualStrings(huge.data, fitSignal(huge, &buffer).data);
 }
 
 test "LAN offers are rate limited across every sender" {

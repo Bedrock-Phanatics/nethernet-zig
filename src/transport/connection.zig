@@ -196,6 +196,8 @@ pub const Options = struct {
     /// A configured verifier still requires an identity.
     allow_anonymous: bool = false,
     identity: ?auth.Identity = null,
+    /// Whether local descriptions carry an identity assertion. Vanilla sends none over LAN.
+    send_identity: bool = true,
     server_identity_key: ?auth.KeyPair = null,
     server_identity_domain: []const u8 = "self",
     verify_server: ?auth.Verifier = null,
@@ -458,7 +460,9 @@ pub const Connection = struct {
 
         self.options.local_network_id = local_id;
 
-        if (role == .server and self.options.identity == null) {
+        if (!self.options.send_identity) {
+            self.options.identity = null;
+        } else if (role == .server and self.options.identity == null) {
             const key = self.options.server_identity_key orelse
                 jwt.Scheme.KeyPair.generate(io);
             const timestamp = std.Io.Clock.real.now(io).toSeconds();

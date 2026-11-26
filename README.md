@@ -53,6 +53,10 @@ caller can fall back to another transport. HTTP joins the server refuses fail wi
 `error.ServiceUnavailable` or `error.HttpFailure`. Once the remote description is set, ICE, DTLS and SCTP
 get `connection_timeout_ms` (15 seconds, a vanilla client's ICE window), and `request_timeout_ms` (20
 seconds) bounds a whole HTTP join. LAN hosts send their candidates in the answer, as vanilla hosts do.
+Like vanilla, LAN answers carry no identity and drop their last candidates to stay within the 1140 bytes
+a discovery message declares, since Xbox consoles lose an answer split into IP fragments. go-nethernet before
+its LAN fit change rejects such answers; `LanListenerOptions.sign_answers` signs them for those clients. Without
+`verify_server`, `dialLan` accepts an answer without an identity, and still verifies one that has it.
 
 
 | API | Purpose |

@@ -122,7 +122,9 @@ test "LAN discovery signaling negotiates WebRTC with trickle ICE" {
     const listener = try Listener.listen(allocator, server_discovery, options);
     defer listener.destroy();
 
-    const restored_listener = try Listener.listen(allocator, client_discovery, options);
+    var signing = options;
+    signing.sign_answers = true;
+    const restored_listener = try Listener.listen(allocator, client_discovery, signing);
     defer restored_listener.destroy();
 
     var dialing = try io.concurrent(
@@ -141,7 +143,8 @@ test "LAN discovery signaling negotiates WebRTC with trickle ICE" {
     taken = true;
     defer client.destroy();
 
-    try std.testing.expect(client.public_key != null);
+    // Like vanilla, a LAN host answers without an identity.
+    try std.testing.expect(client.public_key == null);
     const transfer_started = std.Io.Clock.awake.now(io);
     try client.send("LAN application payload", .reliable);
     const received = try @import("concurrency.zig").receiveDeadline(server, transfer_started);
@@ -171,6 +174,7 @@ test "LAN discovery signaling negotiates WebRTC with trickle ICE" {
     const reverse_client = try reverse_dialing.await(io);
     reverse_taken = true;
     defer reverse_client.destroy();
+    try std.testing.expect(reverse_client.public_key != null);
 }
 
 test "LAN host bounds malformed traffic and server count" {
