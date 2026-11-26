@@ -33,6 +33,8 @@ const Config = struct {
     rtc_threads: u32 = 0,
     slow_server_ms: u32 = 0,
     disconnect_at_ms: u64 = 0,
+    /// Poll every connection on each wake, as a shared `Wakeup` forces, instead of only flagged ones.
+    scan: bool = false,
     rto_min_ms: u31 = 0,
     rto_initial_ms: u31 = 0,
     sack_delay_ms: i32 = 0,
@@ -85,9 +87,35 @@ const CountingAllocator = struct {
     }
 };
 
+/// Set from a connection's callback, so a pass only polls connections with something new.
+const Flag = struct {
+    wakeup: *nethernet.Wakeup,
+    io: std.Io,
+    scan: bool,
+    set: std.atomic.Value(bool) = .init(true),
+
+    fn call(context: *anyopaque) void {
+        const self: *Flag = @ptrCast(@alignCast(context));
+        self.set.store(true, .release);
+        self.wakeup.signal(self.io);
+    }
+
+    fn take(self: *Flag) bool {
+        if (self.scan) return true;
+        return self.set.load(.monotonic) and self.set.swap(false, .acquire);
+    }
+
+    fn attach(self: *Flag, connection: *Connection) void {
+        if (self.scan) connection.peer.subscribe(self.wakeup) else connection.setCallback(.{ .context = self, .call = call });
+    }
+};
+
+const Flags = struct { client: Flag, server: Flag };
+
 const Pair = struct {
     client: *Connection,
     server: *Connection,
+    flags: *Flags,
 
     fn destroy(self: Pair) void {
         self.client.destroy();
@@ -209,6 +237,12 @@ pub fn main(init: std.process.Init) !void {
     var wakeup: nethernet.Wakeup = .{};
     const rss_process_start = residentBytes(io);
 
+    const flags = try allocator.alloc(Flags, config.connections);
+    defer allocator.free(flags);
+    for (flags) |*pair_flags| {
+        const flag: Flag = .{ .wakeup = &wakeup, .io = io, .scan = config.scan };
+        pair_flags.* = .{ .client = flag, .server = flag };
+    }
     const pairs = try allocator.alloc(Pair, config.connections);
     defer allocator.free(pairs);
     var created: usize = 0;
@@ -217,7 +251,7 @@ pub fn main(init: std.process.Init) !void {
     const heap_before_pairs = counting.live_bytes.load(.monotonic);
     const create_started = std.Io.Clock.awake.now(io);
     while (created < pairs.len) : (created += 1) {
-        pairs[created] = try createPair(allocator, io, created, config, &wakeup);
+        pairs[created] = try createPair(allocator, io, created, config, &flags[created]);
     }
     const setup_started = std.Io.Clock.awake.now(io);
     for (pairs) |pair| try pair.client.start();
@@ -342,7 +376,7 @@ pub fn main(init: std.process.Init) !void {
                 if (state.phase != .active) continue;
                 if (state.churn_due) {
                     if (state.pending_count == 0)
-                        progress = beginReconnect(allocator, io, pair, state, index, config, &metrics, now_ns, &wakeup) or progress;
+                        progress = beginReconnect(allocator, io, pair, state, index, config, &metrics, now_ns) or progress;
                     continue;
                 }
                 progress = sendDue(io, run_started, pair, state, &metrics, payload, config, now_ns) or progress;
@@ -466,7 +500,7 @@ pub fn main(init: std.process.Init) !void {
         metrics.disconnects_detected != metrics.disconnects) return error.StressFailure;
 }
 
-fn createPair(allocator: std.mem.Allocator, io: std.Io, index: usize, config: Config, wakeup: *nethernet.Wakeup) !Pair {
+fn createPair(allocator: std.mem.Allocator, io: std.Io, index: usize, config: Config, flags: *Flags) !Pair {
     var options: nethernet.ConnectionOptions = .{
         .native = .{ .disable_trickle = true },
         .allow_anonymous = true,
@@ -480,9 +514,9 @@ fn createPair(allocator: std.mem.Allocator, io: std.Io, index: usize, config: Co
     // Mux on both ends would put every agent in this process on one socket.
     options.native.enable_ice_udp_mux = config.ice_udp_mux;
     const server = try Connection.create(allocator, io, .server, id, "client", options);
-    client.peer.subscribe(wakeup);
-    server.peer.subscribe(wakeup);
-    return .{ .client = client, .server = server };
+    flags.client.attach(client);
+    flags.server.attach(server);
+    return .{ .client = client, .server = server, .flags = flags };
 }
 
 fn negotiateAll(pairs: []Pair, io: std.Io, timeout_ms: u32, wakeup: *nethernet.Wakeup) !void {
@@ -588,6 +622,7 @@ fn sendDue(io: std.Io, run_started: std.Io.Timestamp, pair: *Pair, state: *State
 }
 
 fn pumpServer(pair: *Pair, state: *State, metrics: *Metrics, budget: usize) !bool {
+    if (!pair.flags.server.take()) return false;
     var progress = false;
     for (0..budget) |_| {
         const event = try pair.server.poll() orelse break;
@@ -606,11 +641,12 @@ fn pumpServer(pair: *Pair, state: *State, metrics: *Metrics, budget: usize) !boo
             metrics.send_failures += 1;
             metrics.failures += 1;
         };
-    }
+    } else pair.flags.server.set.store(true, .monotonic);
     return progress;
 }
 
 fn pumpClient(io: std.Io, run_started: std.Io.Timestamp, pair: *Pair, state: *State, metrics: *Metrics, histogram: *Histogram, config: Config) !bool {
+    if (!pair.flags.client.take()) return false;
     var progress = false;
     for (0..config.poll_budget) |_| {
         const event = try pair.client.poll() orelse break;
@@ -642,7 +678,7 @@ fn pumpClient(io: std.Io, run_started: std.Io.Timestamp, pair: *Pair, state: *St
         state.pending_count -= 1;
         state.completed_since_churn += 1;
         if (config.churn_messages != 0 and state.completed_since_churn >= config.churn_messages) state.churn_due = true;
-    }
+    } else pair.flags.client.set.store(true, .monotonic);
     return progress;
 }
 
@@ -699,11 +735,10 @@ fn beginReconnect(
     config: Config,
     metrics: *Metrics,
     now_ns: i96,
-    wakeup: *nethernet.Wakeup,
 ) bool {
     state.churn_due = false;
     state.completed_since_churn = 0;
-    const replacement = createPair(allocator, io, index, config, wakeup) catch {
+    const replacement = createPair(allocator, io, index, config, pair.flags) catch {
         metrics.negotiation_failures += 1;
         metrics.failures += 1;
         return false;
