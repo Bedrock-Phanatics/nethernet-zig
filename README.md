@@ -98,6 +98,8 @@ reading is paused, what SCTP had already accepted is handed over on the close in
 connection fails behind what it already took, which is still read in order, and
 `callbackStats().spill_overflows` counts it. Tearing a connection down sends a DTLS
 close_notify, so the peer sees the close at once instead of when ICE consent expires.
+DTLS prefers AES-128-GCM, which mbedTLS runs on AES-NI, over its portable ChaCha20, and a handshake fails
+unless the peer's certificate matched the fingerprint in its description.
 
 A lost reliable message waits for SCTP's retransmission timeout, at least 200 ms by default. Between nethernet
 peers at 20 ms RTT and 1% loss, `Peer.setSctpTimers(.{ .minimum_retransmit_timeout_ms = 50 })` cut the p99 round
