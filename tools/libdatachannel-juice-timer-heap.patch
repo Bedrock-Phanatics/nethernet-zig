@@ -1,6 +1,6 @@
 --- a/deps/libjuice/src/conn_poll.c
 +++ b/deps/libjuice/src/conn_poll.c
-@@ -37,13 +37,24 @@
+@@ -37,13 +37,23 @@
  #ifdef __linux__
  	// The poll loop takes over while any ICE-TCP socket exists, their interest set changes
  	int epoll_fd;
@@ -8,8 +8,7 @@
  	int live;
  	int tcp_count;
  	bool rescan;
-+	// Min-heap of agent deadlines, so a due timer costs O(log n) instead of a pass over every agent.
-+	// Entries an agent has since moved away from are dropped when they surface.
++	// Min-heap of agent deadlines; entries an agent has moved away from are skipped when popped
 +	struct conn_timer *timers;
 +	int timers_count;
 +	int timers_size;
@@ -31,11 +30,11 @@
  #ifdef __linux__
  	bool epoll_udp;
 +	bool timer_set;
-+	timestamp_t timer_time; // earliest heap entry while timer_set
++	timestamp_t timer_time;
  #endif
  } conn_impl_t;
  
-@@ -109,10 +122,91 @@
+@@ -109,10 +122,90 @@
  	conn_impl->epoll_udp = false;
  }
  
@@ -49,7 +48,6 @@
 +		int size = registry_impl->timers_size ? registry_impl->timers_size * 2 : 64;
 +		conn_timer_t *timers = realloc(registry_impl->timers, size * sizeof(conn_timer_t));
 +		if (!timers) {
-+			// Retried by a full sweep, which reschedules every agent
 +			JLOG_ERROR("Memory allocation failed for connection timers");
 +			registry_impl->rescan = true;
 +			return;

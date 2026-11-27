@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Linux only. Drives an echo server with go-nethernet load clients from another process and reports the
-# server's CPU and RSS over the traffic window, as one JSON line. {addr} in the command becomes its address.
+# Linux only. {addr} in the server command becomes its address.
 # usage: tools/bench-server.sh <connections> <rate> <seconds> <server command...>
 #   tools/bench-server.sh 500 20 10 zig-out/bin/nethernet-echo {addr}
 #   tools/bench-server.sh 500 20 10 zig-out/bin/nethernet-load -mode serve -addr {addr}
@@ -33,6 +32,5 @@ while IFS= read -r line; do
     esac
 done < <(zig-out/bin/nethernet-load -addr "$addr" -n "$connections" -rate "$rate" -duration "${seconds}s" 2>&1)
 
-# Clock ticks are 1/100 s, so ticks per second read as percent of one core.
 cpu=$(awk -v t=$((end_ticks - start_ticks)) -v s="$start" -v e="$end" 'BEGIN {printf "%.1f", t / (e - s)}')
 echo "{\"connections\":$connections,\"rate\":$rate,\"server_cpu_percent\":$cpu,\"server_rss_kib_per_connection\":$(((busy_rss - idle_rss) / connections)),\"load\":$result}"
